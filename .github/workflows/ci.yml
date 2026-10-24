@@ -1,9 +1,9 @@
 name: CI
 
+# Manual only: the private repo has no Actions minutes, so push-triggered runs would only fail.
+# Restore `push: branches: [main]` and `pull_request:` once runs are paid for.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
