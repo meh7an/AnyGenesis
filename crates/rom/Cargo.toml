@@ -5,3 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
+anygenesis-shared = { version = "0.1.0", path = "../shared" }
+sha1_smol = "1.0.1"
+thiserror = "2.0.21"
