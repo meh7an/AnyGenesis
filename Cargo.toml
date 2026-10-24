@@ -4,6 +4,7 @@ members = [
     "crates/analysis",
     "crates/gamecfg",
     "crates/m68k",
+    "crates/oracle",
     "crates/recomp",
     "crates/rom",
     "crates/shared",

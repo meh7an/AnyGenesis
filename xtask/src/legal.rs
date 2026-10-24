@@ -5,11 +5,13 @@ use std::{
     fmt,
     fs::File,
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, ExitCode},
 };
 
 use anyhow::{Context, Result, bail};
+
+use crate::workspace_root;
 
 /// Nothing hand-written in this repository comes near this size; ROM images all exceed it.
 const MAX_FILE_SIZE: u64 = 1024 * 1024;
@@ -97,14 +99,6 @@ fn has_rom_extension(path: &Path) -> bool {
             .iter()
             .any(|rom| ext.eq_ignore_ascii_case(rom))
     })
-}
-
-fn workspace_root() -> Result<PathBuf> {
-    // xtask always sits one directory below the workspace root.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .context("xtask manifest directory has no parent")
 }
 
 fn candidate_files(root: &Path) -> Result<Vec<String>> {
