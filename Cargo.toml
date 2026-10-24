@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/analysis",
+    "crates/gamecfg",
+    "crates/m68k",
+    "crates/recomp",
+    "crates/rom",
+    "crates/shared",
+    "xtask",
+]
