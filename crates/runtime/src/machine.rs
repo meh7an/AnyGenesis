@@ -221,6 +221,63 @@ pub(crate) struct Context {
     /// Interrupts taken, by level.
     interrupts: [u64; 8],
     idle: Option<Snapshot>,
+    hook: Option<InterruptHook>,
+}
+
+/// A function [`Runtime::set_interrupt_hook`] calls at every entry of one level's handler.
+struct InterruptHook {
+    level: u8,
+    function: Box<dyn FnMut(&mut InterruptStop<'_>)>,
+}
+
+impl fmt::Debug for InterruptHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InterruptHook")
+            .field("level", &self.level)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The machine at the entry of an interrupt handler, as an interrupt hook sees it: the
+/// exception frame is pushed and the handler has not started. The hook's work takes no
+/// emulated time.
+#[derive(Debug)]
+pub struct InterruptStop<'a> {
+    level: u8,
+    handler: u32,
+    taken: u64,
+    state: &'a AgState,
+    devices: &'a mut Devices,
+}
+
+impl InterruptStop<'_> {
+    pub fn level(&self) -> u8 {
+        self.level
+    }
+
+    /// The handler's address, where execution continues.
+    pub fn handler(&self) -> u32 {
+        self.handler
+    }
+
+    /// Interrupts taken at this level so far, this one included.
+    pub fn taken(&self) -> u64 {
+        self.taken
+    }
+
+    pub fn state(&self) -> &AgState {
+        self.state
+    }
+
+    /// The hardware, if it is a `T`.
+    pub fn hardware<T: Hardware>(&self) -> Option<&T> {
+        (self.devices.hardware.as_ref() as &dyn Any).downcast_ref()
+    }
+
+    /// Sets the buttons held on the pad in port 1, from this point of the run on.
+    pub fn set_pad(&mut self, buttons: Buttons) {
+        self.devices.io.set_pad(buttons);
+    }
 }
 
 impl Context {
@@ -394,6 +451,22 @@ impl Context {
         }
     }
 
+    /// Calls the interrupt hook if it is set for `level`, at the entry of `handler`.
+    fn run_hook(&mut self, state: &AgState, level: u8, handler: u32) {
+        let Some(mut hook) = self.hook.take_if(|hook| hook.level == level) else {
+            return;
+        };
+        let mut stop = InterruptStop {
+            level,
+            handler,
+            taken: self.interrupts[usize::from(level)],
+            state,
+            devices: &mut self.devices,
+        };
+        (hook.function)(&mut stop);
+        self.hook = Some(hook);
+    }
+
     /// `ag_lookup`: the translated function for `address`, else the interpreter.
     pub fn lookup(&mut self, address: u32) -> AgFn {
         if self.too_deep(address) {
@@ -531,7 +604,8 @@ pub(crate) unsafe fn stop(state: *mut AgState, resume: u32) -> u32 {
 }
 
 /// Takes the interrupt at `level` before `pc` and calls its handler natively; returns the
-/// handler's result, `pc` unless it rewrote the stacked PC.
+/// handler's result, `pc` unless it rewrote the stacked PC. The interrupt hook, if one is
+/// set for `level`, runs between the two.
 ///
 /// # Safety
 /// As for [`check`].
@@ -540,6 +614,7 @@ unsafe fn interrupt(state: *mut AgState, level: u8, pc: u32) -> u32 {
     unsafe {
         let (st, ctx) = parts(state);
         let handler = ctx.enter_interrupt(st, level, pc);
+        ctx.run_hook(st, level, handler);
         let function = ctx.lookup(handler);
         function(state, handler)
     }
@@ -742,6 +817,7 @@ impl Runtime {
             frame_limit: None,
             interrupts: [0; 8],
             idle: None,
+            hook: None,
         });
         Self {
             rom,
@@ -856,5 +932,19 @@ impl Runtime {
     /// Sets the buttons held on the pad in port 1.
     pub fn set_pad(&mut self, buttons: Buttons) {
         self.context.devices.io.set_pad(buttons);
+    }
+
+    /// Calls `hook` at every entry of the level `level` handler from now on, replacing any
+    /// earlier hook: after the exception frame is pushed, before the handler's first
+    /// instruction, which is where a debugger breakpoint on the handler stops.
+    pub fn set_interrupt_hook(
+        &mut self,
+        level: u8,
+        hook: impl FnMut(&mut InterruptStop<'_>) + 'static,
+    ) {
+        self.context.hook = Some(InterruptHook {
+            level,
+            function: Box::new(hook),
+        });
     }
 }

@@ -79,6 +79,10 @@ fn game_items(game: &str, translation: &Translation) -> String {
     for entry in build::vector_handlers(analysis) {
         write!(handlers, "0x{entry:06X}, ").expect("writing to a String cannot fail");
     }
+    let mut entries = String::new();
+    for entry in analysis.functions.keys() {
+        write!(entries, "0x{:06X}, ", entry.get()).expect("writing to a String cannot fail");
+    }
     format!(
         "unsafe extern \"C\" {{\n    \
          static ag_table: anygenesis_abi::AgEntry;\n    \
@@ -94,7 +98,8 @@ fn game_items(game: &str, translation: &Translation) -> String {
          sha1: {sha1:?},\n        \
          functions: {functions},\n        \
          table,\n        \
-         vector_handlers: &[{handlers}],\n    }})\n}}\n",
+         vector_handlers: &[{handlers}],\n        \
+         function_entries: &[{entries}],\n    }})\n}}\n",
         sha1 = analysis.sha1,
         functions = analysis.functions.len(),
     )

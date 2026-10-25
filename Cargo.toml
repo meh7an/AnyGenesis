@@ -5,6 +5,7 @@ members = [
     "crates/analysis",
     "crates/c-oracle",
     "crates/codegen-c",
+    "crates/framediff",
     "crates/game",
     "crates/gamecfg",
     "crates/ir",

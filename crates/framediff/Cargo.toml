@@ -1,0 +1,16 @@
+[package]
+name = "anygenesis-framediff"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "framediff"
+path = "src/main.rs"
+
+[dependencies]
+anygenesis-rom = { version = "0.1.0", path = "../rom" }
+anyhow = "1.0.104"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.1.8"

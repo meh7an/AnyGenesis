@@ -1,4 +1,5 @@
-//! Legal guard: keeps ROM images and other large binaries out of the repository.
+//! Legal guard: keeps ROM images, other large binaries, and the external reference
+//! emulator's programs and scripts out of the repository.
 
 use std::{
     ffi::OsStr,
@@ -25,12 +26,24 @@ const HEADER_OFFSET: usize = 0x100;
 const HEADER_MAGIC: &[u8] = b"SEGA";
 const HEAD_LEN: usize = HEADER_OFFSET + HEADER_MAGIC.len();
 
+/// Programs and libraries: the reference emulator (and any other tool) runs from outside the
+/// repository, so none is ever committed.
+const NATIVE_EXTENSIONS: [&str; 4] = ["exe", "dll", "so", "dylib"];
+/// Windows (MZ) and ELF executables and libraries start with these.
+const NATIVE_MAGICS: [&[u8]; 2] = [b"MZ", b"\x7FELF"];
+
+/// The first line of every reference emulator debugger script the frame diff writes; the
+/// scripts and the dumps they save stay outside the repository.
+const SCRIPT_MAGIC: &[u8] = b"breakpoint $";
+
 /// A rule a candidate file breaks.
 #[derive(Debug, PartialEq, Eq)]
 enum Violation {
     TooLarge { size: u64 },
     RomExtension,
     RomHeader,
+    NativeBinary,
+    DebuggerScript,
 }
 
 impl fmt::Display for Violation {
@@ -41,6 +54,15 @@ impl fmt::Display for Violation {
             }
             Self::RomExtension => write!(f, "has a ROM image extension (.bin, .gen, .smd)"),
             Self::RomHeader => write!(f, "has a Genesis ROM header (\"SEGA\" at offset 0x100)"),
+            Self::NativeBinary => write!(
+                f,
+                "is a native program or library (emulators and other tools run from outside \
+                 the repository)"
+            ),
+            Self::DebuggerScript => write!(
+                f,
+                "is a reference emulator debugger script (generate it outside the repository)"
+            ),
         }
     }
 }
@@ -71,7 +93,10 @@ pub(crate) fn run() -> Result<ExitCode> {
     }
 
     if failed {
-        eprintln!("legal guard failed: ROM images and ROM-derived data never enter the repository");
+        eprintln!(
+            "legal guard failed: ROM images, ROM-derived data and external tools never enter \
+             the repository"
+        );
         return Ok(ExitCode::FAILURE);
     }
     println!("legal guard passed: {} files checked", files.len());
@@ -84,20 +109,28 @@ fn check_file(path: &Path, size: u64, head: &[u8]) -> Vec<Violation> {
     if size > MAX_FILE_SIZE {
         violations.push(Violation::TooLarge { size });
     }
-    if has_rom_extension(path) {
+    if has_extension(path, &ROM_EXTENSIONS) {
         violations.push(Violation::RomExtension);
     }
     if head.get(HEADER_OFFSET..HEAD_LEN) == Some(HEADER_MAGIC) {
         violations.push(Violation::RomHeader);
     }
+    if has_extension(path, &NATIVE_EXTENSIONS)
+        || NATIVE_MAGICS.iter().any(|magic| head.starts_with(magic))
+    {
+        violations.push(Violation::NativeBinary);
+    }
+    if head.starts_with(SCRIPT_MAGIC) {
+        violations.push(Violation::DebuggerScript);
+    }
     violations
 }
 
-fn has_rom_extension(path: &Path) -> bool {
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
-        ROM_EXTENSIONS
+        extensions
             .iter()
-            .any(|rom| ext.eq_ignore_ascii_case(rom))
+            .any(|known| ext.eq_ignore_ascii_case(known))
     })
 }
 
@@ -214,6 +247,25 @@ mod tests {
         assert!(check("xtask/src/main.rs", b"fn main() {}\n").is_empty());
         assert!(check("README.md", b"# AnyGenesis\n").is_empty());
         assert!(check("games/sonic1.toml", b"sha1 = \"\"\n").is_empty());
+    }
+
+    #[test]
+    fn test_check_file_native_programs_rejected() {
+        for path in ["tools/blastem.exe", "SDL2.DLL", "lib/libSDL2.so", "x.dylib"] {
+            assert_eq!(check(path, b"tiny"), [Violation::NativeBinary], "{path}");
+        }
+        assert_eq!(
+            check("tools/blastem", b"\x7FELF\x02\x01"),
+            [Violation::NativeBinary]
+        );
+        assert_eq!(check("tools/run", b"MZ\x90\x00"), [Violation::NativeBinary]);
+    }
+
+    #[test]
+    fn test_check_file_debugger_script_rejected() {
+        let script = b"breakpoint $B10\ncontinue\nsave \"00001-ram.bin\" [$FF0000] $10000\n";
+        assert_eq!(check("dumps.txt", script), [Violation::DebuggerScript]);
+        assert!(check("notes.md", b"A breakpoint $B10 line in prose\n").is_empty());
     }
 
     #[test]

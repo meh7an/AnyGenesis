@@ -49,10 +49,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "anygenesis-framediff"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-rom",
+ "anyhow",
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "anygenesis-game"
 version = "0.1.0"
 dependencies = [
  "anygenesis-abi",
+ "anygenesis-framediff",
  "anygenesis-recomp",
  "anygenesis-rom",
  "anygenesis-runtime",

@@ -5,25 +5,43 @@
 //! raises the vertical and horizontal interrupts and draws the picture. It reports where the
 //! run ended, what the VDP holds and what the runtime logged on the way, and saves the
 //! frames asked for with `--dump` as BMP files in `dumps/` under the working directory.
+//!
+//! For the frame diff, `--state <folder>` saves the machine state at every vertical
+//! interrupt handler entry in the frame diff's dump layout, on a console without TMSS like
+//! the reference emulator's, and `--input <file>` replays pad input from the frame diff's
+//! input format at the same points.
 
 mod game;
 
 use std::{
+    cell::RefCell,
     env, fs,
     path::{Path, PathBuf},
+    rc::Rc,
     thread,
 };
 
-use anygenesis_abi::{AgEntry, RAM_SIZE, ram_index};
+use anygenesis_abi::{AgState, RAM_SIZE, ram_index};
+use anygenesis_framediff::{Dump, Input, Region, dump};
 use anygenesis_rom::{Rom, Sha1Digest};
-use anygenesis_runtime::{Access, Exit, Miss, Options, RUN_STACK, Runtime, Vdp, vdp::Frame};
+use anygenesis_runtime::{
+    Access, Buttons, Exit, Hardware, InterruptStop, Miss, Options, RUN_STACK, Runtime, Vdp,
+    io::{VERSION_NO_EXPANSION, VERSION_OVERSEAS},
+    vdp::Frame,
+};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::game::CompiledGame;
 
 const ROM_VAR: &str = "ANYGENESIS_ROM";
 const USAGE: &str = "usage: anygenesis [<rom.bin> [<frames>]] [--dump <frame>[,<frame>...]] \
-                     (the ROM may come from ANYGENESIS_ROM)";
+                     [--state <folder>] [--input <file>] (the ROM may come from \
+                     ANYGENESIS_ROM)";
+/// The vertical interrupt's level: the frame diff stops at its handler's entry.
+const VBLANK_LEVEL: u8 = 6;
+/// The version register of the reference emulator's console: overseas NTSC, no Mega CD,
+/// hardware version 0 (no TMSS).
+const REFERENCE_VERSION: u8 = VERSION_OVERSEAS | VERSION_NO_EXPANSION;
 /// Ten seconds of NTSC frames.
 const DEFAULT_FRAMES: u64 = 600;
 /// The work RAM byte the report shows; Sonic 1 keeps its game mode there.
@@ -44,8 +62,23 @@ fn main() -> Result<()> {
         game.table.len(),
         game.vector_handlers.len()
     );
-    let report = run_from_reset(game.table, rom, arguments.frames, &arguments.dumps)?;
+    let trace = Trace {
+        folder: arguments.state.clone(),
+        input: arguments.input.as_deref().map(Input::load).transpose()?,
+    };
+    if let Some(folder) = &trace.folder {
+        fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
+    }
+    let report = run_from_reset(game, rom, arguments.frames, &arguments.dumps, trace)?;
     report.print();
+    if let Some(folder) = &arguments.state {
+        println!(
+            "state saved at {} vertical interrupts in {} (version register \
+             ${REFERENCE_VERSION:02X})",
+            report.vblanks,
+            folder.display()
+        );
+    }
     for (frame, picture) in &report.pictures {
         let path = dump(game.name, *frame, picture, Path::new(DUMP_FOLDER))?;
         println!("frame {frame} saved to {}", path.display());
@@ -62,14 +95,31 @@ struct Arguments {
     frames: u64,
     /// Frames to save, each from 1 to `frames`, in order.
     dumps: Vec<u64>,
+    /// Where to save the state at every vertical interrupt.
+    state: Option<PathBuf>,
+    /// The pad input to replay.
+    input: Option<PathBuf>,
 }
 
 impl Arguments {
     fn parse() -> Result<Self> {
         let mut positional = Vec::new();
         let mut dumps = Vec::new();
+        let (mut state, mut input) = (None, None);
         let mut arguments = env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
+            let path = match argument.to_str() {
+                Some("--state") => Some(&mut state),
+                Some("--input") => Some(&mut input),
+                _ => None,
+            };
+            if let Some(path) = path {
+                let value = arguments.next().context(USAGE)?;
+                if path.replace(PathBuf::from(value)).is_some() {
+                    bail!(USAGE);
+                }
+                continue;
+            }
             if argument != "--dump" {
                 positional.push(argument);
                 continue;
@@ -108,8 +158,99 @@ impl Arguments {
         }
         dumps.sort_unstable();
         dumps.dedup();
-        Ok(Self { rom, frames, dumps })
+        Ok(Self {
+            rom,
+            frames,
+            dumps,
+            state,
+            input,
+        })
     }
+}
+
+/// Where the trace hook leaves its first error; the hook cannot return one.
+type Failure = Rc<RefCell<Option<anyhow::Error>>>;
+
+/// What a run does at every vertical interrupt handler entry for the frame diff.
+#[derive(Debug, Default)]
+struct Trace {
+    /// Where to save the machine state.
+    folder: Option<PathBuf>,
+    /// The pad input to apply.
+    input: Option<Input>,
+}
+
+impl Trace {
+    fn is_empty(&self) -> bool {
+        self.folder.is_none() && self.input.is_none()
+    }
+
+    /// Sets the hook on `runtime`; the first failure to save a stop lands in `failure`, and
+    /// no stop is saved after it.
+    fn hook(self, runtime: &mut Runtime, game: CompiledGame, failure: Failure) {
+        runtime.set_interrupt_hook(VBLANK_LEVEL, move |stop| {
+            let index = stop.taken();
+            if let Some(folder) = &self.folder
+                && failure.borrow().is_none()
+                && let Err(error) = save_stop(folder, index, stop, &game)
+            {
+                *failure.borrow_mut() = Some(error);
+            }
+            if let Some(input) = &self.input {
+                stop.set_pad(Buttons(input.at(index).0));
+            }
+        });
+    }
+}
+
+/// Saves the state at stop `index` in the frame diff's layout, with a note of where the
+/// interrupt came in.
+fn save_stop(
+    folder: &Path,
+    index: u64,
+    stop: &InterruptStop<'_>,
+    game: &CompiledGame,
+) -> Result<()> {
+    let vdp = stop.hardware::<Vdp>().context("the run has no VDP")?;
+    let state = stop.state();
+    let mut dump = Dump::default();
+    dump.region_mut(Region::Ram).copy_from_slice(&state.ram);
+    dump.region_mut(Region::Vram).copy_from_slice(vdp.vram());
+    dump.region_mut(Region::Cram)
+        .copy_from_slice(&big_endian(vdp.cram()));
+    dump.region_mut(Region::Vsram)
+        .copy_from_slice(&big_endian(vdp.vsram()));
+    dump.region_mut(Region::Registers)
+        .copy_from_slice(vdp.registers());
+    dump.write(folder, index)?;
+    dump::write_note(folder, index, &stop_note(index, stop, vdp, game))?;
+    Ok(())
+}
+
+/// What the dump does not hold: when the stop came, and the code the interrupt came in at.
+fn stop_note(index: u64, stop: &InterruptStop<'_>, vdp: &Vdp, game: &CompiledGame) -> String {
+    let state = stop.state();
+    let sp = state.a[7];
+    let stacked_sr = word(state, sp);
+    let interrupted = u32::from(word(state, sp + 2)) << 16 | u32::from(word(state, sp + 4));
+    let function = game
+        .function_at(interrupted)
+        .map_or_else(|| "none".to_owned(), |entry| format!("${entry:06X}"));
+    format!(
+        "stop {index}\nframe {}\nline {}\nhandler ${:06X}\nsp ${sp:08X}\n\
+         interrupted ${interrupted:06X} with sr ${stacked_sr:04X}\nfunction {function}\n",
+        Hardware::frames(vdp),
+        vdp.timing().v_counter(),
+        stop.handler(),
+    )
+}
+
+/// The word at `address` in work RAM.
+fn word(state: &AgState, address: u32) -> u16 {
+    u16::from_be_bytes([
+        state.ram[ram_index(address)],
+        state.ram[ram_index(address + 1)],
+    ])
 }
 
 /// Saves `picture`, frame `frame` of `game`, as a BMP file in `folder`; returns its path.
@@ -164,13 +305,17 @@ struct Report {
 
 /// SHA-1s of the VDP's memories and registers, words in big-endian order, for comparing runs.
 fn vdp_hashes(vdp: &Vdp) -> [(&'static str, Sha1Digest); 4] {
-    let words = |words: &[u16]| -> Vec<u8> { words.iter().flat_map(|w| w.to_be_bytes()).collect() };
     [
         ("VRAM", Sha1Digest::of(vdp.vram())),
-        ("CRAM", Sha1Digest::of(&words(vdp.cram()))),
-        ("VSRAM", Sha1Digest::of(&words(vdp.vsram()))),
+        ("CRAM", Sha1Digest::of(&big_endian(vdp.cram()))),
+        ("VSRAM", Sha1Digest::of(&big_endian(vdp.vsram()))),
         ("registers", Sha1Digest::of(vdp.registers())),
     ]
+}
+
+/// The bytes of `words` in the 68000's order.
+fn big_endian(words: &[u16]) -> Vec<u8> {
+    words.iter().flat_map(|word| word.to_be_bytes()).collect()
 }
 
 impl Report {
@@ -245,28 +390,43 @@ impl Report {
 
 /// Runs from reset on a thread with room for the native stack until `frames` frames have
 /// ended, or the run stops earlier at a wait nothing can end, keeping the pictures of the
-/// frames in `dumps` (ascending, none past `frames`).
+/// frames in `dumps` (ascending, none past `frames`) and doing what `trace` asks at every
+/// vertical interrupt. A run that saves state runs on the reference emulator's console.
 fn run_from_reset(
-    table: &'static [AgEntry],
+    game: CompiledGame,
     rom: Rom,
     frames: u64,
     dumps: &[u64],
+    trace: Trace,
 ) -> Result<Report> {
     let dumps = dumps.to_vec();
     let worker = thread::Builder::new()
         .name("68000".into())
         .stack_size(RUN_STACK)
         .spawn(move || {
+            let defaults = Options::default();
             let options = Options {
                 stop_when_idle: true,
-                ..Options::default()
+                version: if trace.folder.is_some() {
+                    REFERENCE_VERSION
+                } else {
+                    defaults.version
+                },
+                ..defaults
             };
-            let mut runtime = Runtime::new(rom, table, Box::<Vdp>::default(), options);
+            let mut runtime = Runtime::new(rom, game.table, Box::<Vdp>::default(), options);
+            let failure = Failure::default();
+            if !trace.is_empty() {
+                trace.hook(&mut runtime, game, Rc::clone(&failure));
+            }
             let ssp = runtime.state().a[7];
             let reset_pc = runtime.state().pc;
             let (exit, pictures) = run_frames(&mut runtime, frames, &dumps);
+            if let Some(error) = failure.take() {
+                return Err(error.context("saving the state at a vertical interrupt"));
+            }
             let state = runtime.state();
-            Report {
+            Ok(Report {
                 ssp,
                 reset_pc,
                 exit,
@@ -288,12 +448,12 @@ fn run_from_reset(
                 vdp: runtime.hardware::<Vdp>().cloned().unwrap_or_default(),
                 ram: Box::new(state.ram),
                 pictures,
-            }
+            })
         })
         .context("starting the 68000 thread")?;
     worker
         .join()
-        .map_err(|_| anyhow!("the 68000 thread panicked"))
+        .map_err(|_| anyhow!("the 68000 thread panicked"))?
 }
 
 /// Runs until `frames` frames have ended, stopping at each frame in `dumps` (ascending, none
@@ -373,8 +533,14 @@ mod tests {
         let rom = load_rom(&game, Path::new(&path)).expect("the ROM matches the build");
         let registers = title_registers(&rom);
         let dumps = PICTURES.map(|(frame, _)| frame);
+        // An empty input still sets the hook at every vertical interrupt, which must change
+        // nothing below.
+        let trace = Trace {
+            folder: None,
+            input: Some(Input::default()),
+        };
         let report =
-            run_from_reset(game.table, rom, DEFAULT_FRAMES, &dumps).expect("the run finishes");
+            run_from_reset(game, rom, DEFAULT_FRAMES, &dumps, trace).expect("the run finishes");
         let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dumps");
         for (frame, picture) in &report.pictures {
             dump(game.name, *frame, picture, &folder).expect("the picture is saved");

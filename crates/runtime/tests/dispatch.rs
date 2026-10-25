@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::{cell::RefCell, rc::Rc};
+
 use anygenesis_abi::{AgEntry, AgState, ram_index};
 use anygenesis_rom::Rom;
 use anygenesis_runtime::{Exit, Miss, Options, Runtime, UNWIND, Vdp, ag_lookup, ag_stop};
@@ -418,20 +420,63 @@ fn test_depth_guard_unwinds_abandoned_native_frames() {
     assert_eq!(sp, SSP);
 }
 
-/// Runs the interrupt-enabled loop at $900 with vertical interrupts at `events`.
-fn run_interrupted(events: &[u64], max_cycles: u64) -> (Runtime, Exit) {
+/// The interrupt-enabled loop at $900 with vertical interrupts at `events`, ready to run.
+fn interrupted(events: &[u64], options: Options) -> Runtime {
     let events: Vec<(u64, u8)> = events.iter().map(|&at| (at, 6)).collect();
-    let options = Options {
-        max_cycles,
-        ..Options::default()
-    };
     let mut runtime = Runtime::new(rom(), &TABLE, Scripted::new(&events), options);
     let state = runtime.state_mut();
     state.pc = 0x900;
     state.sr = 0x2000;
     state.c = 1;
+    runtime
+}
+
+/// Runs the interrupt-enabled loop at $900 with vertical interrupts at `events`.
+fn run_interrupted(events: &[u64], max_cycles: u64) -> (Runtime, Exit) {
+    let options = Options {
+        max_cycles,
+        ..Options::default()
+    };
+    let mut runtime = interrupted(events, options);
     let exit = runtime.run();
     (runtime, exit)
+}
+
+#[test]
+fn test_interrupt_hook_sees_each_handler_entry_and_changes_nothing() {
+    let events = [1_000, 2_000, 3_000];
+    let (straight, straight_exit) = run_interrupted(&events, 4_000);
+    let options = Options {
+        max_cycles: 4_000,
+        ..Options::default()
+    };
+    let mut hooked = interrupted(&events, options);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&seen);
+    hooked.set_interrupt_hook(6, move |stop| {
+        let state = stop.state();
+        let frame = (
+            state.a[7],
+            state.d[6],
+            stop.hardware::<Scripted>().is_some(),
+        );
+        record
+            .borrow_mut()
+            .push((stop.level(), stop.handler(), stop.taken(), frame));
+    });
+    let exit = hooked.run();
+    assert_eq!(exit, straight_exit);
+    // Each call: the frame pushed, the handler (which counts in d6) not started yet.
+    let expected: Vec<_> = (0..3)
+        .map(|calls| (6, 0x980, calls + 1, (SSP - 6, calls as u32, true)))
+        .collect();
+    assert_eq!(*seen.borrow(), expected);
+    let (state, unhooked) = (hooked.state(), straight.state());
+    assert_eq!(
+        (state.d, state.a, state.sr),
+        (unhooked.d, unhooked.a, unhooked.sr)
+    );
+    assert_eq!(hooked.cycles(), straight.cycles());
 }
 
 #[test]

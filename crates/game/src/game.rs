@@ -4,7 +4,7 @@ use anygenesis_abi::AgEntry;
 use anyhow::{Result, bail};
 
 /// A translated game linked into the binary.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct CompiledGame {
     /// The name of its config in games/.
     pub name: &'static str,
@@ -16,9 +16,22 @@ pub struct CompiledGame {
     pub table: &'static [AgEntry],
     /// Entries of the functions reset and the exception vectors start, ascending.
     pub vector_handlers: &'static [u32],
+    /// Entries of every analysed function, ascending.
+    pub function_entries: &'static [u32],
 }
 
 impl CompiledGame {
+    /// The entry of the function nearest below or at `address`: the one that most likely
+    /// holds it, as functions are not ranges.
+    pub fn function_at(&self, address: u32) -> Option<u32> {
+        let after = self
+            .function_entries
+            .partition_point(|&entry| entry <= address);
+        after
+            .checked_sub(1)
+            .map(|index| self.function_entries[index])
+    }
+
     /// Returns the table row for `address`.
     pub fn row(&self, address: u32) -> Option<&AgEntry> {
         self.table
