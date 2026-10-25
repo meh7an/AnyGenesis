@@ -1,12 +1,13 @@
 //! Interrupt delivery on interpreted 68000 programs: order, nesting, the interrupt mask,
-//! STOP, and NTSC frame timing on the stub VDP. No table rows exist, so every instruction
-//! runs in the interpreter, whose instruction boundaries are check points.
+//! STOP, NTSC frame timing on the VDP and the time a DMA takes from the 68000. No table
+//! rows exist, so every instruction runs in the interpreter, whose instruction boundaries
+//! are check points.
 
 mod common;
 
 use anygenesis_rom::Rom;
 use anygenesis_runtime::{
-    Exit, Hardware, Options, Runtime, StubVdp,
+    Exit, Hardware, Options, Runtime, Vdp,
     timing::{FRAME_CLOCKS, LINE_CLOCKS},
 };
 
@@ -143,13 +144,13 @@ fn frame_program() -> Rom {
     )
 }
 
-fn stub_runtime(options: Options) -> Runtime {
+fn vdp_runtime(options: Options) -> Runtime {
     let options = Options {
         // No TMSS, so the program may touch the VDP at once.
         version: 0xA0,
         ..options
     };
-    Runtime::new(frame_program(), &[], Box::<StubVdp>::default(), options)
+    Runtime::new(frame_program(), &[], Box::<Vdp>::default(), options)
 }
 
 /// The VBlank and HBlank handler counts.
@@ -163,7 +164,7 @@ fn counts(runtime: &Runtime) -> (u16, u16) {
 
 #[test]
 fn test_vertical_interrupt_comes_once_per_frame() {
-    let mut runtime = stub_runtime(Options::default());
+    let mut runtime = vdp_runtime(Options::default());
     assert_eq!(runtime.run_frames(60), Exit::Frames { pc: 0x21C });
     assert_eq!(runtime.frames(), 60);
     // The run ends where the 60th frame does, before its interrupt is taken.
@@ -181,7 +182,7 @@ fn test_vertical_interrupt_comes_once_per_frame() {
 
 #[test]
 fn test_horizontal_interrupt_comes_every_reload_plus_one_lines() {
-    let mut runtime = stub_runtime(Options::default());
+    let mut runtime = vdp_runtime(Options::default());
     runtime.run_frames(2);
     let (vblanks, hblanks) = counts(&runtime);
     runtime.run_frames(10);
@@ -193,7 +194,7 @@ fn test_horizontal_interrupt_comes_every_reload_plus_one_lines() {
 
 #[test]
 fn test_frames_last_their_master_clocks() {
-    let mut runtime = stub_runtime(Options::default());
+    let mut runtime = vdp_runtime(Options::default());
     runtime.run_frames(1);
     let start = runtime.cycles();
     runtime.run_frames(10);
@@ -203,17 +204,64 @@ fn test_frames_last_their_master_clocks() {
         clocks.abs_diff(expected) < 100 * 7,
         "{clocks} master clocks for 10 frames"
     );
-    let vdp = runtime
-        .hardware::<StubVdp>()
-        .expect("the hardware is the stub VDP");
+    let vdp = runtime.hardware::<Vdp>().expect("the hardware is the VDP");
     assert_eq!(vdp.frames(), 11);
 }
 
 #[test]
 fn test_idle_loop_waiting_for_an_enabled_interrupt_is_not_a_hang() {
-    let mut runtime = stub_runtime(Options {
+    let mut runtime = vdp_runtime(Options {
         stop_when_idle: true,
         ..Options::default()
     });
     assert_eq!(runtime.run_frames(5), Exit::Frames { pc: 0x21C });
+}
+
+/// Sets register 1 to `mode` and asks for a 68K-to-VRAM DMA of 0x400 words from ROM 0,
+/// then counts in D0 until the cycle cap.
+fn dma_program(mode: u16) -> Rom {
+    let main: &[u16] = &[
+        0x4BF9, 0x00C0, 0x0004, // lea $C00004,a5
+        0x3ABC, mode, // move.w #mode,(a5)
+        0x3ABC, 0x8F02, // move.w #$8F02,(a5): increment 2
+        0x3ABC, 0x9300, // move.w #$9300,(a5): length 0x0400 words
+        0x3ABC, 0x9404, // move.w #$9404,(a5)
+        0x3ABC, 0x9500, // move.w #$9500,(a5): source 0
+        0x3ABC, 0x9600, // move.w #$9600,(a5)
+        0x3ABC, 0x9700, // move.w #$9700,(a5)
+        0x2ABC, 0x4000, 0x0080, // move.l #$40000080,(a5): VRAM write at 0, DMA
+        0x5280, // loop: addq.l #1,d0
+        0x60FC, // bra.s loop
+    ];
+    image(0x200, &[], &[(0x200, main)])
+}
+
+fn run_dma_program(mode: u16) -> Runtime {
+    let options = Options {
+        version: 0xA0,
+        max_cycles: 50_000,
+        ..Options::default()
+    };
+    let mut runtime = Runtime::new(dma_program(mode), &[], Box::<Vdp>::default(), options);
+    runtime.run();
+    runtime
+}
+
+#[test]
+fn test_dma_from_68000_memory_freezes_the_program_for_its_duration() {
+    let with_dma = run_dma_program(0x8114);
+    let without = run_dma_program(0x8104);
+    let vdp = with_dma.hardware::<Vdp>().expect("the hardware is the VDP");
+    assert_eq!(vdp.counts().transfers, 1);
+    assert_eq!(vdp.vram()[..0x800], with_dma.rom().bytes()[..0x800]);
+    assert!(with_dma.log().accesses().is_empty());
+    // 0x800 VRAM bytes at 167 a blanked H32 line: about 12 lines frozen.
+    let stall = vdp.counts().stall_cycles;
+    assert!((5_900..6_100).contains(&stall), "{stall} cycles");
+    // The loop takes 18 cycles a turn, so it turns stall / 18 fewer times.
+    let turns = |runtime: &Runtime| u64::from(runtime.state().d[0]);
+    let lost = turns(&without) - turns(&with_dma);
+    assert!(lost.abs_diff(stall / 18) <= 2, "{lost} turns lost");
+    // The VDP's clock moved on by the stall like every other cycle.
+    assert_eq!(vdp.timing().clock(), with_dma.cycles() * 7);
 }

@@ -43,6 +43,8 @@ pub(crate) struct Devices {
     pub accesses: u64,
     /// Cycles of the current budget the hardware has already been moved on by.
     synced: u32,
+    /// Cycles the hardware froze the 68000 for that the scheduler has not charged yet.
+    stall: u32,
 }
 
 impl Devices {
@@ -57,7 +59,14 @@ impl Devices {
             open_bus,
             accesses: 0,
             synced: 0,
+            stall: 0,
         }
+    }
+
+    /// Cycles the 68000 spent frozen by the hardware since the last call, for the scheduler
+    /// to charge to the budget; the hardware's clock already includes them.
+    pub fn take_stall(&mut self) -> i32 {
+        i32::try_from(std::mem::take(&mut self.stall)).unwrap_or(i32::MAX)
     }
 
     /// Brings the hardware's clock up to `elapsed` cycles into the current budget, so a VDP
@@ -261,11 +270,27 @@ impl SystemBus<'_> {
             return self.open_bus(size);
         };
         let hardware = &mut self.devices.hardware;
-        if size == Size::Byte && port < port::BYTE_PORTS {
+        let value = if size == Size::Byte && port < port::BYTE_PORTS {
             let [high, low] = hardware.read(port & !1, Size::Word).to_be_bytes();
             u16::from(if port & 1 == 0 { high } else { low })
         } else {
             hardware.read(port, size)
+        };
+        self.after_hardware(address, false, size);
+        value
+    }
+
+    /// Logs what the hardware could not handle and lets time pass for a stall: the
+    /// hardware's clock moves on by it at once, and the scheduler charges it later.
+    fn after_hardware(&mut self, address: u32, write: bool, size: Size) {
+        if let Some(kind) = self.devices.hardware.take_fault() {
+            self.note(kind, write, size, address);
+        }
+        let stall = self.devices.hardware.take_stall();
+        if stall > 0 {
+            self.elapsed = self.elapsed.saturating_add(stall);
+            self.devices.sync(self.elapsed);
+            self.devices.stall = self.devices.stall.saturating_add(stall);
         }
     }
 
@@ -284,6 +309,7 @@ impl SystemBus<'_> {
         } else {
             hardware.write(port, size, value, memory);
         }
+        self.after_hardware(address, true, size);
     }
 }
 
@@ -353,7 +379,7 @@ impl Bus for SystemBus<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{hardware::StubVdp, io::Buttons};
+    use crate::{io::Buttons, vdp::Vdp};
 
     struct Fixture {
         ram: Box<[u8; RAM_SIZE]>,
@@ -369,7 +395,7 @@ mod tests {
             Self {
                 ram: Box::new([0; RAM_SIZE]),
                 rom,
-                devices: Devices::new(Box::<StubVdp>::default(), version, 0),
+                devices: Devices::new(Box::<Vdp>::default(), version, 0),
             }
         }
 
@@ -382,10 +408,10 @@ mod tests {
             }
         }
 
-        fn vdp(&self) -> &StubVdp {
+        fn vdp(&self) -> &Vdp {
             (self.devices.hardware.as_ref() as &dyn std::any::Any)
                 .downcast_ref()
-                .expect("the fixture's hardware is a StubVdp")
+                .expect("the fixture's hardware is a Vdp")
         }
 
         fn logged(&self) -> Vec<(AccessKind, bool, u32)> {
@@ -515,19 +541,56 @@ mod tests {
     fn test_vdp_byte_writes_are_doubled_and_mirrors_fold() {
         let mut fixture = Fixture::new(0);
         let mut bus = fixture.bus();
-        bus.write_byte(at(0xC0_0005), 0x81);
+        bus.write_byte(at(0xC0_0005), 0x8F);
         bus.write_word(at(0xDF_FF46), 0x8C81);
         bus.write_byte(at(0xC0_0011), 0x9F);
         // No cycles pass in this fixture, so the beam stays where power-on left it.
-        let status = StubVdp::STATUS | StubVdp::default().timing().status();
+        let status = Vdp::default().status();
         assert_eq!(bus.read_byte(at(0xC0_0004)), (status >> 8) as u8);
         assert_eq!(bus.read_byte(at(0xC0_0005)), status as u8);
         let vdp = fixture.vdp();
-        assert_eq!(vdp.registers[1], 0x81);
-        assert_eq!(vdp.registers[0xC], 0x81);
-        assert_eq!(vdp.psg_writes, 1);
-        assert_eq!(vdp.status_reads, 2);
+        assert_eq!(vdp.registers()[0xF], 0x8F);
+        assert_eq!(vdp.registers()[0xC], 0x81);
+        assert_eq!(vdp.counts().psg_writes, 1);
+        assert_eq!(vdp.counts().status_reads, 2);
         assert!(fixture.logged().is_empty());
+    }
+
+    #[test]
+    fn test_vdp_faults_are_logged_at_the_access_address() {
+        let mut fixture = Fixture::new(0);
+        let mut bus = fixture.bus();
+        // A VRAM write command, then a data read through it.
+        bus.write_long(at(0xC0_0004), 0x4000_0000);
+        bus.read_word(at(0xC0_0000));
+        bus.write_word(at(0xC0_0008), 0);
+        assert_eq!(
+            fixture.logged(),
+            [
+                (AccessKind::VdpCommand, false, 0xC0_0000),
+                (AccessKind::VdpCommand, true, 0xC0_0008),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_dma_stall_moves_the_vdp_clock_and_waits_for_the_scheduler() {
+        let mut fixture = Fixture::new(0);
+        fixture.ram[0..4].copy_from_slice(&[0x0A, 0xCE, 0x0E, 0xEE]);
+        let mut bus = fixture.bus();
+        // DMA on, increment 2, length 2 words, source $FF0000, CRAM write at 0.
+        for register in [0x8114, 0x8F02, 0x9302, 0x9400, 0x9500, 0x9680, 0x977F] {
+            bus.write_word(at(0xC0_0004), register);
+        }
+        bus.write_long(at(0xC0_0004), 0xC000_0080);
+        let elapsed = bus.elapsed;
+        let stall = fixture.devices.take_stall();
+        assert!(stall > 0);
+        assert_eq!(i64::from(elapsed), i64::from(stall));
+        let vdp = fixture.vdp();
+        assert_eq!(vdp.cram()[..2], [0x0ACE, 0x0EEE]);
+        assert_eq!(vdp.timing().clock(), u64::try_from(stall).unwrap() * 7);
+        assert_eq!(fixture.devices.take_stall(), 0);
     }
 
     #[test]
@@ -536,7 +599,7 @@ mod tests {
         let mut bus = fixture.bus();
         bus.write_word(at(0xC0_0024), 0x8114);
         assert_eq!(bus.read_word(at(0xC0_0020)), 0);
-        assert_eq!(fixture.vdp().register_writes, 0);
+        assert_eq!(fixture.vdp().counts().register_writes, 0);
         assert_eq!(
             fixture.logged(),
             [

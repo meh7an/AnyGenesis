@@ -446,7 +446,8 @@ impl<'a> Reference<'a> {
     ///
     /// Off the table or the stack nothing is promised. The live set of an instruction
     /// inside a callee is the union over all its callers, so it can hold flags this run's
-    /// caller dropped (Sonic 1: X at the ObjPosLoad table jump, written dead in ColIndexLoad).
+    /// caller dropped (Sonic 1: X live at one function's table jump, written dead in a
+    /// callee that only this run's caller reaches).
     fn live_at(&self, stop: Stop, function: Address) -> FlagSet {
         match stop {
             Stop::Returned => self

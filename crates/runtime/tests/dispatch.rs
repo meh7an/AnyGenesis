@@ -7,7 +7,7 @@ mod common;
 
 use anygenesis_abi::{AgEntry, AgState, ram_index};
 use anygenesis_rom::Rom;
-use anygenesis_runtime::{Exit, Miss, Options, Runtime, StubVdp, UNWIND, ag_lookup, ag_stop};
+use anygenesis_runtime::{Exit, Miss, Options, Runtime, UNWIND, Vdp, ag_lookup, ag_stop};
 
 use crate::common::{SSP, Scripted, check, image, pop, push, with};
 
@@ -268,7 +268,7 @@ fn rom() -> Rom {
 }
 
 fn runtime(options: Options) -> Runtime {
-    Runtime::new(rom(), &TABLE, Box::<StubVdp>::default(), options)
+    Runtime::new(rom(), &TABLE, Box::<Vdp>::default(), options)
 }
 
 fn idle() -> Options {

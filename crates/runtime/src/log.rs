@@ -27,6 +27,16 @@ pub enum AccessKind {
     VdpLocked,
     /// A VDP block address that hangs a real console.
     VdpHang,
+    /// A VDP port access with no defined effect: a data access whose command code has no
+    /// target or points the other way (the 8-bit VRAM read among them), a write to the HV
+    /// counter, a PSG read, or the ports past the PSG.
+    VdpCommand,
+    /// A VDP register past 23, or a mode the VDP does not build (mode 4, 128 KiB VRAM, a
+    /// mixed horizontal resolution).
+    VdpRegister,
+    /// A DMA that reads outside ROM and work RAM, fills CRAM or VSRAM, or transfers through
+    /// a code with no write target.
+    VdpDma,
 }
 
 /// One kind of logged access.
@@ -48,6 +58,9 @@ impl fmt::Display for AccessKind {
             Self::Z80Word => "Z80 word access",
             Self::VdpLocked => "VDP before TMSS",
             Self::VdpHang => "VDP hang address",
+            Self::VdpCommand => "VDP access without effect",
+            Self::VdpRegister => "VDP register or mode not built",
+            Self::VdpDma => "VDP DMA not built",
         })
     }
 }

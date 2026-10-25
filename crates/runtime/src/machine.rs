@@ -300,13 +300,21 @@ impl Context {
     /// stack or an interrupt the access made due makes the next check point call the hook,
     /// which can.
     pub fn after_access(&mut self, state: &mut AgState, address: u32) {
+        self.charge_stall(state);
         if self.depth(address) > self.options.soft_depth || self.due(mask(state.sr)).is_some() {
             self.check_soon(state);
         }
     }
 
+    /// Takes the cycles a device froze the 68000 for out of the budget, as if the access
+    /// that caused them had taken that long.
+    fn charge_stall(&mut self, state: &mut AgState) {
+        state.cycles = state.cycles.saturating_sub(self.devices.take_stall());
+    }
+
     /// Ends the current budget: the cycles used go to the run's total and to the hardware.
     fn charge(&mut self, state: &mut AgState) {
+        self.charge_stall(state);
         let used = self.elapsed(state);
         self.cycles += u64::from(used);
         self.devices.settle(used);
@@ -651,6 +659,7 @@ unsafe extern "C" fn interpret(state: *mut AgState, start: u32) -> u32 {
             let (st, ctx) = parts(state);
             let step = ctx.step(st, &mut cpu);
             st.cycles -= i32::from(step.cycles);
+            ctx.charge_stall(st);
             ctx.devices.log.miss(start).instructions += 1;
             if step.outcome.reset_devices {
                 ctx.devices.reset();
