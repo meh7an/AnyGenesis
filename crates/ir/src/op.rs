@@ -343,8 +343,8 @@ impl Body {
     }
 }
 
-/// Cycle estimates for one instruction, filled from timing tables in M2.2 (zero until then).
-/// Approximate by design: the CPU fidelity bar does not require exact timing.
+/// Cycle estimates for one instruction, from the 68000 manual's timing tables. Approximate by
+/// design: the CPU fidelity bar does not require exact timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cycles {
     /// When the instruction falls through.

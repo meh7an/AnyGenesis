@@ -7,13 +7,15 @@
 //! bits set by one [`Op::SetFlag`] each, so flag liveness can drop dead ones. Every
 //! operation is total, so the interpreter and the C emitter need no special cases.
 //!
-//! The consumers: the M2.2 interpreter (and the runtime fallback built from it), M2.3 flag
+//! The consumers: the interpreter in [`interp`] (also the runtime fallback), M2.3 flag
 //! liveness and the M2.4 C emitter.
 
 mod builder;
+mod cycles;
 mod display;
 pub mod eval;
 mod exception;
+pub mod interp;
 mod lift;
 mod op;
 mod validate;

@@ -17,7 +17,8 @@ use anygenesis_shared::{Address, Size};
 
 use crate::{
     builder::Builder,
-    op::{Cycles, Flag, Lifted, Value},
+    cycles,
+    op::{Flag, Lifted, Value},
 };
 
 /// Why an instruction did not lift.
@@ -46,7 +47,7 @@ pub fn lift(instruction: &Instruction, address: Address) -> Result<Lifted, LiftE
         address,
         length: instruction.length(),
         body: lifter.out.finish(),
-        cycles: Cycles::default(),
+        cycles: cycles::estimate(instruction),
     })
 }
 

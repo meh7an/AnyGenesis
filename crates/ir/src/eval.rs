@@ -19,7 +19,6 @@ fn top_bit(width: Width, value: u32) -> bool {
 }
 
 /// Evaluates a [`UnaryOp`] at `width`.
-/// Evaluates a [`UnaryOp`] at `width`.
 pub fn unary(op: UnaryOp, width: Width, value: u32) -> u32 {
     let result = match op {
         UnaryOp::Not => !value,
@@ -28,7 +27,6 @@ pub fn unary(op: UnaryOp, width: Width, value: u32) -> u32 {
     result & width.mask()
 }
 
-/// Evaluates a [`BinaryOp`] on operands of `width`; comparisons yield 0 or 1.
 /// Evaluates a [`BinaryOp`] on operands of `width`; comparisons yield 0 or 1.
 pub fn binary(op: BinaryOp, width: Width, left: u32, right: u32) -> u32 {
     let result = match op {
@@ -60,7 +58,6 @@ pub fn binary(op: BinaryOp, width: Width, left: u32, right: u32) -> u32 {
     }
 }
 
-/// Evaluates a [`ShiftOp`] on a value of `width` by `count` (any count).
 /// Evaluates a [`ShiftOp`] on a value of `width` by `count`, any count.
 pub fn shift(op: ShiftOp, width: Width, value: u32, count: u32) -> u32 {
     let result = if count >= width.bits() {
@@ -79,7 +76,6 @@ pub fn shift(op: ShiftOp, width: Width, value: u32, count: u32) -> u32 {
     result & width.mask()
 }
 
-/// Converts `value` from `from` to `to`.
 /// Converts `value` from width `from` to width `to`.
 pub fn convert(op: ConvertOp, from: Width, to: Width, value: u32) -> u32 {
     let result = match op {
@@ -89,7 +85,6 @@ pub fn convert(op: ConvertOp, from: Width, to: Width, value: u32) -> u32 {
     result & to.mask()
 }
 
-/// Evaluates a [`FlagOp`] on operands and result of `width`.
 /// Evaluates a [`FlagOp`] on two operands and a result, all of `width`.
 pub fn flag(op: FlagOp, width: Width, left: u32, right: u32, result: u32) -> bool {
     let bits = match op {
