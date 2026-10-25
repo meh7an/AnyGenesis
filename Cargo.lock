@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "anygenesis-abi"
+version = "0.1.0"
+
+[[package]]
 name = "anygenesis-analysis"
 version = "0.1.0"
 dependencies = [
@@ -12,6 +16,20 @@ dependencies = [
  "anygenesis-rom",
  "anygenesis-shared",
  "thiserror",
+]
+
+[[package]]
+name = "anygenesis-codegen-c"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-abi",
+ "anygenesis-analysis",
+ "anygenesis-gamecfg",
+ "anygenesis-ir",
+ "anygenesis-m68k",
+ "anygenesis-rom",
+ "anygenesis-shared",
+ "cc",
 ]
 
 [[package]]

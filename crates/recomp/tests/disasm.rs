@@ -165,3 +165,22 @@ fn test_listing_instruction_comment_carries_address_and_words() {
         .expect("bsr is printed");
     assert!(line.ends_with("; 000300: 6102"), "{line}");
 }
+
+#[test]
+fn test_listing_line_map_points_at_each_instruction_line() {
+    let rom = Rom::from_bytes(image()).expect("synthetic image loads");
+    let text = format!("sha1 = \"{}\"\n{HINTS}", rom.sha1());
+    let config = GameConfig::parse(&text).expect("valid config");
+    let analysis = analyze(&rom, &config).expect("SHA-1 matches");
+    let mut out = Vec::new();
+    let lines = write_listing(&mut out, rom.bytes(), &config, &analysis).expect("writes");
+    let listing = String::from_utf8(out).expect("ASCII listing");
+    let listing: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines.len(), analysis.instructions.len());
+    for (address, line) in lines {
+        let text = listing[line as usize - 1];
+        let marker = format!("; {:06X}: ", address.get());
+        assert!(text.contains(&marker), "line {line}: {text}");
+        assert!(!text.starts_with("\tdc."), "line {line}: {text}");
+    }
+}

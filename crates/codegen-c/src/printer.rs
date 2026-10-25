@@ -1,0 +1,358 @@
+//! C text for the straight-line part of an IR body: values, expressions and the ops other
+//! than control transfers.
+
+use anygenesis_ir::{
+    BinaryOp, Body, ConvertOp, Expr, Flag, FlagOp, Op, Reg, ShiftOp, UnaryOp, Value, Width,
+};
+use anygenesis_shared::Size;
+
+/// Where an access to a constant address can go without the runtime check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    Ram,
+    Rom,
+    Bus,
+}
+
+/// Classifies a constant 24-bit `address` accessed with `size`, given the ROM size.
+pub fn region(address: u32, size: Size, rom_size: u32) -> Region {
+    let bytes = size.bytes();
+    if address >= RAM_START && address <= ADDRESS_MASK - (bytes - 1) {
+        Region::Ram
+    } else if address + bytes <= rom_size {
+        Region::Rom
+    } else {
+        Region::Bus
+    }
+}
+
+pub const ADDRESS_MASK: u32 = 0x00FF_FFFF;
+const RAM_START: u32 = 0x00E0_0000;
+
+/// Prints the values and ops of one body; its temporaries are named with `prefix`.
+#[derive(Debug, Clone, Copy)]
+pub struct Printer<'a> {
+    pub body: &'a Body,
+    pub prefix: &'static str,
+    pub rom_size: u32,
+}
+
+impl Printer<'_> {
+    /// Returns a value as a C operand.
+    pub fn value(&self, value: Value) -> String {
+        match value {
+            Value::Temp(temp) => format!("{}{}", self.prefix, temp.index()),
+            Value::Const { value, .. } => constant(value),
+        }
+    }
+
+    /// Returns the C statement for a non-control op, or `None` for a `Let` nothing reads
+    /// that has no side effect. `Branch` and `Exit` are the caller's.
+    pub fn op(&self, op: &Op, used: &[bool]) -> Option<String> {
+        let statement = match *op {
+            Op::Let { dst, expr } => {
+                let text = self.expr(expr);
+                if used.get(dst.index()).copied().unwrap_or(true) {
+                    format!("uint32_t {}{} = {text};", self.prefix, dst.index())
+                } else if matches!(expr, Expr::Load { .. }) {
+                    format!("{text};")
+                } else {
+                    return None;
+                }
+            }
+            Op::WriteReg { reg, size, value } => {
+                let target = register(reg);
+                let value = self.value(value);
+                match (reg, size) {
+                    (Reg::Data(_), Size::Byte | Size::Word) => {
+                        let keep = !size.mask();
+                        format!("{target} = ({target} & {}) | {value};", constant(keep))
+                    }
+                    _ => format!("{target} = {value};"),
+                }
+            }
+            Op::SetFlag { flag, value } => {
+                format!("s->{} = (uint8_t){};", flag_field(flag), self.value(value))
+            }
+            Op::WriteSr { value } => format!("ag_write_sr(s, {});", self.value(value)),
+            Op::WriteCcr { value } => format!("ag_write_ccr(s, {});", self.value(value)),
+            Op::Store {
+                size,
+                address,
+                value,
+            } => format!("{};", self.store(size, address, value)),
+            Op::ResetDevices => "ag_reset_devices(s);".to_owned(),
+            Op::Branch { .. } | Op::Exit(_) => return None,
+        };
+        Some(statement)
+    }
+
+    fn width(&self, value: Value) -> Width {
+        self.body.width(value)
+    }
+
+    fn expr(&self, expr: Expr) -> String {
+        match expr {
+            Expr::ReadReg { reg, size } => masked(register(reg), size.into()),
+            Expr::ReadFlag(flag) => format!("s->{}", flag_field(flag)),
+            Expr::ReadSr => "ag_read_sr(s)".to_owned(),
+            Expr::Supervisor => "ag_supervisor(s)".to_owned(),
+            Expr::Load { size, address } => self.load(size, address),
+            Expr::Unary { op, value } => self.unary(op, value),
+            Expr::Binary { op, left, right } => self.binary(op, left, right),
+            Expr::Shift { op, value, count } => {
+                let width = self.width(value);
+                let (name, needs_mask) = match op {
+                    ShiftOp::Shl => ("ag_shl", true),
+                    ShiftOp::Shr => ("ag_shr", false),
+                    ShiftOp::Sar => ("ag_sar", true),
+                };
+                let call = format!(
+                    "{name}({}, {}, {}u)",
+                    self.value(value),
+                    self.value(count),
+                    width.bits()
+                );
+                if needs_mask {
+                    masked(call, width)
+                } else {
+                    call
+                }
+            }
+            Expr::Convert { op, width, value } => {
+                let from = self.width(value);
+                let operand = self.value(value);
+                match op {
+                    ConvertOp::ZeroExtend => operand,
+                    ConvertOp::Truncate => masked(operand, width),
+                    ConvertOp::SignExtend => {
+                        masked(format!("ag_sext({operand}, {}u)", from.bits()), width)
+                    }
+                }
+            }
+            Expr::Select {
+                condition,
+                if_true,
+                if_false,
+            } => format!(
+                "{} ? {} : {}",
+                self.value(condition),
+                self.value(if_true),
+                self.value(if_false)
+            ),
+            Expr::Flag {
+                op,
+                left,
+                right,
+                result,
+            } => {
+                let name = match op {
+                    FlagOp::AddCarry => "ag_add_carry",
+                    FlagOp::AddOverflow => "ag_add_overflow",
+                    FlagOp::SubCarry => "ag_sub_carry",
+                    FlagOp::SubOverflow => "ag_sub_overflow",
+                };
+                format!(
+                    "{name}({}, {}, {}, {}u)",
+                    self.value(left),
+                    self.value(right),
+                    self.value(result),
+                    self.width(left).bits()
+                )
+            }
+        }
+    }
+
+    fn unary(&self, op: UnaryOp, value: Value) -> String {
+        let width = self.width(value);
+        let operand = self.value(value);
+        match op {
+            UnaryOp::Not if width == Width::Bool => format!("{operand} ^ 1u"),
+            UnaryOp::Not => masked(format!("~{operand}"), width),
+            UnaryOp::Neg => masked(format!("0u - {operand}"), width),
+        }
+    }
+
+    fn binary(&self, op: BinaryOp, left: Value, right: Value) -> String {
+        let width = self.width(left);
+        let (l, r) = (self.value(left), self.value(right));
+        let bits = width.bits();
+        match op {
+            BinaryOp::Add => masked(format!("{l} + {r}"), width),
+            BinaryOp::Sub => masked(format!("{l} - {r}"), width),
+            BinaryOp::Mul => masked(format!("{l} * {r}"), width),
+            BinaryOp::And => format!("{l} & {r}"),
+            BinaryOp::Or => format!("{l} | {r}"),
+            BinaryOp::Xor => format!("{l} ^ {r}"),
+            BinaryOp::DivU => format!("ag_divu({l}, {r})"),
+            BinaryOp::RemU => format!("ag_remu({l}, {r})"),
+            BinaryOp::DivS => masked(format!("ag_divs({l}, {r}, {bits}u)"), width),
+            BinaryOp::RemS => masked(format!("ag_rems({l}, {r}, {bits}u)"), width),
+            BinaryOp::Eq => format!("(uint32_t)({l} == {r})"),
+            BinaryOp::Ne => format!("(uint32_t)({l} != {r})"),
+            BinaryOp::LtU => format!("(uint32_t)({l} < {r})"),
+            BinaryOp::LtS => format!("ag_lts({l}, {r}, {bits}u)"),
+        }
+    }
+
+    fn load(&self, size: Size, address: Value) -> String {
+        let bits = size.bytes() * 8;
+        match address {
+            Value::Const { value, .. } => {
+                let address = value & ADDRESS_MASK;
+                let name = match region(address, size, self.rom_size) {
+                    Region::Ram => "ag_ram_read",
+                    Region::Rom => "ag_rom_read",
+                    Region::Bus => "ag_read",
+                };
+                format!("{name}{bits}(s, {})", constant(address))
+            }
+            Value::Temp(_) => format!("ag_load{bits}(s, {})", self.value(address)),
+        }
+    }
+
+    fn store(&self, size: Size, address: Value, value: Value) -> String {
+        let bits = size.bytes() * 8;
+        let value = self.value(value);
+        match address {
+            Value::Const { value: raw, .. } => {
+                let address = raw & ADDRESS_MASK;
+                let name = match region(address, size, self.rom_size) {
+                    Region::Ram => "ag_ram_write",
+                    Region::Rom | Region::Bus => "ag_write",
+                };
+                format!("{name}{bits}(s, {}, {value})", constant(address))
+            }
+            Value::Temp(_) => format!("ag_store{bits}(s, {}, {value})", self.value(address)),
+        }
+    }
+}
+
+/// Returns, for each temporary of `body`, whether any op reads it.
+pub fn used_temps(body: &Body) -> Vec<bool> {
+    let mut used = vec![false; body.temps.len()];
+    let mut mark = |value: Value| {
+        if let Value::Temp(temp) = value
+            && let Some(slot) = used.get_mut(temp.index())
+        {
+            *slot = true;
+        }
+    };
+    for op in &body.ops {
+        match *op {
+            Op::Let { expr, .. } => match expr {
+                Expr::ReadReg { .. } | Expr::ReadFlag(_) | Expr::ReadSr | Expr::Supervisor => {}
+                Expr::Load { address, .. } => mark(address),
+                Expr::Unary { value, .. } | Expr::Convert { value, .. } => mark(value),
+                Expr::Binary { left, right, .. } => {
+                    mark(left);
+                    mark(right);
+                }
+                Expr::Shift { value, count, .. } => {
+                    mark(value);
+                    mark(count);
+                }
+                Expr::Select {
+                    condition,
+                    if_true,
+                    if_false,
+                } => {
+                    mark(condition);
+                    mark(if_true);
+                    mark(if_false);
+                }
+                Expr::Flag {
+                    left,
+                    right,
+                    result,
+                    ..
+                } => {
+                    mark(left);
+                    mark(right);
+                    mark(result);
+                }
+            },
+            Op::WriteReg { value, .. }
+            | Op::SetFlag { value, .. }
+            | Op::WriteSr { value }
+            | Op::WriteCcr { value } => mark(value),
+            Op::Store { address, value, .. } => {
+                mark(address);
+                mark(value);
+            }
+            Op::ResetDevices => {}
+            Op::Branch { condition, control } => {
+                mark(condition);
+                control_values(control, &mut mark);
+            }
+            Op::Exit(control) => control_values(control, &mut mark),
+        }
+    }
+    used
+}
+
+fn control_values(control: anygenesis_ir::Control, mark: &mut impl FnMut(Value)) {
+    use anygenesis_ir::Control;
+    match control {
+        Control::JumpIndirect(value)
+        | Control::CallIndirect { target: value, .. }
+        | Control::Return { target: value, .. } => mark(value),
+        Control::Jump(_)
+        | Control::Call { .. }
+        | Control::Exception { .. }
+        | Control::Stop { .. } => {}
+    }
+}
+
+/// Returns a constant as a C unsigned literal.
+pub fn constant(value: u32) -> String {
+    format!("{value:#X}u").replacen("0X", "0x", 1)
+}
+
+/// Returns `text` limited to `width`'s bits.
+pub fn masked(text: String, width: Width) -> String {
+    if width == Width::Long {
+        text
+    } else {
+        format!("({text}) & {}", constant(width.mask()))
+    }
+}
+
+fn register(reg: Reg) -> String {
+    match reg {
+        Reg::Data(n) => format!("s->d[{}]", n & 7),
+        Reg::Address(n) => format!("s->a[{}]", n & 7),
+        Reg::InactiveSp => "s->inactive_sp".to_owned(),
+    }
+}
+
+fn flag_field(flag: Flag) -> &'static str {
+    match flag {
+        Flag::X => "x",
+        Flag::N => "n",
+        Flag::Z => "z",
+        Flag::V => "v",
+        Flag::C => "c",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constants_print_as_lowercase_prefixed_hex() {
+        assert_eq!(constant(0xFF00), "0xFF00u");
+        assert_eq!(constant(0), "0x0u");
+    }
+
+    #[test]
+    fn test_regions_keep_long_accesses_from_wrapping_out_of_ram() {
+        assert_eq!(region(0xFFFFFC, Size::Long, 0x1000), Region::Ram);
+        assert_eq!(region(0xFFFFFE, Size::Long, 0x1000), Region::Bus);
+        assert_eq!(region(0xE0FFFE, Size::Long, 0x1000), Region::Ram);
+        assert_eq!(region(0x000FFE, Size::Word, 0x1000), Region::Rom);
+        assert_eq!(region(0x000FFE, Size::Long, 0x1000), Region::Bus);
+        assert_eq!(region(0xA10000, Size::Byte, 0x1000), Region::Bus);
+    }
+}

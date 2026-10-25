@@ -18,7 +18,8 @@ const COMMENT_COLUMN: usize = 48;
 /// Data words per `dc.w` line.
 const WORDS_PER_LINE: u32 = 8;
 
-/// Writes the listing of `rom` as `analysis` and `config` describe it.
+/// Writes the listing of `rom` as `analysis` and `config` describe it, and returns the
+/// 1-based line of every instruction printed as such, for `#line` directives in generated C.
 ///
 /// # Errors
 /// Returns the first error `out` reports.
@@ -27,9 +28,36 @@ pub fn write_listing(
     rom: &[u8],
     config: &GameConfig,
     analysis: &Analysis,
-) -> io::Result<()> {
+) -> io::Result<BTreeMap<Address, u32>> {
     let listing = Listing::new(rom, config, analysis);
-    listing.write(out)
+    let mut counter = LineCounter {
+        out,
+        lines: 0,
+        instructions: BTreeMap::new(),
+    };
+    listing.write(&mut counter)?;
+    Ok(counter.instructions)
+}
+
+/// Counts the lines written through it and records where instructions went.
+struct LineCounter<'w> {
+    out: &'w mut dyn Write,
+    lines: u32,
+    instructions: BTreeMap<Address, u32>,
+}
+
+impl Write for LineCounter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.out.write(buf)?;
+        let newlines = buf[..written].iter().filter(|&&byte| byte == b'\n').count();
+        // A listing has far fewer than 2^32 lines.
+        self.lines += newlines as u32;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
 }
 
 /// What one listing line kind is named after.
@@ -186,7 +214,7 @@ impl<'a> Listing<'a> {
         }
     }
 
-    fn write(&self, out: &mut dyn Write) -> io::Result<()> {
+    fn write(&self, out: &mut LineCounter<'_>) -> io::Result<()> {
         writeln!(out, "; ROM SHA-1 {}", self.config.sha1)?;
         writeln!(out, "\tcpu\t68000")?;
         writeln!(out, "\tsupmode\ton")?;
@@ -203,6 +231,7 @@ impl<'a> Listing<'a> {
                 writeln!(out, "{label}:")?;
             }
             position = if let Some(instruction) = self.code.get(&position) {
+                out.instructions.insert(position, out.lines + 1);
                 self.write_instruction(out, position, instruction)?
             } else if let Some(table) = self.tables.get(&position) {
                 self.write_table(out, table)?
