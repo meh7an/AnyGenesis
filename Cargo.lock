@@ -24,6 +24,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "anygenesis-ir"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-m68k",
+ "anygenesis-shared",
+ "thiserror",
+]
+
+[[package]]
 name = "anygenesis-m68k"
 version = "0.1.0"
 dependencies = [

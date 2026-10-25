@@ -1,0 +1,10 @@
+[package]
+name = "anygenesis-ir"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anygenesis-m68k = { version = "0.1.0", path = "../m68k" }
+anygenesis-shared = { version = "0.1.0", path = "../shared" }
+thiserror = "2.0.21"

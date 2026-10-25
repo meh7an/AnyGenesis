@@ -65,6 +65,46 @@ impl Instruction {
                 _ => None,
             })
     }
+
+    /// Returns the address of the first extension word of the operand in `slot`, for the
+    /// instruction at `address`. PC-relative operands are relative to it; it follows the
+    /// opcode, MOVEM's register mask and the extension words of the operands before `slot`.
+    pub fn extension_address(&self, address: Address, slot: usize) -> Address {
+        let mut words = 1;
+        if self.mnemonic == Mnemonic::Movem {
+            words += 1;
+        }
+        for operand in self.operands[..slot].iter().flatten() {
+            words += self.extension_words(*operand);
+        }
+        address.wrapping_add(2 * words)
+    }
+
+    fn extension_words(&self, operand: Operand) -> u32 {
+        let Operand::Ea(ea) = operand else {
+            return 0;
+        };
+        match ea {
+            Ea::Displacement { .. }
+            | Ea::Index { .. }
+            | Ea::AbsoluteShort(_)
+            | Ea::PcDisplacement(_)
+            | Ea::PcIndex { .. } => 1,
+            Ea::AbsoluteLong(_) => 2,
+            // A bit number is one word even when the operation is long (on Dn).
+            Ea::Immediate(_) if self.is_bit_operation() => 1,
+            Ea::Immediate(_) if self.size == Some(Size::Long) => 2,
+            Ea::Immediate(_) => 1,
+            _ => 0,
+        }
+    }
+
+    fn is_bit_operation(&self) -> bool {
+        matches!(
+            self.mnemonic,
+            Mnemonic::Btst | Mnemonic::Bchg | Mnemonic::Bclr | Mnemonic::Bset
+        )
+    }
 }
 
 /// Returns where a branch displacement at instruction `address` leads.

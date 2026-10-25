@@ -415,43 +415,8 @@ impl Formatted<'_> {
         Ok(())
     }
 
-    /// Returns the address of the extension word a PC-relative operand in `slot` is relative
-    /// to: after the opcode, MOVEM's register mask and the operands before it.
     fn extension_address(&self, slot: usize) -> Address {
-        let mut words = 1;
-        if self.mnemonic() == Mnemonic::Movem {
-            words += 1;
-        }
-        for operand in self.instruction.operands[..slot].iter().flatten() {
-            words += self.extension_words(*operand);
-        }
-        self.address.wrapping_add(2 * words)
-    }
-
-    fn extension_words(&self, operand: Operand) -> u32 {
-        let Operand::Ea(ea) = operand else {
-            return 0;
-        };
-        match ea {
-            Ea::Displacement { .. }
-            | Ea::Index { .. }
-            | Ea::AbsoluteShort(_)
-            | Ea::PcDisplacement(_)
-            | Ea::PcIndex { .. } => 1,
-            Ea::AbsoluteLong(_) => 2,
-            // A bit number is one word even when the operation is long (on Dn).
-            Ea::Immediate(_) if self.is_bit_operation() => 1,
-            Ea::Immediate(_) if self.instruction.size == Some(Size::Long) => 2,
-            Ea::Immediate(_) => 1,
-            _ => 0,
-        }
-    }
-
-    fn is_bit_operation(&self) -> bool {
-        matches!(
-            self.mnemonic(),
-            Mnemonic::Btst | Mnemonic::Bchg | Mnemonic::Bclr | Mnemonic::Bset
-        )
+        self.instruction.extension_address(self.address, slot)
     }
 
     /// Writes an immediate's value. Motorola follows Musashi's signedness per instruction;
