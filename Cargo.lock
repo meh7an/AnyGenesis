@@ -7,6 +7,7 @@ name = "anygenesis-analysis"
 version = "0.1.0"
 dependencies = [
  "anygenesis-gamecfg",
+ "anygenesis-ir",
  "anygenesis-m68k",
  "anygenesis-rom",
  "anygenesis-shared",

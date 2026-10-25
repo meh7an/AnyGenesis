@@ -2,10 +2,12 @@
 //!
 //! [`analyze`] descends from the reset and exception vectors and from the config's hints,
 //! decoding every reachable instruction, then cuts the code into blocks and assigns them to
-//! functions. What it cannot follow is reported, never guessed.
+//! functions. What it cannot follow is reported, never guessed. [`FlagLiveness`] then
+//! finds the flags something reads at every instruction of the result.
 
 mod blocks;
 mod discover;
+mod liveness;
 mod model;
 mod report;
 mod tables;
@@ -13,6 +15,7 @@ mod tables;
 use anygenesis_gamecfg::GameConfig;
 use anygenesis_rom::Rom;
 
+pub use liveness::{FlagLiveness, FlagStats, FlagSummary, LivenessOptions};
 pub use model::{
     Analysis, Block, Call, CallKind, Diagnostic, Edge, EdgeKind, Function, Origin, ResolvedTable,
     Source, Suggestion, TailJump, Terminator, UnresolvedSite,

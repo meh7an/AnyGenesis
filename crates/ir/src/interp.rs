@@ -200,17 +200,24 @@ impl Interpreter {
     /// interrupt is the caller's job.
     pub fn step<B: Bus + ?Sized>(&mut self, cpu: &mut Cpu, bus: &mut B) -> Step {
         let address = cpu.pc;
-        let lifted = match fetch(address, bus) {
-            Ok(lifted) => lifted,
+        match fetch(address, bus) {
+            Ok(lifted) => self.run(&lifted, cpu, bus),
             Err(_) => {
                 let outcome = self.raise(cpu, bus, vector::ILLEGAL, address);
-                return Step {
+                Step {
                     address,
                     cycles: TRAP_CYCLES,
                     outcome,
-                };
+                }
             }
-        };
+        }
+    }
+
+    /// Executes an instruction lifted earlier as [`Interpreter::step`] would, taking any
+    /// exception it raises, and leaves `cpu.pc` at the next instruction to run. The body
+    /// may differ from the lifter's (flag pruning); `lifted.address` should equal `cpu.pc`.
+    pub fn run<B: Bus + ?Sized>(&mut self, lifted: &Lifted, cpu: &mut Cpu, bus: &mut B) -> Step {
+        let address = lifted.address;
         let mut outcome = self.execute(&lifted.body, cpu, bus);
         cpu.pc = match outcome.transfer {
             None => lifted.next(),
