@@ -1,0 +1,3 @@
+# Sonic the Hedgehog (REV00). Addresses, hints and table sizes only.
+# The reset and exception vectors come from the ROM itself.
+sha1 = "6ddb7de1e17e7f6cdb88927bd906352030daa194"
