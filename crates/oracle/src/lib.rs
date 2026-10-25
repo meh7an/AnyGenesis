@@ -1,5 +1,5 @@
-//! Test-only CPU oracles: the vendored Musashi core behind a safe wrapper, and a loader for
-//! the SingleStepTests/m68000 per-instruction vectors.
+//! Test-only CPU oracles: the vendored Musashi core and disassembler behind a safe wrapper,
+//! and a loader for the SingleStepTests/m68000 per-instruction vectors.
 
 pub mod musashi;
 pub mod sst;

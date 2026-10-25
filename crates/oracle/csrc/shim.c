@@ -4,6 +4,8 @@
  * attaches its bus here for the duration of each call into the core.
  */
 
+#include <stddef.h>
+
 #include "m68k.h"
 #include "m68kcpu.h"
 
@@ -95,3 +97,44 @@ void oracle_save(oracle_registers *regs) {
 int oracle_step(void) { return m68k_execute(1); }
 
 int oracle_stopped(void) { return CPU_STOPPED != 0; }
+
+/*
+ * The disassembler fetches through these hooks instead of the CPU bus. The Rust side lends
+ * a byte buffer for one call under its own lock; bytes outside it read as zero, so a short
+ * buffer can never be overrun.
+ */
+static const unsigned char *g_dasm_bytes;
+static unsigned int g_dasm_base;
+static unsigned int g_dasm_length;
+
+static unsigned int dasm_byte(unsigned int address) {
+    unsigned int offset = address - g_dasm_base;
+    return offset < g_dasm_length ? g_dasm_bytes[offset] : 0;
+}
+
+unsigned int m68k_read_disassembler_8(unsigned int address) { return dasm_byte(address); }
+
+unsigned int m68k_read_disassembler_16(unsigned int address) {
+    return (dasm_byte(address) << 8) | dasm_byte(address + 1);
+}
+
+unsigned int m68k_read_disassembler_32(unsigned int address) {
+    return (m68k_read_disassembler_16(address) << 16) | m68k_read_disassembler_16(address + 2);
+}
+
+unsigned int oracle_is_valid_68000(unsigned int word) {
+    return m68k_is_valid_instruction(word, M68K_CPU_TYPE_68000);
+}
+
+unsigned int oracle_disassemble_68000(unsigned int pc, const unsigned char *bytes,
+                                      unsigned int length, char *text) {
+    unsigned int consumed;
+
+    g_dasm_bytes = bytes;
+    g_dasm_base = pc;
+    g_dasm_length = length;
+    consumed = m68k_disassemble(text, pc, M68K_CPU_TYPE_68000);
+    g_dasm_bytes = NULL;
+    g_dasm_length = 0;
+    return consumed;
+}

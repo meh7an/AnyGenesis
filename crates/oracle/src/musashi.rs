@@ -1,9 +1,9 @@
 //! Safe wrapper over the vendored Musashi core, configured as a bare 68000 with address
-//! error emulation.
+//! error emulation, and over its disassembler in 68000 mode.
 
 use std::{
     collections::HashMap,
-    ffi::{c_int, c_uint, c_void},
+    ffi::{CStr, c_char, c_int, c_uint, c_void},
     ptr,
     sync::{Mutex, MutexGuard, Once, PoisonError},
 };
@@ -23,11 +23,65 @@ unsafe extern "C" {
     fn oracle_save(registers: *mut Registers);
     fn oracle_step() -> c_int;
     fn oracle_stopped() -> c_int;
+    fn oracle_is_valid_68000(word: c_uint) -> c_uint;
+    fn oracle_disassemble_68000(
+        pc: c_uint,
+        bytes: *const u8,
+        length: c_uint,
+        text: *mut c_char,
+    ) -> c_uint;
 }
 
 /// Musashi keeps its CPU in C globals, so at most one [`Musashi`] may exist at a time.
 static CORE: Mutex<()> = Mutex::new(());
 static INIT: Once = Once::new();
+
+/// The disassembler keeps C globals of its own, disjoint from the core's, so it has its own
+/// lock and never waits on a running CPU test.
+static DISASSEMBLER: Mutex<()> = Mutex::new(());
+
+/// Musashi writes at most two 100-byte strings (text and helper comment) into the buffer.
+const TEXT_CAPACITY: usize = 256;
+
+/// One instruction as Musashi's disassembler reads it on a 68000.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disassembly {
+    /// Bytes consumed, opcode word included.
+    pub length: u32,
+    /// Musashi's text, including its `; ...` helper comments.
+    pub text: String,
+}
+
+/// Returns Musashi's `m68k_is_valid_instruction` answer for a 68000.
+///
+/// A table lookup on the first word only. It calls ILLEGAL (0x4AFC) invalid, and it is
+/// inconsistent on line F and on Bcc with displacement 0xFF (see PROGRESS.md, M1.2).
+pub fn is_valid_68000(word: u16) -> bool {
+    let _lock = DISASSEMBLER.lock().unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: a pure table lookup; the disassembler lock is held.
+    unsafe { oracle_is_valid_68000(c_uint::from(word)) != 0 }
+}
+
+/// Disassembles the instruction at the start of `bytes`, which sit at address `pc`.
+///
+/// Bytes past the end of `bytes` read as zero, so a `length` beyond `bytes.len()` means
+/// Musashi consumed padding.
+pub fn disassemble_68000(pc: u32, bytes: &[u8]) -> Disassembly {
+    // Longer slices are only cut short: Musashi never reads more than a few dozen bytes.
+    let available = c_uint::try_from(bytes.len()).unwrap_or(c_uint::MAX);
+    let mut text = [0 as c_char; TEXT_CAPACITY];
+    let _lock = DISASSEMBLER.lock().unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: `bytes` is valid for `available` bytes and the shim reads only inside them;
+    // `text` holds more than Musashi writes; both outlive the call, and the lock is held.
+    let length =
+        unsafe { oracle_disassemble_68000(pc, bytes.as_ptr(), available, text.as_mut_ptr()) };
+    // SAFETY: Musashi always terminates the string it writes, well inside the buffer.
+    let text = unsafe { CStr::from_ptr(text.as_ptr()) };
+    Disassembly {
+        length,
+        text: text.to_string_lossy().into_owned(),
+    }
+}
 
 /// Direction of a bus cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,5 +388,39 @@ mod tests {
         core.step();
 
         assert_eq!(core.registers().pc, 0x2000);
+    }
+
+    #[test]
+    fn test_is_valid_68000_moveq_and_illegal_differ() {
+        assert!(is_valid_68000(0x7005));
+        assert!(!is_valid_68000(0x4AFC));
+        // movec is a 68010 instruction.
+        assert!(!is_valid_68000(0x4E7A));
+    }
+
+    #[test]
+    fn test_disassemble_68000_move_long_immediate_counts_extension_words() {
+        let disassembly = disassemble_68000(0x1000, &[0x20, 0x3C, 0x12, 0x34, 0x56, 0x78]);
+
+        assert_eq!(disassembly.length, 6);
+        assert!(
+            disassembly.text.starts_with("move.l"),
+            "{}",
+            disassembly.text
+        );
+        assert!(
+            disassembly.text.contains("#$12345678"),
+            "{}",
+            disassembly.text
+        );
+    }
+
+    #[test]
+    fn test_disassemble_68000_short_buffer_reads_zero_padding() {
+        // jmp $xxxxxxxx.l with its address words missing.
+        let disassembly = disassemble_68000(0x1000, &[0x4E, 0xF9]);
+
+        assert_eq!(disassembly.length, 6);
+        assert!(disassembly.text.contains("$0.l"), "{}", disassembly.text);
     }
 }

@@ -1,6 +1,6 @@
 //! Builds the vendored Musashi core: compiles and runs its `m68kmake` generator, which writes
-//! the opcode handlers (`m68kops.c`, `m68kops.h`) from `m68k_in.c`, then compiles the core
-//! and the Rust bridge with `cc`.
+//! the opcode handlers (`m68kops.c`, `m68kops.h`) from `m68k_in.c`, then compiles the core,
+//! its disassembler and the Rust bridge with `cc`.
 
 use std::{
     env,
@@ -34,6 +34,7 @@ fn main() {
     build
         .files([
             musashi.join("m68kcpu.c"),
+            musashi.join("m68kdasm.c"),
             musashi.join("softfloat/softfloat.c"),
             out_dir.join("m68kops.c"),
             shim,

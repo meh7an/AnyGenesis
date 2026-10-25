@@ -5,3 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
+anygenesis-shared = { version = "0.1.0", path = "../shared" }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+anygenesis-oracle = { path = "../oracle" }
