@@ -29,9 +29,9 @@ dependencies = [
  "anygenesis-ir",
  "anygenesis-m68k",
  "anygenesis-oracle",
+ "anygenesis-recomp",
  "anygenesis-rom",
  "anygenesis-shared",
- "cc",
 ]
 
 [[package]]
@@ -46,6 +46,16 @@ dependencies = [
  "anygenesis-rom",
  "anygenesis-shared",
  "cc",
+]
+
+[[package]]
+name = "anygenesis-game"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-abi",
+ "anygenesis-recomp",
+ "anygenesis-rom",
+ "anyhow",
 ]
 
 [[package]]
@@ -90,11 +100,14 @@ name = "anygenesis-recomp"
 version = "0.1.0"
 dependencies = [
  "anygenesis-analysis",
+ "anygenesis-codegen-c",
  "anygenesis-gamecfg",
  "anygenesis-m68k",
  "anygenesis-rom",
  "anygenesis-shared",
  "anyhow",
+ "cc",
+ "thiserror",
 ]
 
 [[package]]

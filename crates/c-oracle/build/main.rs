@@ -18,10 +18,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anygenesis_analysis::{Analysis, FlagLiveness, LivenessOptions, analyze};
-use anygenesis_codegen_c::{CheckPoints, EmitOptions, emit};
-use anygenesis_gamecfg::GameConfig;
-use anygenesis_rom::Rom;
+use anygenesis_analysis::{Analysis, analyze};
+use anygenesis_codegen_c::{CheckPoints, EmitOptions};
+use anygenesis_recomp::build;
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
@@ -35,7 +34,7 @@ fn main() {
     let prefix = "syn_";
     compile_program(&synthetic, prefix, &out.join("synthetic"), "ag_synthetic");
     items.push_str(&table_items(prefix, "synthetic_table"));
-    items.push_str(&sonic1(&workspace, &out));
+    items.push_str(&sonic1(&out));
     items.push_str(&sst::translate_sample(&workspace, &out));
     fs::write(out.join("programs.rs"), items).expect("programs.rs written");
 }
@@ -52,15 +51,8 @@ fn function_options(prefix: &str) -> EmitOptions {
 
 /// Emits `analysis` into `directory` and compiles it into the static library `library`.
 fn compile_program(analysis: &Analysis, prefix: &str, directory: &Path, library: &str) {
-    let liveness = FlagLiveness::new(analysis, LivenessOptions::default());
-    let output = emit(analysis, &liveness, &function_options(prefix));
-    output
-        .write_to(directory)
-        .unwrap_or_else(|error| panic!("writing {}: {error}", directory.display()));
-    let sources: Vec<PathBuf> = output
-        .sources()
-        .map(|file| directory.join(&file.name))
-        .collect();
+    let output = build::emit_program(analysis, &function_options(prefix));
+    let sources = build::write_output(&output, directory).unwrap_or_else(|error| panic!("{error}"));
     compile::library(library, directory, &sources);
 }
 
@@ -80,9 +72,9 @@ fn table_items(prefix: &str, name: &str) -> String {
 }
 
 /// Translates Sonic 1 when `ANYGENESIS_ROM` is set.
-fn sonic1(workspace: &Path, out: &Path) -> String {
+fn sonic1(out: &Path) -> String {
     println!("cargo::rerun-if-env-changed=ANYGENESIS_ROM");
-    let config_path = workspace.join("games/sonic1.toml");
+    let config_path = build::config_path("sonic1").unwrap_or_else(|error| panic!("{error}"));
     println!("cargo::rerun-if-changed={}", config_path.display());
     let Some(path) = env::var_os("ANYGENESIS_ROM") else {
         return "/// The SHA-1 of the translated Sonic 1 ROM; `None` without `ANYGENESIS_ROM`.\n\
@@ -93,10 +85,9 @@ fn sonic1(workspace: &Path, out: &Path) -> String {
             .to_owned();
     };
     println!("cargo::rerun-if-changed={}", Path::new(&path).display());
-    let rom = Rom::load(&path).unwrap_or_else(|error| panic!("ANYGENESIS_ROM: {error}"));
-    let text = fs::read_to_string(&config_path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", config_path.display()));
-    let config = GameConfig::parse(&text).unwrap_or_else(|error| panic!("sonic1.toml: {error}"));
+    let rom =
+        build::load_rom(Path::new(&path)).unwrap_or_else(|error| panic!("ANYGENESIS_ROM: {error}"));
+    let config = build::load_config(&config_path).unwrap_or_else(|error| panic!("{error}"));
     let analysis = analyze(&rom, &config).unwrap_or_else(|error| panic!("{error}"));
     compile_program(&analysis, "", &out.join("sonic1"), "ag_sonic1");
     let table = table_items("", "sonic1_table_rows");

@@ -22,6 +22,6 @@ anygenesis-gamecfg = { version = "0.1.0", path = "../gamecfg" }
 anygenesis-ir = { version = "0.1.0", path = "../ir" }
 anygenesis-m68k = { version = "0.1.0", path = "../m68k" }
 anygenesis-oracle = { version = "0.1.0", path = "../oracle" }
+anygenesis-recomp = { version = "0.1.0", path = "../recomp" }
 anygenesis-rom = { version = "0.1.0", path = "../rom" }
 anygenesis-shared = { version = "0.1.0", path = "../shared" }
-cc = { version = "1.10.0", features = ["parallel"] }
