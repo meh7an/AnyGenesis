@@ -116,7 +116,7 @@ fn emit_command(args: &Args) -> Result<()> {
             directory, args, &rom, &config, &analysis,
         )?);
     }
-    let output = build::emit_program(&analysis, &options);
+    let output = build::emit_program(&analysis, build::game_liveness(), &options);
     build::write_output(&output, directory)?;
     let lines: usize = output
         .files

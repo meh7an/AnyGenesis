@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anygenesis_analysis::{Analysis, analyze};
+use anygenesis_analysis::{Analysis, LivenessOptions, analyze};
 use anygenesis_codegen_c::{CheckPoints, EmitOptions};
 use anygenesis_recomp::build;
 
@@ -51,7 +51,11 @@ fn function_options(prefix: &str) -> EmitOptions {
 
 /// Emits `analysis` into `directory` and compiles it into the static library `library`.
 fn compile_program(analysis: &Analysis, prefix: &str, directory: &Path, library: &str) {
-    let output = build::emit_program(analysis, &function_options(prefix));
+    let output = build::emit_program(
+        analysis,
+        LivenessOptions::default(),
+        &function_options(prefix),
+    );
     let sources = build::write_output(&output, directory).unwrap_or_else(|error| panic!("{error}"));
     compile::library(library, directory, &sources);
 }

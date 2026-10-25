@@ -39,6 +39,10 @@ pub(crate) struct Devices {
     pub log: Log,
     pub version: u8,
     pub open_bus: u16,
+    /// Accesses that reached a device, so idle detection sees polling.
+    pub accesses: u64,
+    /// Cycles of the current budget the hardware has already been moved on by.
+    synced: u32,
 }
 
 impl Devices {
@@ -51,7 +55,25 @@ impl Devices {
             log: Log::default(),
             version,
             open_bus,
+            accesses: 0,
+            synced: 0,
         }
+    }
+
+    /// Brings the hardware's clock up to `elapsed` cycles into the current budget, so a VDP
+    /// access sees the time it happens at rather than the time of the last check point.
+    pub fn sync(&mut self, elapsed: u32) {
+        if elapsed > self.synced {
+            self.hardware.advance(elapsed - self.synced);
+            self.synced = elapsed;
+        }
+    }
+
+    /// Ends the current budget after `used` cycles: the hardware catches up and the next
+    /// budget starts from zero.
+    pub fn settle(&mut self, used: u32) {
+        self.sync(used);
+        self.synced = 0;
     }
 
     /// Whether the VDP is usable: a console without TMSS never locks it.
@@ -73,6 +95,8 @@ pub(crate) struct SystemBus<'a> {
     pub ram: &'a mut [u8; RAM_SIZE],
     pub rom: &'a [u8],
     pub devices: &'a mut Devices,
+    /// Cycles used of the current budget when the access is made.
+    pub elapsed: u32,
 }
 
 impl SystemBus<'_> {
@@ -105,6 +129,7 @@ impl SystemBus<'_> {
 
     /// Reads a byte or word outside RAM and ROM.
     fn device_read(&mut self, address: u32, size: Size) -> u16 {
+        self.devices.accesses += 1;
         match address {
             Z80_START..=0xA0_FFFF => self.z80_read(address, size),
             IO_START..=0xA1_0FFF if address - IO_START < io::SPAN => {
@@ -123,6 +148,7 @@ impl SystemBus<'_> {
 
     /// Writes a byte or word outside RAM.
     fn device_write(&mut self, address: u32, size: Size, value: u16) {
+        self.devices.accesses += 1;
         match address {
             0x00_0000..=0x3F_FFFF => self.note(AccessKind::RomWrite, true, size, address),
             Z80_START..=0xA0_FFFF => self.z80_write(address, size, value),
@@ -226,6 +252,7 @@ impl SystemBus<'_> {
         if !self.devices.tmss_unlocked() {
             self.note(AccessKind::VdpLocked, write, size, address);
         }
+        self.devices.sync(self.elapsed);
         Some((address & VDP_PORTS) as u8)
     }
 
@@ -351,6 +378,7 @@ mod tests {
                 ram: &mut self.ram,
                 rom: &self.rom,
                 devices: &mut self.devices,
+                elapsed: 0,
             }
         }
 
@@ -490,8 +518,10 @@ mod tests {
         bus.write_byte(at(0xC0_0005), 0x81);
         bus.write_word(at(0xDF_FF46), 0x8C81);
         bus.write_byte(at(0xC0_0011), 0x9F);
-        assert_eq!(bus.read_byte(at(0xC0_0004)), (StubVdp::STATUS >> 8) as u8);
-        assert_eq!(bus.read_byte(at(0xC0_0005)), StubVdp::STATUS as u8);
+        // No cycles pass in this fixture, so the beam stays where power-on left it.
+        let status = StubVdp::STATUS | StubVdp::default().timing().status();
+        assert_eq!(bus.read_byte(at(0xC0_0004)), (status >> 8) as u8);
+        assert_eq!(bus.read_byte(at(0xC0_0005)), status as u8);
         let vdp = fixture.vdp();
         assert_eq!(vdp.registers[1], 0x81);
         assert_eq!(vdp.registers[0xC], 0x81);

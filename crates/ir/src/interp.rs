@@ -490,6 +490,23 @@ mod tests {
     }
 
     #[test]
+    fn test_interrupt_entry_raises_the_mask_and_reads_the_autovector() {
+        let mut memory = Memory::with_words(0x1000, &[]);
+        memory.write_long(Address::new(30 * 4), 0x2400);
+        let mut cpu = Cpu::new(0x8215, 0x4000, 0x8000);
+
+        let body = crate::interrupt_entry(6, Address::new(0x1234));
+        crate::validate(&body).expect("the entry sequence validates");
+        let outcome = Interpreter::default().execute(&body, &mut cpu, &mut memory);
+
+        assert_eq!(outcome.transfer, Some(Transfer::Jump(Address::new(0x2400))));
+        assert_eq!(cpu.sr(), 0x2615);
+        assert_eq!((cpu.usp(), cpu.ssp()), (0x4000, 0x7FFA));
+        assert_eq!(memory.read_word(Address::new(0x7FFA)), 0x8215);
+        assert_eq!(memory.read_long(Address::new(0x7FFC)), 0x1234);
+    }
+
+    #[test]
     fn test_step_unassigned_opcode_takes_illegal_instruction_exception() {
         // MOVEC exists from the 68010 on; the 68000 does not define it.
         assert!(decode(&[0x4E7B]).is_err());

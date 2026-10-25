@@ -3,37 +3,13 @@
 //! takes the address to start at, returns where execution continues, compares the result of
 //! every call with the return address it pushed, and calls `ag_check` at loop targets.
 
+mod common;
+
 use anygenesis_abi::{AgEntry, AgState, ram_index};
 use anygenesis_rom::Rom;
-use anygenesis_runtime::{
-    Exit, Miss, Options, Runtime, StubVdp, UNWIND, ag_check, ag_lookup, ag_stop,
-};
+use anygenesis_runtime::{Exit, Miss, Options, Runtime, StubVdp, UNWIND, ag_lookup, ag_stop};
 
-const SSP: u32 = 0x00FF_FE00;
-
-/// Gives `body` the state for one short access, so no borrow lives across a call.
-fn with<T>(state: *mut AgState, body: impl FnOnce(&mut AgState) -> T) -> T {
-    // SAFETY: the runtime passes a live state, and every caller drops the borrow before it
-    // calls anything that derives its own.
-    unsafe { body(&mut *state) }
-}
-
-fn push(state: *mut AgState, value: u32) {
-    with(state, |state| {
-        state.a[7] = state.a[7].wrapping_sub(4);
-        for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
-            state.ram[ram_index(state.a[7] + offset as u32)] = byte;
-        }
-    });
-}
-
-fn pop(state: *mut AgState) -> u32 {
-    with(state, |state| {
-        let bytes = std::array::from_fn(|offset| state.ram[ram_index(state.a[7] + offset as u32)]);
-        state.a[7] = state.a[7].wrapping_add(4);
-        u32::from_be_bytes(bytes)
-    })
-}
+use crate::common::{SSP, Scripted, check, image, pop, push, with};
 
 /// `jsr`: pushes `ret`, calls, and returns the result when it is not `ret`.
 fn call(state: *mut AgState, target: u32, ret: u32) -> Option<u32> {
@@ -41,20 +17,6 @@ fn call(state: *mut AgState, target: u32, ret: u32) -> Option<u32> {
     // SAFETY: the state of a running run; `ag_lookup` never returns null.
     let next = unsafe { ag_lookup(state, target)(state, target) };
     (next != ret).then_some(next)
-}
-
-/// `AG_CYCLES` then `AG_CHECK` at a loop target.
-fn check(state: *mut AgState, pc: u32, cost: i32) -> Option<u32> {
-    let due = with(state, |state| {
-        state.cycles -= cost;
-        state.cycles <= 0
-    });
-    if !due {
-        return None;
-    }
-    // SAFETY: the state of a running run.
-    let next = unsafe { ag_check(state, pc) };
-    (next != pc).then_some(next)
 }
 
 /// STOP, continuing at `resume`.
@@ -163,7 +125,65 @@ unsafe extern "C" fn f_000800(state: *mut AgState, _pc: u32) -> u32 {
     }
 }
 
-static TABLE: [AgEntry; 12] = [
+/// `loop: addq.l #1,d0; bra loop`, with interrupts let through.
+unsafe extern "C" fn f_000900(state: *mut AgState, _pc: u32) -> u32 {
+    loop {
+        if let Some(next) = check(state, 0x900, 10) {
+            return next;
+        }
+        set(state, |state| state.d[0] += 1);
+    }
+}
+
+/// The vertical interrupt handler: counts its calls in d6, copies its frame's SR and PC to
+/// d4 and d5, and on its third call rewrites the stacked PC to $A00 before its RTE.
+unsafe extern "C" fn f_000980(state: *mut AgState, _pc: u32) -> u32 {
+    let calls = with(state, |state| {
+        let frame = state.a[7];
+        let word = |offset: u32| {
+            u32::from(state.ram[ram_index(frame + offset)]) << 8
+                | u32::from(state.ram[ram_index(frame + offset + 1)])
+        };
+        state.d[4] = word(0);
+        state.d[5] = word(2) << 16 | word(4);
+        state.d[6] += 1;
+        state.d[6]
+    });
+    if calls == 3 {
+        with(state, |state| {
+            let pc = state.a[7] + 2;
+            for (offset, byte) in 0xA00u32.to_be_bytes().into_iter().enumerate() {
+                state.ram[ram_index(pc + offset as u32)] = byte;
+            }
+        });
+    }
+    rte(state)
+}
+
+/// `rte` in supervisor mode: pops SR, then the PC it returns.
+fn rte(state: *mut AgState) -> u32 {
+    with(state, |state| {
+        let frame = state.a[7];
+        let sr = u16::from_be_bytes([state.ram[ram_index(frame)], state.ram[ram_index(frame + 1)]]);
+        state.a[7] += 2;
+        state.sr = sr & 0xA700;
+        [state.x, state.n, state.z, state.v, state.c] =
+            [4, 3, 2, 1, 0].map(|bit| (sr >> bit & 1) as u8);
+    });
+    pop(state)
+}
+
+/// Where the rewritten frame leads: `moveq #1,d7; loop: bra loop`.
+unsafe extern "C" fn f_000a00(state: *mut AgState, _pc: u32) -> u32 {
+    set(state, |state| state.d[7] = 1);
+    loop {
+        if let Some(next) = check(state, 0xA00, 10) {
+            return next;
+        }
+    }
+}
+
+static TABLE: [AgEntry; 15] = [
     AgEntry {
         address: 0x200,
         function: f_000200,
@@ -212,6 +232,18 @@ static TABLE: [AgEntry; 12] = [
         address: 0x800,
         function: f_000800,
     },
+    AgEntry {
+        address: 0x900,
+        function: f_000900,
+    },
+    AgEntry {
+        address: 0x980,
+        function: f_000980,
+    },
+    AgEntry {
+        address: 0xA00,
+        function: f_000a00,
+    },
 ];
 
 /// 68000 code the table does not cover, run by the interpreter.
@@ -228,17 +260,11 @@ const CODE: &[(u32, &[u16])] = &[
     (0x580, &[0x7C01, 0x4E72, 0x2700]),
 ];
 
+/// The vertical interrupt's autovector.
+const VINT_VECTOR: u8 = 30;
+
 fn rom() -> Rom {
-    let mut bytes = vec![0; 0x1000];
-    bytes[0..4].copy_from_slice(&SSP.to_be_bytes());
-    bytes[4..8].copy_from_slice(&0x200u32.to_be_bytes());
-    for &(address, words) in CODE {
-        for (index, word) in words.iter().enumerate() {
-            let at = address as usize + 2 * index;
-            bytes[at..at + 2].copy_from_slice(&word.to_be_bytes());
-        }
-    }
-    Rom::from_bytes(bytes).expect("the synthetic image is a well-formed .bin")
+    image(0x200, &[(VINT_VECTOR, 0x980)], CODE)
 }
 
 fn runtime(options: Options) -> Runtime {
@@ -331,11 +357,13 @@ fn test_interpreter_hands_back_at_the_first_table_address() {
 }
 
 #[test]
-fn test_run_continues_after_stop_and_ends_at_an_idle_loop() {
+fn test_stop_without_interrupts_stays_stopped_across_runs() {
     let mut runtime = runtime(idle());
     runtime.state_mut().a[0] = 0x310;
     assert_eq!(runtime.run(), Exit::Stopped { resume: 0x20A });
-    assert_eq!(runtime.run(), Exit::Idle { pc: 0x20A });
+    assert!(runtime.stopped());
+    assert_eq!(runtime.run(), Exit::Stopped { resume: 0x20A });
+    assert_eq!(runtime.state().d[0], 2);
 }
 
 #[test]
@@ -388,6 +416,50 @@ fn test_depth_guard_unwinds_abandoned_native_frames() {
     assert_eq!(exit, Exit::CycleCap { pc: 0x700 });
     assert!(unwinds > 10, "{unwinds} unwinds");
     assert_eq!(sp, SSP);
+}
+
+/// Runs the interrupt-enabled loop at $900 with vertical interrupts at `events`.
+fn run_interrupted(events: &[u64], max_cycles: u64) -> (Runtime, Exit) {
+    let events: Vec<(u64, u8)> = events.iter().map(|&at| (at, 6)).collect();
+    let options = Options {
+        max_cycles,
+        ..Options::default()
+    };
+    let mut runtime = Runtime::new(rom(), &TABLE, Scripted::new(&events), options);
+    let state = runtime.state_mut();
+    state.pc = 0x900;
+    state.sr = 0x2000;
+    state.c = 1;
+    let exit = runtime.run();
+    (runtime, exit)
+}
+
+#[test]
+fn test_native_handler_runs_from_a_check_point_with_a_real_frame() {
+    let (runtime, exit) = run_interrupted(&[1_000], 1_500);
+    assert_eq!(exit, Exit::CycleCap { pc: 0x900 });
+    let state = runtime.state();
+    assert_eq!(state.d[6], 1);
+    assert_eq!(
+        (state.d[4], state.d[5]),
+        (0x2001, 0x900),
+        "stacked SR and PC"
+    );
+    assert_eq!((state.sr, state.c, state.a[7]), (0x2000, 1, SSP));
+    assert_eq!(runtime.interrupts(6), 1);
+    // The handler ran at the first check point at or after the interrupt, plus its 44
+    // cycles of exception processing.
+    assert!(runtime.cycles() >= 1_044);
+}
+
+#[test]
+fn test_rewritten_stacked_pc_falls_back_to_the_dispatcher() {
+    let (runtime, exit) = run_interrupted(&[1_000, 2_000, 3_000], 4_000);
+    assert_eq!(exit, Exit::CycleCap { pc: 0xA00 });
+    let state = runtime.state();
+    assert_eq!((state.d[6], state.d[7], state.a[7]), (3, 1, SSP));
+    assert!(misses(&runtime).is_empty());
+    assert_eq!(runtime.log().unwinds(), 0);
 }
 
 #[test]

@@ -1,12 +1,16 @@
 //! The `ag_*` functions translated code calls, exported under their C names.
 //!
 //! `AgState::runtime` points at the [`Context`] of the run in progress, set by
-//! [`Runtime::run`](crate::Runtime::run).
+//! [`Runtime::run`](crate::Runtime::run). `ag_check` and `ag_stop` may run interrupt
+//! handlers, so they take the raw state rather than a borrow of it.
 
 use anygenesis_abi::{AgFn, AgState, signatures};
 use anygenesis_shared::{Address, Bus};
 
-use crate::{bus::SystemBus, machine::Context};
+use crate::{
+    bus::SystemBus,
+    machine::{self, Context},
+};
 
 // Each export has the signature the abi crate declares for it.
 const _: signatures::ag_read8 = ag_read8;
@@ -138,7 +142,7 @@ pub unsafe extern "C" fn ag_lookup(state: *mut AgState, address: u32) -> AgFn {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ag_stop(state: *mut AgState, resume: u32) -> u32 {
     // SAFETY: forwarded from the caller.
-    unsafe { with_context(state, |state, context| context.stop(state, resume)) }
+    unsafe { machine::stop(state, resume) }
 }
 
 /// # Safety
@@ -146,7 +150,7 @@ pub unsafe extern "C" fn ag_stop(state: *mut AgState, resume: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ag_check(state: *mut AgState, pc: u32) -> u32 {
     // SAFETY: forwarded from the caller.
-    unsafe { with_context(state, |state, context| context.check(state, pc)) }
+    unsafe { machine::check(state, pc) }
 }
 
 /// # Safety

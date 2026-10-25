@@ -22,7 +22,7 @@ mod lift;
 mod op;
 mod validate;
 
-pub use exception::exception_entry;
+pub use exception::{exception_entry, interrupt_entry};
 pub use flags::FlagSet;
 pub use lift::{LiftError, lift};
 pub use op::{

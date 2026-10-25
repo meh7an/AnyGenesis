@@ -58,8 +58,13 @@ fn recompile(game: &OsString, out: &Path) -> Result<String, String> {
     println!("cargo::rerun-if-changed={}", rom_path.display());
     let config = build::load_config(&config_path).map_err(|error| error.to_string())?;
     let rom = build::load_rom(&rom_path).map_err(|error| format!("{ROM_VAR}: {error}"))?;
-    let translation = build::translate(&rom, &config, &build::game_options())
-        .map_err(|error| format!("{ROM_VAR} does not fit games/{game}.toml: {error}"))?;
+    let translation = build::translate(
+        &rom,
+        &config,
+        build::game_liveness(),
+        &build::game_options(),
+    )
+    .map_err(|error| format!("{ROM_VAR} does not fit games/{game}.toml: {error}"))?;
     let directory = out.join("c");
     let sources =
         build::write_output(&translation.output, &directory).map_err(|error| error.to_string())?;

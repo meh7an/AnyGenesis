@@ -7,6 +7,8 @@ use std::{any::Any, fmt::Debug};
 use anygenesis_abi::{RAM_SIZE, Region, ram_index};
 use anygenesis_shared::Size;
 
+use crate::timing::Timing;
+
 /// Offsets inside the 0x20-byte VDP block, which repeats through 0xC00000-0xDFFFFF.
 pub mod port {
     /// Data port (also at 0x02).
@@ -58,18 +60,28 @@ pub trait Hardware: Any + Debug {
     fn write(&mut self, port: u8, size: Size, value: u16, memory: Memory<'_>);
     /// Moves the hardware's clock on by `cycles` 68000 cycles.
     fn advance(&mut self, cycles: u32);
+    /// 68000 cycles until the next point where an interrupt may become pending, at least 1:
+    /// the scheduler runs code that long before it looks again.
+    fn until_event(&self) -> u32;
+    /// Frames that have ended so far: vertical blanking periods begun.
+    fn frames(&self) -> u64;
     /// Returns the highest interrupt level the hardware asserts.
     fn pending_interrupt(&self) -> Option<u8>;
+    /// The levels the hardware may raise from now on, one bit per level: with none above
+    /// the interrupt mask, a wait for an interrupt never ends.
+    fn enabled_interrupts(&self) -> u8;
     /// The 68000 took the interrupt at `level`.
     fn acknowledge(&mut self, level: u8);
     /// The reset line: power-on or the RESET instruction.
     fn reset(&mut self);
 }
 
-/// Stands in for the VDP until it is built: always ready, never interrupts, and counts what
-/// it is told.
+/// Stands in for the VDP until it is built: it keeps NTSC time and raises the vertical and
+/// horizontal interrupts as registers 0, 1 and 10 ask, is otherwise always ready, and counts
+/// what it is told.
 #[derive(Debug, Clone, Default)]
 pub struct StubVdp {
+    timing: Timing,
     /// The last value written to each register by a register-write command.
     pub registers: [u8; 24],
     pub register_writes: u64,
@@ -83,14 +95,20 @@ pub struct StubVdp {
 }
 
 impl StubVdp {
-    /// The status word: FIFO empty, no DMA, outside both blanking periods, NTSC.
+    /// The status word apart from the timing bits: FIFO empty, no DMA, NTSC.
     pub const STATUS: u16 = 0x0200;
+
+    /// The beam position and interrupt state.
+    pub fn timing(&self) -> &Timing {
+        &self.timing
+    }
 
     fn control(&mut self, value: u16) {
         if !self.pending && value & 0xC000 == 0x8000 {
             let register = usize::from(value >> 8 & 0x1F);
             if let Some(slot) = self.registers.get_mut(register) {
                 *slot = value as u8;
+                self.timing.set_register(register, value as u8);
             }
             self.register_writes += 1;
         } else {
@@ -107,7 +125,7 @@ impl Hardware for StubVdp {
                 // Reading the status ends a half-written command, as on the real VDP.
                 self.pending = false;
                 self.status_reads += 1;
-                Self::STATUS
+                Self::STATUS | self.timing.status()
             }
             _ => 0,
         }
@@ -125,13 +143,29 @@ impl Hardware for StubVdp {
         }
     }
 
-    fn advance(&mut self, _cycles: u32) {}
-
-    fn pending_interrupt(&self) -> Option<u8> {
-        None
+    fn advance(&mut self, cycles: u32) {
+        self.timing.advance(cycles);
     }
 
-    fn acknowledge(&mut self, _level: u8) {}
+    fn until_event(&self) -> u32 {
+        self.timing.until_event()
+    }
+
+    fn frames(&self) -> u64 {
+        self.timing.frames()
+    }
+
+    fn pending_interrupt(&self) -> Option<u8> {
+        self.timing.pending()
+    }
+
+    fn enabled_interrupts(&self) -> u8 {
+        self.timing.enabled()
+    }
+
+    fn acknowledge(&mut self, level: u8) {
+        self.timing.acknowledge(level);
+    }
 
     fn reset(&mut self) {
         self.pending = false;
@@ -170,9 +204,28 @@ mod tests {
     fn test_stub_vdp_status_read_ends_a_half_written_command() {
         let mut vdp = StubVdp::default();
         write(&mut vdp, port::CONTROL, 0x4000);
-        assert_eq!(vdp.read(port::CONTROL, Size::Word), StubVdp::STATUS);
+        let status = StubVdp::STATUS | vdp.timing().status();
+        assert_eq!(vdp.read(port::CONTROL, Size::Word), status);
         write(&mut vdp, port::CONTROL, 0x8114);
         assert_eq!(vdp.register_writes, 1);
+    }
+
+    #[test]
+    fn test_stub_vdp_interrupts_follow_its_registers() {
+        let mut vdp = StubVdp::default();
+        write(&mut vdp, port::CONTROL, 0x8A00);
+        write(&mut vdp, port::CONTROL, 0x8014);
+        write(&mut vdp, port::CONTROL, 0x8164);
+        assert_eq!(vdp.enabled_interrupts(), 1 << 6 | 1 << 4);
+        vdp.advance(vdp.until_event());
+        assert_eq!(vdp.pending_interrupt(), Some(4));
+        vdp.acknowledge(4);
+        // A whole frame raises the vertical interrupt, which outranks the horizontal one.
+        vdp.advance(130_000);
+        assert_eq!(vdp.pending_interrupt(), Some(6));
+        assert_eq!(vdp.frames(), 1);
+        let status = vdp.read(port::CONTROL, Size::Word);
+        assert_ne!(status & crate::timing::status::VINT, 0);
     }
 
     #[test]

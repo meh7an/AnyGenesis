@@ -1,8 +1,9 @@
 //! The recompiled game: translated 68000 code linked against the runtime.
 //!
 //! The binary loads and checks the ROM, checks the translated program's address table and
-//! runs from reset. Until interrupts exist the run ends at the first idle loop (or a STOP,
-//! or a cycle cap), and the binary reports where, and what the runtime logged on the way.
+//! runs from reset for a number of frames on the stub VDP, which raises the vertical and
+//! horizontal interrupts but draws nothing. It reports where the run ended and what the
+//! runtime logged on the way.
 
 mod game;
 
@@ -12,7 +13,7 @@ use std::{
     thread,
 };
 
-use anygenesis_abi::AgEntry;
+use anygenesis_abi::{AgEntry, ram_index};
 use anygenesis_rom::Rom;
 use anygenesis_runtime::{Access, Exit, Miss, Options, RUN_STACK, Runtime, StubVdp};
 use anyhow::{Context, Result, anyhow, bail};
@@ -20,14 +21,19 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::game::CompiledGame;
 
 const ROM_VAR: &str = "ANYGENESIS_ROM";
-/// Far beyond Sonic 1's reset path, for runs that never go idle.
-const MAX_CYCLES: u64 = 50_000_000;
+const USAGE: &str = "usage: anygenesis [<rom.bin> [<frames>]] (the ROM may come from \
+                     ANYGENESIS_ROM)";
+/// Ten seconds of NTSC frames.
+const DEFAULT_FRAMES: u64 = 600;
+/// The work RAM byte the report shows; Sonic 1 keeps its game mode there.
+const WATCHED_BYTE: u32 = 0xFF_F600;
 
 fn main() -> Result<()> {
     let Some(game) = game::compiled() else {
         bail!("built without a game: set GAME and {ROM_VAR}, then rebuild");
     };
     let path = rom_path()?;
+    let frames = frame_count()?;
     let rom = load_rom(&game, &path)?;
     println!("game {}, ROM SHA-1 {}", game.name, game.sha1);
     println!(
@@ -36,7 +42,7 @@ fn main() -> Result<()> {
         game.table.len(),
         game.vector_handlers.len()
     );
-    let report = run_from_reset(game.table, rom)?;
+    let report = run_from_reset(game.table, rom, frames)?;
     report.print();
     Ok(())
 }
@@ -47,7 +53,17 @@ fn rom_path() -> Result<PathBuf> {
         .nth(1)
         .or_else(|| env::var_os(ROM_VAR))
         .map(PathBuf::from)
-        .with_context(|| format!("usage: anygenesis <rom.bin> (or set {ROM_VAR})"))
+        .context(USAGE)
+}
+
+/// Frames to run: the second argument, else ten seconds' worth.
+fn frame_count() -> Result<u64> {
+    let Some(argument) = env::args().nth(2) else {
+        return Ok(DEFAULT_FRAMES);
+    };
+    argument
+        .parse()
+        .with_context(|| format!("{argument:?} is not a frame count\n{USAGE}"))
 }
 
 /// Loads the ROM at `path`, refusing any but the one `game` was translated from, and checks
@@ -74,6 +90,12 @@ struct Report {
     reset_pc: u32,
     exit: Exit,
     cycles: u64,
+    frames: u64,
+    vblanks: u64,
+    hblanks: u64,
+    /// The status register's system byte at the end.
+    sr: u16,
+    watched: u8,
     misses: Vec<(u32, Miss)>,
     accesses: Vec<(Access, u64)>,
     unwinds: u64,
@@ -86,7 +108,15 @@ struct Report {
 impl Report {
     fn print(&self) {
         println!("reset: SSP ${:08X}, PC ${:06X}", self.ssp, self.reset_pc);
-        println!("run ended: {} after {} cycles", self.exit, self.cycles);
+        println!(
+            "run ended: {} after {} cycles, {} frames",
+            self.exit, self.cycles, self.frames
+        );
+        println!(
+            "interrupts taken: {} VBlank (level 6), {} HBlank (level 4); SR ${:04X}, RAM \
+             ${WATCHED_BYTE:06X} = ${:02X}",
+            self.vblanks, self.hblanks, self.sr, self.watched
+        );
         println!(
             "TMSS {}, Z80 RAM {} bytes set, native stack unwinds {}",
             if self.tmss_unlocked {
@@ -122,26 +152,32 @@ impl Report {
     }
 }
 
-/// Runs from reset on a thread with room for the native stack until the run ends.
-fn run_from_reset(table: &'static [AgEntry], rom: Rom) -> Result<Report> {
+/// Runs from reset on a thread with room for the native stack until `frames` frames have
+/// ended, or the run stops earlier at a wait nothing can end.
+fn run_from_reset(table: &'static [AgEntry], rom: Rom, frames: u64) -> Result<Report> {
     let worker = thread::Builder::new()
         .name("68000".into())
         .stack_size(RUN_STACK)
         .spawn(move || {
             let options = Options {
                 stop_when_idle: true,
-                max_cycles: MAX_CYCLES,
                 ..Options::default()
             };
             let mut runtime = Runtime::new(rom, table, Box::<StubVdp>::default(), options);
             let ssp = runtime.state().a[7];
             let reset_pc = runtime.state().pc;
-            let exit = runtime.run();
+            let exit = runtime.run_frames(frames);
+            let state = runtime.state();
             Report {
                 ssp,
                 reset_pc,
                 exit,
                 cycles: runtime.cycles(),
+                frames: runtime.frames(),
+                vblanks: runtime.interrupts(6),
+                hblanks: runtime.interrupts(4),
+                sr: state.sr,
+                watched: state.ram[ram_index(WATCHED_BYTE)],
                 misses: runtime
                     .log()
                     .misses()
@@ -165,18 +201,25 @@ fn run_from_reset(table: &'static [AgEntry], rom: Rom) -> Result<Report> {
 mod tests {
     use super::*;
 
-    /// Sonic 1 from reset against the stub VDP, up to the first wait the stub cannot end.
+    /// Sonic 1 from reset for ten seconds of frames on the stub VDP, with interrupts.
     #[test]
     #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
-    fn test_reset_path_reaches_an_idle_loop_without_misses() {
+    fn test_sonic1_runs_600_frames_without_misses() {
         let game = game::compiled().expect("the game crate was built with GAME set");
         let path = env::var_os(ROM_VAR).expect("ANYGENESIS_ROM is set");
         let rom = load_rom(&game, Path::new(&path)).expect("the ROM matches the build");
-        let report = run_from_reset(game.table, rom).expect("the run finishes");
+        let report = run_from_reset(game.table, rom, DEFAULT_FRAMES).expect("the run finishes");
         report.print();
-        assert!(matches!(report.exit, Exit::Idle { .. }), "{}", report.exit);
+        assert!(
+            matches!(report.exit, Exit::Frames { .. }),
+            "{}",
+            report.exit
+        );
+        assert_eq!(report.frames, DEFAULT_FRAMES);
         assert!(report.misses.is_empty(), "{:?}", report.misses);
+        assert!(report.accesses.is_empty(), "{:?}", report.accesses);
         assert_eq!(report.unwinds, 0);
+        assert!(report.vblanks > 0);
         assert!(report.tmss_unlocked);
         assert!(report.vdp.register_writes > 0);
         assert!(report.z80_bytes > 0);

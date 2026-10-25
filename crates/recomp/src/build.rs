@@ -131,19 +131,32 @@ pub fn load_rom(path: &Path) -> Result<Rom, BuildError> {
     })
 }
 
-/// The options a game executable is built with: cycle accounting and a check point at every
-/// loop target, the hooks the runtime's scheduler needs.
+/// The options a game executable is built with: cycle accounting and a check point at the
+/// start of every block, the hooks the runtime's scheduler needs. Interrupts then arrive
+/// within a block of being raised.
 pub fn game_options() -> EmitOptions {
     EmitOptions {
         cycles: true,
-        check_points: CheckPoints::LoopTargets,
+        check_points: CheckPoints::BlockStarts,
         ..EmitOptions::default()
     }
 }
 
-/// Emits C for every function of `analysis`, with dead flags pruned.
-pub fn emit_program(analysis: &Analysis, options: &EmitOptions) -> Output {
-    let liveness = FlagLiveness::new(analysis, LivenessOptions::default());
+/// The flag liveness a game executable is built with: every check point reads the whole
+/// status register, so the frame an interrupt pushes there holds exact flags.
+pub fn game_liveness() -> LivenessOptions {
+    LivenessOptions {
+        check_points_read_sr: true,
+    }
+}
+
+/// Emits C for every function of `analysis`, with the flags `liveness` proves dead pruned.
+pub fn emit_program(
+    analysis: &Analysis,
+    liveness: LivenessOptions,
+    options: &EmitOptions,
+) -> Output {
+    let liveness = FlagLiveness::new(analysis, liveness);
     emit(analysis, &liveness, options)
 }
 
@@ -154,10 +167,11 @@ pub fn emit_program(analysis: &Analysis, options: &EmitOptions) -> Output {
 pub fn translate(
     rom: &Rom,
     config: &GameConfig,
+    liveness: LivenessOptions,
     options: &EmitOptions,
 ) -> Result<Translation, BuildError> {
     let analysis = analyze(rom, config)?;
-    let output = emit_program(&analysis, options);
+    let output = emit_program(&analysis, liveness, options);
     Ok(Translation { analysis, output })
 }
 

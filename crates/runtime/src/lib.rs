@@ -3,8 +3,10 @@
 //! with the IR interpreter as the fallback for addresses no function covers.
 //!
 //! The VDP and everything that keeps time sit behind [`Hardware`]; [`StubVdp`] answers until
-//! the real one exists. The translated program's `ag_table` comes in as a slice: only the
-//! crate that links the generated C names its symbols.
+//! the real one exists, keeping NTSC time through [`timing`]. The scheduler delivers its
+//! interrupts at the check points translated code calls. The translated program's
+//! `ag_table` comes in as a slice: only the crate that links the generated C names its
+//! symbols.
 
 mod bus;
 mod externs;
@@ -12,6 +14,7 @@ pub mod hardware;
 pub mod io;
 pub mod log;
 mod machine;
+pub mod timing;
 pub mod z80;
 
 pub use externs::{
