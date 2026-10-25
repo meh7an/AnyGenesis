@@ -61,13 +61,16 @@ impl Instruction {
             .iter()
             .flatten()
             .find_map(|operand| match operand {
-                // The displacement is relative to the word after the opcode.
-                Operand::Branch(displacement) => {
-                    Some(address.wrapping_add(2).offset(i32::from(*displacement)))
-                }
+                Operand::Branch(displacement) => Some(branch_target(address, *displacement)),
                 _ => None,
             })
     }
+}
+
+/// Returns where a branch displacement at instruction `address` leads.
+pub(crate) fn branch_target(address: Address, displacement: i16) -> Address {
+    // The displacement is relative to the word after the opcode.
+    address.wrapping_add(2).offset(i32::from(displacement))
 }
 
 /// An instruction operand.
