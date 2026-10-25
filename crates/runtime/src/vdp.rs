@@ -2,6 +2,10 @@
 //! the control port's two-word commands, the data port with auto-increment, DMA, the status
 //! register and the HV counter. Time and interrupts come from the embedded [`Timing`].
 //!
+//! As time passes, each picture line is drawn ([`render`]) where its horizontal blanking
+//! ends, from the state at that moment; a frame is finished once line 223 is drawn, before
+//! its vertical interrupt point, and [`Vdp::frame`] gives it until the next one is.
+//!
 //! Commands latch in two words: the first sets the address bits 13-0 and the code bits
 //! CD1-CD0 at once, the second the code bits CD5-CD2 and the address bits 15-14, and starts
 //! a DMA when CD5 and register 1 bit 4 are set. A word whose top bits are `10` while no
@@ -21,13 +25,16 @@
 //! outside their bits, and VSRAM above its 40 words reads 0 and ignores writes.
 
 mod dma;
+pub mod render;
 
 use anygenesis_shared::Size;
+pub use render::Frame;
 
 use crate::{
     hardware::{Hardware, Memory},
     log::AccessKind,
-    timing::{CPU_DIVIDER, Timing},
+    timing::{ACTIVE_LINES, CPU_DIVIDER, Timing},
+    vdp::render::{Screen, Source},
 };
 
 /// Bytes of VRAM.
@@ -127,6 +134,7 @@ pub struct Vdp {
     /// What the last access did that no rule covers, until the bus takes it.
     fault: Option<AccessKind>,
     counts: Counts,
+    screen: Screen,
 }
 
 impl Default for Vdp {
@@ -146,6 +154,7 @@ impl Default for Vdp {
             stall: 0,
             fault: None,
             counts: Counts::default(),
+            screen: Screen::default(),
         }
     }
 }
@@ -196,6 +205,26 @@ impl Vdp {
         self.latch.unwrap_or_else(|| self.timing.hv())
     }
 
+    /// The last finished frame; black until the first one is.
+    pub fn frame(&self) -> &Frame {
+        self.screen.frame()
+    }
+
+    /// Draws the line whose pixels start now, if it is a picture line.
+    fn draw_line(&mut self) {
+        let line = self.timing.line();
+        if line < ACTIVE_LINES {
+            let source = Source {
+                registers: &self.registers,
+                vram: &self.vram,
+                cram: &self.cram,
+                vsram: &self.vsram,
+            };
+            // Below 224, so it fits.
+            self.screen.draw_line(source, line as usize);
+        }
+    }
+
     fn fault(&mut self, kind: AccessKind) {
         self.fault = Some(kind);
     }
@@ -239,8 +268,22 @@ impl Vdp {
             }
             // Mode 4 (bit 2 clear) and 128 KiB VRAM (bit 7) are not built.
             1 if value & 0x04 == 0 || value & 0x80 != 0 => self.fault(AccessKind::VdpRegister),
-            // Only both resolution bits set or both clear are documented.
-            12 if (value & 0x01 != 0) != (value & 0x80 != 0) => self.fault(AccessKind::VdpRegister),
+            // Only both resolution bits set or both clear are documented; shadow/highlight
+            // (bit 3) and double-resolution interlace (bits 2-1 = 3) are not drawn.
+            12 if (value & 0x01 != 0) != (value & 0x80 != 0)
+                || value & 0x08 != 0
+                || value & 0x06 == 0x06 =>
+            {
+                self.fault(AccessKind::VdpRegister)
+            }
+            // A size field of `10` is prohibited, and a plane larger than 8 KiB does not fit
+            // the name-table address space.
+            16 if value & 0x03 == 0x02
+                || value & 0x30 == 0x20
+                || render::plane_cells(value) * render::plane_cells(value >> 4) > 4096 =>
+            {
+                self.fault(AccessKind::VdpRegister)
+            }
             _ => {}
         }
     }
@@ -356,7 +399,16 @@ impl Hardware for Vdp {
     }
 
     fn advance(&mut self, cycles: u32) {
-        self.timing.advance(cycles);
+        let target = self.timing.clock() + u64::from(cycles) * CPU_DIVIDER;
+        loop {
+            let pixels = self.timing.next_pixels();
+            if pixels > target {
+                break;
+            }
+            self.timing.advance_to(pixels);
+            self.draw_line();
+        }
+        self.timing.advance_to(target);
     }
 
     fn until_event(&self) -> u32 {
@@ -572,6 +624,29 @@ mod tests {
             Some(AccessKind::VdpRegister)
         );
         assert_eq!(write(&mut vdp, port::CONTROL, &[0x8C00, 0x8174]), None);
+    }
+
+    #[test]
+    fn test_modes_the_renderer_does_not_draw_are_faults() {
+        let mut vdp = vdp();
+        // Shadow/highlight, then double-resolution interlace; normal interlace is drawn.
+        for (word, fault) in [
+            (0x8C89, Some(AccessKind::VdpRegister)),
+            (0x8C87, Some(AccessKind::VdpRegister)),
+            (0x8C83, None),
+        ] {
+            assert_eq!(write(&mut vdp, port::CONTROL, &[word]), fault, "{word:04X}");
+        }
+        // Plane sizes: a `10` field, then 128x64 cells (16 KiB), then 64x64 and 128x32.
+        for (word, fault) in [
+            (0x9002, Some(AccessKind::VdpRegister)),
+            (0x9020, Some(AccessKind::VdpRegister)),
+            (0x9013, Some(AccessKind::VdpRegister)),
+            (0x9011, None),
+            (0x9003, None),
+        ] {
+            assert_eq!(write(&mut vdp, port::CONTROL, &[word]), fault, "{word:04X}");
+        }
     }
 
     #[test]

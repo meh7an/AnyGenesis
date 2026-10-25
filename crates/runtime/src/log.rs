@@ -32,7 +32,8 @@ pub enum AccessKind {
     /// counter, a PSG read, or the ports past the PSG.
     VdpCommand,
     /// A VDP register past 23, or a mode the VDP does not build (mode 4, 128 KiB VRAM, a
-    /// mixed horizontal resolution).
+    /// mixed horizontal resolution, shadow/highlight, double-resolution interlace, a
+    /// prohibited plane size).
     VdpRegister,
     /// A DMA that reads outside ROM and work RAM, fills CRAM or VSRAM, or transfers through
     /// a code with no write target.

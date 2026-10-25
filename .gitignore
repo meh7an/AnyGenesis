@@ -1,4 +1,5 @@
 /target/
+/dumps/
 /generated/
 /roms/
 /testdata/

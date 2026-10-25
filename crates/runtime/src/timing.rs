@@ -238,7 +238,11 @@ impl Timing {
 
     /// Moves time on by `cycles` 68000 cycles, raising whatever comes due on the way.
     pub fn advance(&mut self, cycles: u32) {
-        let target = self.clock + u64::from(cycles) * CPU_DIVIDER;
+        self.advance_to(self.clock + u64::from(cycles) * CPU_DIVIDER);
+    }
+
+    /// Moves time on to master clock `target`, raising whatever comes due on the way.
+    pub fn advance_to(&mut self, target: u64) {
         loop {
             let event = self.next_event();
             if event > target {
@@ -363,6 +367,19 @@ impl Timing {
     /// Frames that have ended: vertical interrupt points passed.
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// The first master clock after now where a line's pixels start going out: where its
+    /// horizontal blanking ends.
+    pub fn next_pixels(&self) -> u64 {
+        let at = self.mode.line_positions().hblank_end;
+        let position = self.position();
+        let start = self.clock - position;
+        if position < at {
+            start + at
+        } else {
+            start + LINE_CLOCKS + at
+        }
     }
 
     /// The line number the V counter shows: the beam's line, one further from the line's V
@@ -632,6 +649,15 @@ mod tests {
         // Double interlace shows the V counter shifted, with bit 8 in bit 0.
         advance_to(&mut timing, 2 * FRAME_CLOCKS + 0x90 * LINE_CLOCKS);
         assert_eq!(timing.hv() >> 8, 0x90 << 1 & 0xFF);
+    }
+
+    #[test]
+    fn test_next_pixels_is_the_next_end_of_horizontal_blanking() {
+        let mut timing = h40();
+        assert_eq!(timing.next_pixels(), 96);
+        timing.advance_to(96);
+        assert_eq!(timing.next_pixels(), LINE_CLOCKS + 96);
+        assert_eq!(Timing::default().next_pixels(), 100);
     }
 
     #[test]
