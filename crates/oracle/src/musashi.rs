@@ -106,6 +106,13 @@ pub struct BusAccess {
     pub value: u16,
 }
 
+/// Memory a caller lends the core for [`Musashi::step_with`]. Long accesses arrive as two
+/// word accesses, high word first; `address` may carry bits above the 24 the 68000 drives.
+pub trait Memory {
+    fn read(&mut self, address: u32, size: AccessSize) -> u16;
+    fn write(&mut self, address: u32, size: AccessSize, value: u16);
+}
+
 /// Sparse memory: SingleStepTests cases touch a few dozen bytes of a 16 MiB space, and a
 /// dense array would cost a 16 MiB clear per case. Unwritten bytes read as zero.
 #[derive(Debug, Default)]
@@ -157,6 +164,16 @@ impl Bus {
             address,
             value,
         });
+    }
+}
+
+impl Memory for Bus {
+    fn read(&mut self, address: u32, size: AccessSize) -> u16 {
+        Bus::read(self, address, size)
+    }
+
+    fn write(&mut self, address: u32, size: AccessSize, value: u16) {
+        Bus::write(self, address, size, value);
     }
 }
 
@@ -227,29 +244,44 @@ impl Musashi {
         unsafe { oracle_stopped() != 0 }
     }
 
+    /// Executes one instruction against `memory` instead of the handle's own memory, and
+    /// returns the cycles Musashi charged. The bus log is not kept.
+    pub fn step_with(&mut self, memory: &mut dyn Memory) -> i32 {
+        // SAFETY: plain call into the core; `memory` is attached for its duration and the
+        // core lock is held by `self`.
+        with_memory(memory, || unsafe { oracle_step() })
+    }
+
     /// The bus cycles of the last [`Musashi::step`], in order.
     pub fn bus_log(&self) -> &[BusAccess] {
         &self.bus.log
     }
 
     fn with_bus<T>(&mut self, call: impl FnOnce() -> T) -> T {
-        let bus: *mut Bus = &mut self.bus;
-        // SAFETY: Musashi only calls back while `call` runs. During it `self` is exclusively
-        // borrowed and the core lock is held, so the pointer is the only access to the bus;
-        // it is detached again before the borrow ends.
-        unsafe { oracle_attach_bus(bus.cast(), bus_read, bus_write) };
-        let result = call();
-        unsafe { oracle_attach_bus(ptr::null_mut(), bus_read, bus_write) };
-        result
+        with_memory(&mut self.bus, call)
     }
 }
 
-/// Recovers the bus attached by [`Musashi::with_bus`].
-fn attached<'a>(bus: *mut c_void) -> &'a mut Bus {
-    // SAFETY: a non-null pointer was attached by `with_bus` and is valid until it detaches.
-    // Musashi never calls back outside a call wrapped in `with_bus`, so null is a bug in
-    // this module, and the panic aborts the process at the FFI boundary.
-    unsafe { bus.cast::<Bus>().as_mut() }.expect("Musashi called back with no bus attached")
+/// Attaches `memory` while `call` runs.
+fn with_memory<T>(memory: &mut dyn Memory, call: impl FnOnce() -> T) -> T {
+    let mut memory = memory;
+    let attached: *mut &mut dyn Memory = &mut memory;
+    // SAFETY: Musashi only calls back while `call` runs. During it `memory` is exclusively
+    // borrowed and the caller holds the core lock, so the pointer is the only access to it;
+    // it is detached again before the borrow ends.
+    unsafe { oracle_attach_bus(attached.cast(), bus_read, bus_write) };
+    let result = call();
+    unsafe { oracle_attach_bus(ptr::null_mut(), bus_read, bus_write) };
+    result
+}
+
+/// Recovers the memory attached by [`with_memory`].
+fn attached<'a>(bus: *mut c_void) -> &'a mut dyn Memory {
+    // SAFETY: a non-null pointer was attached by `with_memory` and is valid until it
+    // detaches. Musashi never calls back outside a call wrapped in `with_memory`, so null is
+    // a bug in this module, and the panic aborts the process at the FFI boundary.
+    let memory = unsafe { bus.cast::<&mut dyn Memory>().as_mut() };
+    &mut **memory.expect("Musashi called back with no bus attached")
 }
 
 extern "C" fn bus_read(bus: *mut c_void, address: c_uint, size: c_uint) -> c_uint {
@@ -343,6 +375,29 @@ mod tests {
         assert_eq!(writes, [(0x3000, 0x1122), (0x3002, 0x3344)]);
         assert_eq!(core.read_byte(0x3000), 0x11);
         assert_eq!(core.read_byte(0x3003), 0x44);
+    }
+
+    #[test]
+    fn test_step_with_runs_against_the_lent_memory() {
+        let mut core = Musashi::lock();
+        let mut memory = Bus::default();
+        // move.w d0,(a0)
+        memory.poke(0x1000, 0x30);
+        memory.poke(0x1001, 0x80);
+        let mut registers = supervisor_at(0x1000);
+        registers.d[0] = 0xBEEF;
+        registers.a[0] = 0x3000;
+        core.set_registers(&registers);
+
+        core.step_with(&mut memory);
+
+        assert_eq!(core.registers().pc, 0x1002);
+        assert_eq!((memory.peek(0x3000), memory.peek(0x3001)), (0xBE, 0xEF));
+        assert_eq!(
+            core.read_byte(0x3000),
+            0,
+            "the handle's own memory is untouched"
+        );
     }
 
     #[test]

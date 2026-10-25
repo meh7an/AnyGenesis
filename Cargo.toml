@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/abi",
     "crates/analysis",
+    "crates/c-oracle",
     "crates/codegen-c",
     "crates/gamecfg",
     "crates/ir",

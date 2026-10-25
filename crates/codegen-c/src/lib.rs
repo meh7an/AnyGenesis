@@ -55,6 +55,10 @@ pub struct EmitOptions {
     pub lines: Option<LineMap>,
     /// Starts a new `.c` file once the current one has at least this many lines.
     pub chunk_lines: usize,
+    /// Prepended to every global symbol the output defines (functions, `ag_table`,
+    /// `ag_table_size`) and to the `ag_functions.h` include guard, so several outputs can
+    /// link into one program. The `ag_*` externs keep their names.
+    pub symbol_prefix: String,
 }
 
 impl Default for EmitOptions {
@@ -64,6 +68,7 @@ impl Default for EmitOptions {
             check_points: CheckPoints::None,
             lines: None,
             chunk_lines: 20_000,
+            symbol_prefix: String::new(),
         }
     }
 }

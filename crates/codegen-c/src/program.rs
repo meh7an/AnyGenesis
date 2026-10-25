@@ -109,7 +109,7 @@ pub fn emit(analysis: &Analysis, liveness: &FlagLiveness<'_>, options: &EmitOpti
     }
     files.push(OutputFile {
         name: "ag_table.c".to_owned(),
-        text: table_file(&table),
+        text: table_file(&options.symbol_prefix, &table),
     });
     Output { files }
 }
@@ -142,26 +142,30 @@ fn runtime_header() -> String {
 }
 
 fn functions_header(context: &Context<'_>) -> String {
-    let mut text = format!("{GENERATED}\n#ifndef AG_FUNCTIONS_H\n#define AG_FUNCTIONS_H\n\n");
+    let prefix = &context.options.symbol_prefix;
+    let guard = format!("{}AG_FUNCTIONS_H", prefix.to_ascii_uppercase());
+    let mut text = format!("{GENERATED}\n#ifndef {guard}\n#define {guard}\n\n");
     text.push_str("#include \"ag_state.h\"\n\n");
     for function in context.functions() {
-        text.push_str(&prototype(function.entry));
+        text.push_str(&prototype(prefix, function.entry));
         text.push_str(";\n");
     }
     text.push_str("\n/* Every function entry and resume point, by address. */\n");
-    text.push_str("extern const AgEntry ag_table[];\n");
-    text.push_str("extern const uint32_t ag_table_size;\n\n#endif\n");
+    text.push_str(&format!("extern const AgEntry {prefix}ag_table[];\n"));
+    text.push_str(&format!(
+        "extern const uint32_t {prefix}ag_table_size;\n\n#endif\n"
+    ));
     text
 }
 
-fn table_file(table: &BTreeMap<Address, Address>) -> String {
+fn table_file(prefix: &str, table: &BTreeMap<Address, Address>) -> String {
     let mut text = format!("{GENERATED}\n#include \"ag_functions.h\"\n\n");
-    text.push_str("const AgEntry ag_table[] = {\n");
+    text.push_str(&format!("const AgEntry {prefix}ag_table[] = {{\n"));
     for (address, entry) in table {
         text.push_str(&format!(
             "    {{ {}, {} }},\n",
             constant(address.get()),
-            function_name(*entry)
+            function_name(prefix, *entry)
         ));
     }
     if table.is_empty() {
@@ -169,7 +173,7 @@ fn table_file(table: &BTreeMap<Address, Address>) -> String {
     }
     text.push_str("};\n\n");
     text.push_str(&format!(
-        "const uint32_t ag_table_size = {}u;\n",
+        "const uint32_t {prefix}ag_table_size = {}u;\n",
         table.len()
     ));
     text

@@ -239,6 +239,25 @@ fn test_compile_check_rejects_warnings() {
 }
 
 #[test]
+fn test_symbol_prefix_renames_every_defined_symbol() {
+    let plain = emit_program(calls(), &EmitOptions::default());
+    let options = EmitOptions {
+        symbol_prefix: "p7_".to_owned(),
+        ..EmitOptions::default()
+    };
+    let prefixed = emit_program(calls(), &options);
+    // Every name the output defines starts with `f_` or `ag_table`, or is the guard; the
+    // externs and helpers (`ag_lookup`, `ag_load16`, ...) keep their names.
+    let renamed = program_text(&plain)
+        .replace("f_", "p7_f_")
+        .replace("ag_table[]", "p7_ag_table[]")
+        .replace("ag_table_size", "p7_ag_table_size")
+        .replace("AG_FUNCTIONS_H", "P7_AG_FUNCTIONS_H");
+    assert_eq!(program_text(&prefixed), renamed);
+    compile(&prefixed, &scratch("prefix"), Optimization::Debug);
+}
+
+#[test]
 fn test_emission_is_deterministic() {
     let first = emit_program(tables(), &EmitOptions::default());
     let second = emit_program(tables(), &EmitOptions::default());

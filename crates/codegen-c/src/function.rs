@@ -27,14 +27,17 @@ pub struct Emitted {
     pub resume: BTreeSet<Address>,
 }
 
-/// Returns the C name of the function entered at `entry`.
-pub fn function_name(entry: Address) -> String {
-    format!("f_{:06X}", entry.get())
+/// Returns the C name of the function entered at `entry`, after the symbol prefix.
+pub fn function_name(prefix: &str, entry: Address) -> String {
+    format!("{prefix}f_{:06X}", entry.get())
 }
 
 /// Returns the C prototype of the function entered at `entry`, without a semicolon.
-pub fn prototype(entry: Address) -> String {
-    format!("uint32_t {}(AgState *s, uint32_t pc)", function_name(entry))
+pub fn prototype(prefix: &str, entry: Address) -> String {
+    format!(
+        "uint32_t {}(AgState *s, uint32_t pc)",
+        function_name(prefix, entry)
+    )
 }
 
 fn label(address: Address) -> String {
@@ -295,7 +298,7 @@ impl<'a> Emitter<'a> {
             self.labels.insert(target);
             vec![format!("goto {};", label(target))]
         } else if self.context.function(target).is_some() {
-            vec![tail_call(target)]
+            vec![self.tail_call(target)]
         } else {
             dispatch(&constant(target.get()))
         }
@@ -350,8 +353,11 @@ impl<'a> Emitter<'a> {
         match self.context.function(target) {
             // Whatever a callee hinted as never returning does return to reaches this
             // function's caller, which checks it, so no native frame needs to stay.
-            Some(callee) if callee.noreturn => vec![tail_call(target)],
-            Some(_) => self.native(Vec::new(), direct_call(target), return_address, next),
+            Some(callee) if callee.noreturn => vec![self.tail_call(target)],
+            Some(_) => {
+                let call = self.direct_call(target);
+                self.native(Vec::new(), call, return_address, next)
+            }
             None => {
                 let target = constant(target.get());
                 let call = format!("ag_lookup(s, {target})(s, {target})");
@@ -388,7 +394,7 @@ impl<'a> Emitter<'a> {
         setup.push("switch (target) {".to_owned());
         for target in targets {
             setup.push(format!("case {}:", constant(target.get())));
-            setup.push(format!("    next = {};", direct_call(target)));
+            setup.push(format!("    next = {};", self.direct_call(target)));
             setup.push("    break;".to_owned());
         }
         setup.push("default:".to_owned());
@@ -425,7 +431,7 @@ impl<'a> Emitter<'a> {
             }
         }
         let call = if let Some(function) = handler {
-            direct_call(function)
+            self.direct_call(function)
         } else {
             let address = match handler_temp {
                 Some(temp) => printer.value(Value::Temp(temp)),
@@ -477,10 +483,26 @@ impl<'a> Emitter<'a> {
         lines
     }
 
+    fn prefix(&self) -> &str {
+        &self.context.options.symbol_prefix
+    }
+
+    fn direct_call(&self, target: Address) -> String {
+        format!(
+            "{}(s, {})",
+            function_name(self.prefix(), target),
+            constant(target.get())
+        )
+    }
+
+    fn tail_call(&self, target: Address) -> String {
+        format!("AG_TAIL return {};", self.direct_call(target))
+    }
+
     fn finish(self) -> Emitted {
         let entry = self.function.entry;
         let mut text = String::new();
-        text.push_str(&prototype(entry));
+        text.push_str(&prototype(self.prefix(), entry));
         text.push_str("\n{\n");
         // Every state access is printed as `s->` or as an argument `(s, `; a function of
         // gotos only (an endless `bra.s *`) has neither.
@@ -558,14 +580,6 @@ fn check_points(context: &Context<'_>, function: &Function) -> BTreeSet<Address>
             .filter(|target| blocks.contains(target))
             .collect(),
     }
-}
-
-fn direct_call(target: Address) -> String {
-    format!("{}(s, {})", function_name(target), constant(target.get()))
-}
-
-fn tail_call(target: Address) -> String {
-    format!("AG_TAIL return {};", direct_call(target))
 }
 
 /// A tail call through the dispatcher to the address `target` (a C expression).
