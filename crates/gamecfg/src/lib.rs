@@ -9,6 +9,7 @@ mod parse;
 
 pub use config::{
     DataRegion, EntryKind, FunctionHint, GameConfig, IndirectHint, JumpTable, TargetKind,
+    UnreachedReason, UnreachedRegion,
 };
 pub use error::{ConfigError, Problem, ProblemKind};
 pub use location::Location;

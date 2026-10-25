@@ -73,9 +73,9 @@ pub enum ProblemKind {
     OddAddress { address: Address },
     /// A jump table with no entries.
     ZeroCount,
-    /// A data region whose end is not past its start.
+    /// A data or unreached region whose end is not past its start.
     EmptyRegion { start: Address, end: Address },
-    /// Two data regions share bytes.
+    /// Two regions, data or unreached, share bytes.
     OverlappingRegions { other: Location },
     /// The same address is given twice where it must be unique.
     Duplicate { address: Address, first: Location },
@@ -95,10 +95,10 @@ impl fmt::Display for ProblemKind {
             Self::OddAddress { address } => write!(f, "{address} is odd"),
             Self::ZeroCount => f.write_str("a jump table needs at least one entry"),
             Self::EmptyRegion { start, end } => {
-                write!(f, "data region end {end} is not past its start {start}")
+                write!(f, "region end {end} is not past its start {start}")
             }
             Self::OverlappingRegions { other } => {
-                write!(f, "data region overlaps the one at line {}", other.line)
+                write!(f, "region overlaps the one at line {}", other.line)
             }
             Self::Duplicate { address, first } => {
                 write!(f, "{address} is already given at line {}", first.line)

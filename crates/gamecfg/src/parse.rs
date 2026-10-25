@@ -6,7 +6,7 @@ use toml::Spanned;
 
 use crate::{
     ConfigError, DataRegion, EntryKind, FunctionHint, GameConfig, IndirectHint, JumpTable,
-    Location, Problem, ProblemKind, TargetKind,
+    Location, Problem, ProblemKind, TargetKind, UnreachedReason, UnreachedRegion,
 };
 
 /// The file as written; values keep their byte spans until validation turns them into
@@ -23,6 +23,8 @@ struct RawConfig {
     data: Vec<RawData>,
     #[serde(default)]
     indirect: Vec<RawIndirect>,
+    #[serde(default)]
+    unreached: Vec<RawUnreached>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +61,14 @@ struct RawIndirect {
     targets: Spanned<Vec<Spanned<u32>>>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUnreached {
+    start: Spanned<u32>,
+    end: Spanned<u32>,
+    reason: UnreachedReason,
+}
+
 pub(crate) fn parse(text: &str) -> Result<GameConfig, ConfigError> {
     let raw: RawConfig = toml::from_str(text).map_err(|error| ConfigError::Parse {
         location: error
@@ -93,12 +103,24 @@ impl Validator<'_> {
         let functions = self.functions(&raw.function, &data_regions);
         let jump_tables = self.jump_tables(&raw.jump_table, &data_regions);
         let indirect = self.indirect(&raw.indirect, &data_regions);
+        let unreached = self.unreached(&raw.unreached);
+        let mut spans: Vec<(Address, Address, Location)> = data_regions
+            .iter()
+            .map(|region| (region.start, region.end, region.location))
+            .chain(
+                unreached
+                    .iter()
+                    .map(|region| (region.start, region.end, region.location)),
+            )
+            .collect();
+        self.disjoint(&mut spans);
         GameConfig {
             sha1,
             functions,
             jump_tables,
             data_regions,
             indirect,
+            unreached,
         }
     }
 
@@ -111,37 +133,58 @@ impl Validator<'_> {
     }
 
     fn data_regions(&mut self, raw: &[RawData]) -> Vec<DataRegion> {
-        let regions: Vec<DataRegion> = raw
-            .iter()
+        raw.iter()
             .map(|entry| {
                 let (start, location) = self.address(&entry.start);
-                let (end, end_location) = self.address(&entry.end);
-                if end <= start {
-                    self.report(end_location, ProblemKind::EmptyRegion { start, end });
-                }
+                let end = self.region_end(start, &entry.end);
                 DataRegion {
                     start,
                     end,
                     location,
                 }
             })
-            .collect();
-        let mut by_start: Vec<&DataRegion> = regions
-            .iter()
-            .filter(|region| region.start < region.end)
-            .collect();
-        by_start.sort_by_key(|region| region.start);
-        for pair in by_start.windows(2) {
-            if pair[1].start < pair[0].end {
-                self.report(
-                    pair[1].location,
-                    ProblemKind::OverlappingRegions {
-                        other: pair[0].location,
-                    },
-                );
-            }
+            .collect()
+    }
+
+    fn unreached(&mut self, raw: &[RawUnreached]) -> Vec<UnreachedRegion> {
+        raw.iter()
+            .map(|entry| {
+                let (start, location) = self.even_address(&entry.start);
+                let end = self.region_end(start, &entry.end);
+                UnreachedRegion {
+                    start,
+                    end,
+                    reason: entry.reason,
+                    location,
+                }
+            })
+            .collect()
+    }
+
+    fn region_end(&mut self, start: Address, value: &Spanned<u32>) -> Address {
+        let (end, location) = self.address(value);
+        if end <= start {
+            self.report(location, ProblemKind::EmptyRegion { start, end });
         }
-        regions
+        end
+    }
+
+    /// Reports every region that shares bytes with an earlier-starting one, whatever its kind,
+    /// naming the earlier region that reaches furthest.
+    fn disjoint(&mut self, spans: &mut [(Address, Address, Location)]) {
+        spans.sort_by_key(|&(start, _, _)| start);
+        let mut furthest: Option<(Address, Location)> = None;
+        for &(start, end, location) in spans.iter().filter(|span| span.0 < span.1) {
+            if let Some((furthest_end, other)) = furthest
+                && start < furthest_end
+            {
+                self.report(location, ProblemKind::OverlappingRegions { other });
+                if end <= furthest_end {
+                    continue;
+                }
+            }
+            furthest = Some((end, location));
+        }
     }
 
     fn functions(&mut self, raw: &[RawFunction], data: &[DataRegion]) -> Vec<FunctionHint> {
@@ -287,6 +330,68 @@ mod tests {
         assert!(config.jump_tables.is_empty());
         assert!(config.data_regions.is_empty());
         assert!(config.indirect.is_empty());
+        assert!(config.unreached.is_empty());
+    }
+
+    #[test]
+    fn test_parse_unreached_reads_values_and_lookup() {
+        let config = parse(&with_sha1(
+            "[[unreached]]\nstart = 0x4000\nend = 0x4010\nreason = \"dead\"\n",
+        ))
+        .expect("valid");
+        assert_eq!(
+            config.unreached,
+            [UnreachedRegion {
+                start: Address::new(0x4000),
+                end: Address::new(0x4010),
+                reason: UnreachedReason::Dead,
+                location: Location { line: 3, column: 9 },
+            }]
+        );
+        assert!(config.unreached_region(Address::new(0x400F)).is_some());
+        assert!(config.unreached_region(Address::new(0x4010)).is_none());
+    }
+
+    #[test]
+    fn test_parse_unknown_unreached_reason_returns_parse_error() {
+        let text = with_sha1("[[unreached]]\nstart = 0x4000\nend = 0x4010\nreason = \"lost\"\n");
+        assert!(matches!(parse(&text), Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn test_parse_unreached_odd_start_and_data_overlap_reported() {
+        let found = problems(&with_sha1(
+            "[[data]]\nstart = 0x3000\nend = 0x3100\n\
+             [[unreached]]\nstart = 0x30F1\nend = 0x3200\nreason = \"dead\"\n",
+        ));
+        let kinds: Vec<_> = found.iter().map(|problem| &problem.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                &ProblemKind::OddAddress {
+                    address: Address::new(0x30F1)
+                },
+                &ProblemKind::OverlappingRegions {
+                    other: Location { line: 3, column: 9 },
+                },
+            ]
+        );
+        assert_eq!(found[1].location.line, 6);
+    }
+
+    #[test]
+    fn test_parse_region_inside_a_long_one_reports_each_overlap() {
+        let found = problems(&with_sha1(
+            "[[data]]\nstart = 0x3000\nend = 0x3100\n\
+             [[data]]\nstart = 0x3010\nend = 0x3020\n\
+             [[data]]\nstart = 0x3050\nend = 0x3060\n",
+        ));
+        let lines: Vec<_> = found.iter().map(|problem| problem.location.line).collect();
+        assert_eq!(lines, [6, 9]);
+        assert!(found.iter().all(|problem| problem.kind
+            == ProblemKind::OverlappingRegions {
+                other: Location { line: 3, column: 9 }
+            }));
     }
 
     #[test]

@@ -4,4 +4,14 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[[bin]]
+name = "recomp"
+path = "src/main.rs"
+
 [dependencies]
+anygenesis-analysis = { version = "0.1.0", path = "../analysis" }
+anygenesis-gamecfg = { version = "0.1.0", path = "../gamecfg" }
+anygenesis-m68k = { version = "0.1.0", path = "../m68k" }
+anygenesis-rom = { version = "0.1.0", path = "../rom" }
+anygenesis-shared = { version = "0.1.0", path = "../shared" }
+anyhow = "1.0.104"

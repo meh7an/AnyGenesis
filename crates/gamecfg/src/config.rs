@@ -19,6 +19,8 @@ pub struct GameConfig {
     pub data_regions: Vec<DataRegion>,
     /// Explicit targets for indirect jumps and calls no table explains.
     pub indirect: Vec<IndirectHint>,
+    /// Code the analysis is known not to reach, with the reason.
+    pub unreached: Vec<UnreachedRegion>,
 }
 
 impl GameConfig {
@@ -52,6 +54,13 @@ impl GameConfig {
     /// Returns the data region holding `address`, if any.
     pub fn data_region(&self, address: Address) -> Option<&DataRegion> {
         self.data_regions
+            .iter()
+            .find(|region| region.contains(address))
+    }
+
+    /// Returns the unreached region holding `address`, if any.
+    pub fn unreached_region(&self, address: Address) -> Option<&UnreachedRegion> {
+        self.unreached
             .iter()
             .find(|region| region.contains(address))
     }
@@ -138,6 +147,44 @@ impl DataRegion {
     /// Returns whether the region holds `address`.
     pub fn contains(&self, address: Address) -> bool {
         (self.start..self.end).contains(&address)
+    }
+}
+
+/// Code the analysis does not reach on purpose, `[[unreached]]`.
+///
+/// The analysis ignores these regions: validation checks every listed instruction the
+/// analysis misses against them, and listings mark them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreachedRegion {
+    pub start: Address,
+    /// One past the last byte.
+    pub end: Address,
+    pub reason: UnreachedReason,
+    pub location: Location,
+}
+
+impl UnreachedRegion {
+    /// Returns whether the region holds `address`.
+    pub fn contains(&self, address: Address) -> bool {
+        (self.start..self.end).contains(&address)
+    }
+}
+
+/// Why code is never reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum UnreachedReason {
+    /// Nothing in the ROM jumps to, calls or points at the code.
+    Dead,
+}
+
+impl UnreachedReason {
+    /// Returns the name the config file uses.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Dead => "dead",
+        }
     }
 }
 

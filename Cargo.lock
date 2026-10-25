@@ -43,6 +43,14 @@ dependencies = [
 [[package]]
 name = "anygenesis-recomp"
 version = "0.1.0"
+dependencies = [
+ "anygenesis-analysis",
+ "anygenesis-gamecfg",
+ "anygenesis-m68k",
+ "anygenesis-rom",
+ "anygenesis-shared",
+ "anyhow",
+]
 
 [[package]]
 name = "anygenesis-rom"

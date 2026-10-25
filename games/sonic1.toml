@@ -1,3 +1,1373 @@
 # Sonic the Hedgehog (REV00). Addresses, hints and table sizes only.
 # The reset and exception vectors come from the ROM itself.
 sha1 = "6ddb7de1e17e7f6cdb88927bd906352030daa194"
+
+[[jump_table]]
+address = 0x000396
+count = 8
+kind = "bra_w"
+site = 0x000390
+
+[[jump_table]]
+address = 0x000B6E
+count = 13
+kind = "word_offset"
+site = 0x000B5A
+
+[[jump_table]]
+address = 0x00194E
+count = 7
+kind = "word_offset"
+site = 0x00194A
+
+[[jump_table]]
+address = 0x003C5C
+count = 4
+kind = "word_offset"
+site = 0x003C3E
+
+[[jump_table]]
+address = 0x004E50
+count = 4
+kind = "word_offset"
+site = 0x004E4C
+
+[[jump_table]]
+address = 0x004F70
+count = 4
+kind = "word_offset"
+site = 0x004F66
+
+[[jump_table]]
+address = 0x0053F6
+count = 10
+kind = "word_offset"
+site = 0x0053EC
+
+[[jump_table]]
+address = 0x005550
+count = 2
+kind = "word_offset"
+site = 0x005546
+
+[[jump_table]]
+address = 0x005624
+count = 3
+kind = "word_offset"
+site = 0x005620
+
+[[jump_table]]
+address = 0x0059F6
+count = 4
+kind = "word_offset"
+site = 0x0059EC
+
+[[jump_table]]
+address = 0x005AD6
+count = 2
+kind = "word_offset"
+site = 0x005ACC
+
+[[jump_table]]
+address = 0x006216
+count = 7
+kind = "word_offset"
+site = 0x006212
+
+[[jump_table]]
+address = 0x0062DE
+count = 7
+kind = "word_offset"
+site = 0x0062DA
+
+[[jump_table]]
+address = 0x006DD0
+count = 7
+kind = "word_offset"
+site = 0x006D78
+
+[[jump_table]]
+address = 0x006DEE
+count = 3
+kind = "word_offset"
+site = 0x006DEA
+
+[[jump_table]]
+address = 0x006E4A
+count = 3
+kind = "word_offset"
+site = 0x006E46
+
+[[jump_table]]
+address = 0x006F02
+count = 4
+kind = "word_offset"
+site = 0x006EFE
+
+[[jump_table]]
+address = 0x006F9E
+count = 3
+kind = "word_offset"
+site = 0x006F9A
+
+[[jump_table]]
+address = 0x006FB2
+count = 4
+kind = "word_offset"
+site = 0x006FAE
+
+[[jump_table]]
+address = 0x007098
+count = 2
+kind = "word_offset"
+site = 0x007094
+
+[[jump_table]]
+address = 0x007102
+count = 3
+kind = "word_offset"
+site = 0x0070FE
+
+[[jump_table]]
+address = 0x007118
+count = 3
+kind = "word_offset"
+site = 0x007114
+
+[[jump_table]]
+address = 0x007178
+count = 3
+kind = "word_offset"
+site = 0x007174
+
+[[jump_table]]
+address = 0x0071B2
+count = 3
+kind = "word_offset"
+site = 0x0071AE
+
+[[jump_table]]
+address = 0x00721A
+count = 3
+kind = "word_offset"
+site = 0x007216
+
+[[jump_table]]
+address = 0x007252
+count = 4
+kind = "word_offset"
+site = 0x00724E
+
+[[jump_table]]
+address = 0x0072D8
+count = 5
+kind = "word_offset"
+site = 0x0072D4
+
+[[jump_table]]
+address = 0x007336
+count = 6
+kind = "word_offset"
+site = 0x007332
+
+[[jump_table]]
+address = 0x007960
+count = 7
+kind = "word_offset"
+site = 0x00795C
+
+[[jump_table]]
+address = 0x007CB0
+count = 5
+kind = "word_offset"
+site = 0x007CAC
+
+[[jump_table]]
+address = 0x007E40
+count = 5
+kind = "word_offset"
+site = 0x007E3C
+
+[[jump_table]]
+address = 0x007F5A
+count = 13
+kind = "word_offset"
+site = 0x007F56
+
+[[jump_table]]
+address = 0x00821E
+count = 6
+kind = "word_offset"
+site = 0x00821A
+
+[[jump_table]]
+address = 0x00832E
+count = 6
+kind = "word_offset"
+site = 0x00832A
+
+[[jump_table]]
+address = 0x0087D8
+count = 2
+kind = "word_offset"
+site = 0x0087D4
+
+[[jump_table]]
+address = 0x00886C
+count = 3
+kind = "word_offset"
+site = 0x008868
+
+[[jump_table]]
+address = 0x008942
+count = 2
+kind = "word_offset"
+site = 0x00893E
+
+[[jump_table]]
+address = 0x008B5A
+count = 2
+kind = "word_offset"
+site = 0x008B56
+
+[[jump_table]]
+address = 0x008C2A
+count = 2
+kind = "word_offset"
+site = 0x008C26
+
+[[jump_table]]
+address = 0x008D00
+count = 2
+kind = "word_offset"
+site = 0x008CFC
+
+[[jump_table]]
+address = 0x008D70
+count = 3
+kind = "word_offset"
+site = 0x008D6C
+
+[[jump_table]]
+address = 0x008E04
+count = 2
+kind = "word_offset"
+site = 0x008E00
+
+[[jump_table]]
+address = 0x008F30
+count = 21
+kind = "word_offset"
+site = 0x008F2C
+
+[[jump_table]]
+address = 0x009424
+count = 2
+kind = "word_offset"
+site = 0x00941C
+
+[[jump_table]]
+address = 0x0094FE
+count = 5
+kind = "word_offset"
+site = 0x0094FA
+
+[[jump_table]]
+address = 0x009578
+count = 2
+kind = "word_offset"
+site = 0x009566
+
+[[jump_table]]
+address = 0x0097EC
+count = 3
+kind = "word_offset"
+site = 0x0097E8
+
+[[jump_table]]
+address = 0x009838
+count = 2
+kind = "word_offset"
+site = 0x009826
+
+[[jump_table]]
+address = 0x009940
+count = 5
+kind = "word_offset"
+site = 0x00993C
+
+[[jump_table]]
+address = 0x009B34
+count = 5
+kind = "word_offset"
+site = 0x009B30
+
+[[jump_table]]
+address = 0x009CC4
+count = 5
+kind = "word_offset"
+site = 0x009CC0
+
+[[jump_table]]
+address = 0x009E14
+count = 4
+kind = "word_offset"
+site = 0x009E10
+
+[[jump_table]]
+address = 0x009EE4
+count = 3
+kind = "word_offset"
+site = 0x009EE0
+
+[[jump_table]]
+address = 0x00A126
+count = 5
+kind = "word_offset"
+site = 0x00A122
+
+[[jump_table]]
+address = 0x00A314
+count = 3
+kind = "word_offset"
+site = 0x00A30C
+
+[[jump_table]]
+address = 0x00A62A
+count = 4
+kind = "word_offset"
+site = 0x00A626
+
+[[jump_table]]
+address = 0x00A6AE
+count = 3
+kind = "word_offset"
+site = 0x00A6A6
+
+[[jump_table]]
+address = 0x00AB32
+count = 2
+kind = "word_offset"
+site = 0x00AB2A
+
+[[jump_table]]
+address = 0x00ABE8
+count = 2
+kind = "word_offset"
+site = 0x00ABE4
+
+[[jump_table]]
+address = 0x00ACB2
+count = 2
+kind = "word_offset"
+site = 0x00ACAE
+
+[[jump_table]]
+address = 0x00AD12
+count = 4
+kind = "word_offset"
+site = 0x00AD00
+
+[[jump_table]]
+address = 0x00AEC6
+count = 2
+kind = "word_offset"
+site = 0x00AEC2
+
+[[jump_table]]
+address = 0x00AFB2
+count = 6
+kind = "word_offset"
+site = 0x00AFAE
+
+[[jump_table]]
+address = 0x00B1EA
+count = 3
+kind = "word_offset"
+site = 0x00B1E6
+
+[[jump_table]]
+address = 0x00B3D2
+count = 5
+kind = "word_offset"
+site = 0x00B3A8
+
+[[jump_table]]
+address = 0x00B4F2
+count = 5
+kind = "word_offset"
+site = 0x00B4EE
+
+[[jump_table]]
+address = 0x00B68A
+count = 5
+kind = "word_offset"
+site = 0x00B686
+
+[[jump_table]]
+address = 0x00B846
+count = 7
+kind = "word_offset"
+site = 0x00B842
+
+[[jump_table]]
+address = 0x00B9A8
+count = 5
+kind = "word_offset"
+site = 0x00B9A4
+
+[[jump_table]]
+address = 0x00BAD6
+count = 2
+kind = "word_offset"
+site = 0x00BAD2
+
+[[jump_table]]
+address = 0x00BD3C
+count = 2
+kind = "word_offset"
+site = 0x00BD38
+
+[[jump_table]]
+address = 0x00BEE0
+count = 3
+kind = "word_offset"
+site = 0x00BEDC
+
+[[jump_table]]
+address = 0x00C314
+count = 4
+kind = "word_offset"
+site = 0x00C310
+
+[[jump_table]]
+address = 0x00C4C6
+count = 3
+kind = "word_offset"
+site = 0x00C4C2
+
+[[jump_table]]
+address = 0x00C580
+count = 9
+kind = "word_offset"
+site = 0x00C57C
+
+[[jump_table]]
+address = 0x00C7BC
+count = 11
+kind = "word_offset"
+site = 0x00C7B8
+
+[[jump_table]]
+address = 0x00C964
+count = 2
+kind = "word_offset"
+site = 0x00C960
+
+[[jump_table]]
+address = 0x00CE36
+count = 2
+kind = "word_offset"
+site = 0x00CE32
+
+[[jump_table]]
+address = 0x00CF56
+count = 3
+kind = "word_offset"
+site = 0x00CF52
+
+[[jump_table]]
+address = 0x00D05E
+count = 2
+kind = "word_offset"
+site = 0x00D05A
+
+[[jump_table]]
+address = 0x00D0CC
+count = 2
+kind = "word_offset"
+site = 0x00D0C8
+
+[[jump_table]]
+address = 0x00D12E
+count = 3
+kind = "word_offset"
+site = 0x00D126
+
+[[jump_table]]
+address = 0x00D382
+count = 140
+kind = "long"
+site = 0x00D354
+
+[[jump_table]]
+address = 0x00D8E8
+count = 2
+kind = "word_offset"
+site = 0x00D8E4
+
+[[jump_table]]
+address = 0x00DAF0
+count = 10
+kind = "word_offset"
+site = 0x00DAC8
+
+[[jump_table]]
+address = 0x00DD76
+count = 3
+kind = "word_offset"
+site = 0x00DD72
+
+[[jump_table]]
+address = 0x00DDC8
+count = 5
+kind = "word_offset"
+site = 0x00DDB6
+
+[[jump_table]]
+address = 0x00E008
+count = 2
+kind = "word_offset"
+site = 0x00E004
+
+[[jump_table]]
+address = 0x00E0A4
+count = 4
+kind = "word_offset"
+site = 0x00E05E
+
+[[jump_table]]
+address = 0x00E1E2
+count = 3
+kind = "word_offset"
+site = 0x00E1DE
+
+[[jump_table]]
+address = 0x00E2A8
+count = 2
+kind = "word_offset"
+site = 0x00E2A0
+
+[[jump_table]]
+address = 0x00E316
+count = 3
+kind = "word_offset"
+site = 0x00E30E
+
+[[jump_table]]
+address = 0x00E3F8
+count = 9
+kind = "word_offset"
+site = 0x00E3C6
+
+[[jump_table]]
+address = 0x00E4EE
+count = 2
+kind = "word_offset"
+site = 0x00E4EA
+
+[[jump_table]]
+address = 0x00E7DE
+count = 2
+kind = "word_offset"
+site = 0x00E7DA
+
+[[jump_table]]
+address = 0x00E870
+count = 5
+kind = "word_offset"
+site = 0x00E834
+
+[[jump_table]]
+address = 0x00E91A
+count = 2
+kind = "word_offset"
+site = 0x00E916
+
+[[jump_table]]
+address = 0x00E9DE
+count = 2
+kind = "word_offset"
+site = 0x00E9DA
+
+[[jump_table]]
+address = 0x00EB64
+count = 5
+kind = "word_offset"
+site = 0x00EB32
+
+[[jump_table]]
+address = 0x00ED96
+count = 6
+kind = "word_offset"
+site = 0x00ED8E
+
+[[jump_table]]
+address = 0x00EE82
+count = 4
+kind = "word_offset"
+site = 0x00EE7A
+
+[[jump_table]]
+address = 0x00EFB8
+count = 2
+kind = "word_offset"
+site = 0x00EF86
+
+[[jump_table]]
+address = 0x00F06C
+count = 5
+kind = "word_offset"
+site = 0x00F068
+
+[[jump_table]]
+address = 0x00F1C6
+count = 2
+kind = "word_offset"
+site = 0x00F1C2
+
+[[jump_table]]
+address = 0x00F628
+count = 4
+kind = "word_offset"
+site = 0x00F624
+
+[[jump_table]]
+address = 0x00F6E4
+count = 2
+kind = "word_offset"
+site = 0x00F69E
+
+[[jump_table]]
+address = 0x00F848
+count = 2
+kind = "word_offset"
+site = 0x00F844
+
+[[jump_table]]
+address = 0x00F8BC
+count = 2
+kind = "word_offset"
+site = 0x00F8AA
+
+[[jump_table]]
+address = 0x00FCA4
+count = 3
+kind = "word_offset"
+site = 0x00FC9C
+
+[[jump_table]]
+address = 0x00FE06
+count = 3
+kind = "word_offset"
+site = 0x00FE02
+
+[[jump_table]]
+address = 0x00FEFA
+count = 11
+kind = "word_offset"
+site = 0x00FEF6
+
+[[jump_table]]
+address = 0x0100B6
+count = 2
+kind = "word_offset"
+site = 0x0100B2
+
+[[jump_table]]
+address = 0x010106
+count = 4
+kind = "word_offset"
+site = 0x0100F4
+
+[[jump_table]]
+address = 0x010294
+count = 2
+kind = "word_offset"
+site = 0x010290
+
+[[jump_table]]
+address = 0x0103D6
+count = 14
+kind = "word_offset"
+site = 0x010390
+
+[[jump_table]]
+address = 0x010790
+count = 3
+kind = "word_offset"
+site = 0x01078C
+
+[[jump_table]]
+address = 0x010984
+count = 2
+kind = "word_offset"
+site = 0x010980
+
+[[jump_table]]
+address = 0x010A18
+count = 4
+kind = "word_offset"
+site = 0x0109F2
+
+[[jump_table]]
+address = 0x010B02
+count = 4
+kind = "word_offset"
+site = 0x010ADC
+
+[[jump_table]]
+address = 0x010BEA
+count = 10
+kind = "word_offset"
+site = 0x010BE6
+
+[[jump_table]]
+address = 0x010D8A
+count = 3
+kind = "word_offset"
+site = 0x010D64
+
+[[jump_table]]
+address = 0x010E00
+count = 2
+kind = "word_offset"
+site = 0x010DFC
+
+[[jump_table]]
+address = 0x010EC0
+count = 3
+kind = "word_offset"
+site = 0x010E9A
+
+[[jump_table]]
+address = 0x010FA2
+count = 4
+kind = "word_offset"
+site = 0x010F56
+
+[[jump_table]]
+address = 0x011052
+count = 2
+kind = "word_offset"
+site = 0x01104E
+
+[[jump_table]]
+address = 0x0110D4
+count = 2
+kind = "word_offset"
+site = 0x0110D0
+
+[[jump_table]]
+address = 0x011214
+count = 3
+kind = "word_offset"
+site = 0x011210
+
+[[jump_table]]
+address = 0x011354
+count = 2
+kind = "word_offset"
+site = 0x011350
+
+[[jump_table]]
+address = 0x011428
+count = 2
+kind = "word_offset"
+site = 0x011424
+
+[[jump_table]]
+address = 0x01150A
+count = 2
+kind = "word_offset"
+site = 0x011506
+
+[[jump_table]]
+address = 0x011670
+count = 6
+kind = "word_offset"
+site = 0x011646
+
+[[jump_table]]
+address = 0x011A04
+count = 4
+kind = "word_offset"
+site = 0x011A00
+
+[[jump_table]]
+address = 0x011A64
+count = 3
+kind = "word_offset"
+site = 0x011A52
+
+[[jump_table]]
+address = 0x011CDC
+count = 5
+kind = "word_offset"
+site = 0x011CD8
+
+[[jump_table]]
+address = 0x011F12
+count = 3
+kind = "word_offset"
+site = 0x011F0E
+
+[[jump_table]]
+address = 0x011FE2
+count = 2
+kind = "word_offset"
+site = 0x011FDE
+
+[[jump_table]]
+address = 0x0120AE
+count = 8
+kind = "word_offset"
+site = 0x012060
+
+[[jump_table]]
+address = 0x0121FA
+count = 4
+kind = "word_offset"
+site = 0x0121F2
+
+[[jump_table]]
+address = 0x012392
+count = 4
+kind = "word_offset"
+site = 0x012346
+
+[[jump_table]]
+address = 0x0126B2
+count = 6
+kind = "word_offset"
+site = 0x0126AE
+
+[[jump_table]]
+address = 0x012AAC
+count = 5
+kind = "word_offset"
+site = 0x012AA8
+
+[[jump_table]]
+address = 0x012BF2
+count = 5
+kind = "word_offset"
+site = 0x012BEE
+
+[[jump_table]]
+address = 0x012CC0
+count = 4
+kind = "word_offset"
+site = 0x012C7A
+
+[[jump_table]]
+address = 0x013CA6
+count = 9
+kind = "word_offset"
+site = 0x013CA2
+
+[[jump_table]]
+address = 0x014166
+count = 3
+kind = "word_offset"
+site = 0x014162
+
+[[jump_table]]
+address = 0x014262
+count = 3
+kind = "word_offset"
+site = 0x01425E
+
+[[jump_table]]
+address = 0x0142FE
+count = 3
+kind = "word_offset"
+site = 0x0142FA
+
+[[jump_table]]
+address = 0x0150A8
+count = 4
+kind = "word_offset"
+site = 0x0150A4
+
+[[jump_table]]
+address = 0x0154F0
+count = 2
+kind = "word_offset"
+site = 0x0154EC
+
+[[jump_table]]
+address = 0x01569C
+count = 2
+kind = "word_offset"
+site = 0x015698
+
+[[jump_table]]
+address = 0x01573E
+count = 3
+kind = "word_offset"
+site = 0x01573A
+
+[[jump_table]]
+address = 0x01598A
+count = 2
+kind = "word_offset"
+site = 0x015986
+
+[[jump_table]]
+address = 0x015A08
+count = 5
+kind = "word_offset"
+site = 0x0159DC
+
+[[jump_table]]
+address = 0x015C20
+count = 2
+kind = "word_offset"
+site = 0x015C1C
+
+[[jump_table]]
+address = 0x015D88
+count = 6
+kind = "word_offset"
+site = 0x015D1E
+
+[[jump_table]]
+address = 0x016006
+count = 4
+kind = "word_offset"
+site = 0x016002
+
+[[jump_table]]
+address = 0x016154
+count = 2
+kind = "word_offset"
+site = 0x016150
+
+[[jump_table]]
+address = 0x0162C2
+count = 2
+kind = "word_offset"
+site = 0x016274
+
+[[jump_table]]
+address = 0x016538
+count = 2
+kind = "word_offset"
+site = 0x016534
+
+[[jump_table]]
+address = 0x01669A
+count = 4
+kind = "word_offset"
+site = 0x016672
+
+[[jump_table]]
+address = 0x016942
+count = 7
+kind = "word_offset"
+site = 0x01693E
+
+[[jump_table]]
+address = 0x016ACA
+count = 2
+kind = "word_offset"
+site = 0x016A52
+
+[[jump_table]]
+address = 0x016E42
+count = 4
+kind = "word_offset"
+site = 0x016E38
+
+[[jump_table]]
+address = 0x01716C
+count = 2
+kind = "word_offset"
+site = 0x017168
+
+[[jump_table]]
+address = 0x017272
+count = 2
+kind = "word_offset"
+site = 0x01726E
+
+[[jump_table]]
+address = 0x01770E
+count = 4
+kind = "word_offset"
+site = 0x01770A
+
+[[jump_table]]
+address = 0x0177BC
+count = 7
+kind = "word_offset"
+site = 0x017794
+
+[[jump_table]]
+address = 0x017AF2
+count = 5
+kind = "word_offset"
+site = 0x017AEE
+
+[[jump_table]]
+address = 0x017E44
+count = 4
+kind = "word_offset"
+site = 0x017E40
+
+[[jump_table]]
+address = 0x017F0E
+count = 8
+kind = "word_offset"
+site = 0x017EE8
+
+[[jump_table]]
+address = 0x01823E
+count = 5
+kind = "word_offset"
+site = 0x01823A
+
+[[jump_table]]
+address = 0x0182F8
+count = 5
+kind = "word_offset"
+site = 0x0182D2
+
+[[jump_table]]
+address = 0x0183C2
+count = 4
+kind = "word_offset"
+site = 0x0183B4
+
+[[jump_table]]
+address = 0x0186B8
+count = 4
+kind = "word_offset"
+site = 0x0186AE
+
+[[jump_table]]
+address = 0x01874A
+count = 4
+kind = "word_offset"
+site = 0x018724
+
+[[jump_table]]
+address = 0x0188C6
+count = 5
+kind = "word_offset"
+site = 0x0188C2
+
+[[jump_table]]
+address = 0x0189AC
+count = 6
+kind = "word_offset"
+site = 0x018986
+
+[[jump_table]]
+address = 0x018D04
+count = 6
+kind = "word_offset"
+site = 0x018CD8
+
+[[jump_table]]
+address = 0x0190FC
+count = 5
+kind = "word_offset"
+site = 0x0190F8
+
+[[jump_table]]
+address = 0x0191C0
+count = 6
+kind = "word_offset"
+site = 0x01919A
+
+[[jump_table]]
+address = 0x0192FA
+count = 4
+kind = "word_offset"
+site = 0x0192F6
+
+[[jump_table]]
+address = 0x019546
+count = 6
+kind = "word_offset"
+site = 0x019530
+
+[[jump_table]]
+address = 0x019568
+count = 4
+kind = "word_offset"
+site = 0x019564
+
+[[jump_table]]
+address = 0x0196A0
+count = 3
+kind = "word_offset"
+site = 0x01969C
+
+[[jump_table]]
+address = 0x019840
+count = 3
+kind = "word_offset"
+site = 0x01983C
+
+[[jump_table]]
+address = 0x01990E
+count = 4
+kind = "word_offset"
+site = 0x0198FA
+
+[[jump_table]]
+address = 0x0199E2
+count = 2
+kind = "word_offset"
+site = 0x0199DE
+
+[[jump_table]]
+address = 0x019B6E
+count = 6
+kind = "word_offset"
+site = 0x019B6A
+
+[[jump_table]]
+address = 0x019D66
+count = 7
+kind = "word_offset"
+site = 0x019D62
+
+[[jump_table]]
+address = 0x019E80
+count = 8
+kind = "word_offset"
+site = 0x019E76
+
+[[jump_table]]
+address = 0x01A45C
+count = 3
+kind = "word_offset"
+site = 0x01A458
+
+[[jump_table]]
+address = 0x01A590
+count = 4
+kind = "word_offset"
+site = 0x01A588
+
+[[jump_table]]
+address = 0x01A7E8
+count = 5
+kind = "word_offset"
+site = 0x01A7E4
+
+[[jump_table]]
+address = 0x01A9A0
+count = 3
+kind = "word_offset"
+site = 0x01A98C
+
+[[jump_table]]
+address = 0x01AB58
+count = 8
+kind = "word_offset"
+site = 0x01AB2C
+
+[[jump_table]]
+address = 0x01B4F0
+count = 6
+kind = "long"
+site = 0x01B4E6
+
+[[jump_table]]
+address = 0x01B9A0
+count = 4
+kind = "word_offset"
+site = 0x01B99C
+
+[[jump_table]]
+address = 0x01BA1C
+count = 2
+kind = "word_offset"
+site = 0x01BA0C
+
+[[jump_table]]
+address = 0x01C046
+count = 7
+kind = "word_offset"
+site = 0x01C040
+
+[[jump_table]]
+address = 0x01C3CE
+count = 16
+kind = "word_offset"
+site = 0x01C1A4
+target = "function"
+
+[[jump_table]]
+address = 0x01C556
+count = 2
+kind = "word_offset"
+site = 0x01C552
+
+[[jump_table]]
+address = 0x01CF28
+count = 2
+kind = "word_offset"
+site = 0x01CF24
+
+[[jump_table]]
+address = 0x071F98
+count = 5
+kind = "bra_w"
+site = 0x071F94
+
+[[jump_table]]
+address = 0x072A64
+count = 26
+kind = "bra_w"
+site = 0x072A60
+
+[[indirect]]
+site = 0x0014CA
+targets = [0x001502, 0x00150C, 0x001518, 0x001522]
+
+[[indirect]]
+site = 0x001764
+targets = [0x0017B4, 0x0017B6, 0x0017B8, 0x0017BA, 0x0017BC, 0x0017BE, 0x0017C0, 0x0017C2]
+
+[[indirect]]
+site = 0x00647C
+targets = [
+    0x006482, 0x006484, 0x006486, 0x006488, 0x00648A, 0x00648C, 0x00648E, 0x006490,
+    0x006492, 0x006494, 0x006496, 0x006498, 0x00649A, 0x00649C, 0x00649E, 0x0064A0,
+]
+
+[[unreached]]
+start = 0x0003B6
+end = 0x0003B8
+reason = "dead"
+
+[[unreached]]
+start = 0x0013A2
+end = 0x0013A8
+reason = "dead"
+
+[[unreached]]
+start = 0x001452
+end = 0x00145C
+reason = "dead"
+
+[[unreached]]
+start = 0x002C72
+end = 0x002CA8
+reason = "dead"
+
+[[unreached]]
+start = 0x003FD8
+end = 0x004010
+reason = "dead"
+
+[[unreached]]
+start = 0x00626C
+end = 0x006286
+reason = "dead"
+
+[[unreached]]
+start = 0x006606
+end = 0x006616
+reason = "dead"
+
+[[unreached]]
+start = 0x006A82
+end = 0x006AD8
+reason = "dead"
+
+[[unreached]]
+start = 0x006BB0
+end = 0x006BD6
+reason = "dead"
+
+[[unreached]]
+start = 0x006C3C
+end = 0x006C58
+reason = "dead"
+
+[[unreached]]
+start = 0x007166
+end = 0x007168
+reason = "dead"
+
+[[unreached]]
+start = 0x007B20
+end = 0x007B22
+reason = "dead"
+
+[[unreached]]
+start = 0x007F2A
+end = 0x007F2C
+reason = "dead"
+
+[[unreached]]
+start = 0x00A68A
+end = 0x00A68C
+reason = "dead"
+
+[[unreached]]
+start = 0x00A69A
+end = 0x00A69C
+reason = "dead"
+
+[[unreached]]
+start = 0x010218
+end = 0x01022A
+reason = "dead"
+
+[[unreached]]
+start = 0x01103A
+end = 0x01103C
+reason = "dead"
+
+[[unreached]]
+start = 0x0132D4
+end = 0x013304
+reason = "dead"
+
+[[unreached]]
+start = 0x0141EE
+end = 0x014206
+reason = "dead"
+
+[[unreached]]
+start = 0x0146E8
+end = 0x01470A
+reason = "dead"
+
+[[unreached]]
+start = 0x01470C
+end = 0x014750
+reason = "dead"
+
+[[unreached]]
+start = 0x014C4E
+end = 0x014CDE
+reason = "dead"
+
+[[unreached]]
+start = 0x014DE8
+end = 0x014DF0
+reason = "dead"
+
+[[unreached]]
+start = 0x014F74
+end = 0x014F7C
+reason = "dead"
+
+[[unreached]]
+start = 0x0181E4
+end = 0x0181F0
+reason = "dead"
+
+[[unreached]]
+start = 0x01BB9C
+end = 0x01BBB6
+reason = "dead"
