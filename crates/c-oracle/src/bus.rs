@@ -8,13 +8,11 @@
 
 use std::collections::HashMap;
 
-use anygenesis_abi::RAM_SIZE;
+pub use anygenesis_abi::RAM_START;
+use anygenesis_abi::{RAM_SIZE, Region, ram_index};
 use anygenesis_shared::{Address, Bus, Size};
 
 use crate::random::SplitMix;
-
-pub const RAM_START: u32 = 0xE0_0000;
-const RAM_MASK: u32 = RAM_SIZE as u32 - 1;
 
 /// Answers the accesses that hit neither RAM nor ROM reads. Sizes are byte or word.
 pub trait Device {
@@ -49,16 +47,9 @@ pub struct SystemBus<'a> {
 }
 
 impl SystemBus<'_> {
-    fn in_ram(address: u32, bytes: u32) -> bool {
-        address >= RAM_START && address <= Address::MASK - (bytes - 1)
-    }
-
-    fn in_rom(&self, address: u32, bytes: u32) -> bool {
-        address as usize + bytes as usize <= self.rom.len()
-    }
-
-    fn ram_index(address: u32) -> usize {
-        (address & RAM_MASK) as usize
+    fn region(&self, address: u32, bytes: u32) -> Region {
+        // The image is at most 4 MiB, so its size fits.
+        Region::of(address, bytes, self.rom.len() as u32)
     }
 
     fn note_word(&mut self, address: Address) {
@@ -68,7 +59,7 @@ impl SystemBus<'_> {
     }
 
     fn store_ram(&mut self, address: u32, value: u8) {
-        let index = Self::ram_index(address);
+        let index = ram_index(address);
         self.ram[index] = value;
         if let Some(watch) = &mut self.watch {
             watch.ram_writes.push(index);
@@ -79,34 +70,29 @@ impl SystemBus<'_> {
 impl Bus for SystemBus<'_> {
     fn read_byte(&mut self, address: Address) -> u8 {
         let raw = address.get();
-        if Self::in_ram(raw, 1) {
-            self.ram[Self::ram_index(raw)]
-        } else if self.in_rom(raw, 1) {
-            self.rom[raw as usize]
-        } else {
+        match self.region(raw, 1) {
+            Region::Ram => self.ram[ram_index(raw)],
+            Region::Rom => self.rom[raw as usize],
             // A byte read answers in the low byte.
-            self.device.read(address, Size::Byte) as u8
+            Region::Bus => self.device.read(address, Size::Byte) as u8,
         }
     }
 
     fn read_word(&mut self, address: Address) -> u16 {
         self.note_word(address);
         let raw = address.get();
-        if Self::in_ram(raw, 2) {
-            u16::from_be_bytes([
-                self.ram[Self::ram_index(raw)],
-                self.ram[Self::ram_index(raw + 1)],
-            ])
-        } else if self.in_rom(raw, 2) {
-            u16::from_be_bytes([self.rom[raw as usize], self.rom[raw as usize + 1]])
-        } else {
-            self.device.read(address, Size::Word)
+        match self.region(raw, 2) {
+            Region::Ram => {
+                u16::from_be_bytes([self.ram[ram_index(raw)], self.ram[ram_index(raw + 1)]])
+            }
+            Region::Rom => u16::from_be_bytes([self.rom[raw as usize], self.rom[raw as usize + 1]]),
+            Region::Bus => self.device.read(address, Size::Word),
         }
     }
 
     fn write_byte(&mut self, address: Address, value: u8) {
         let raw = address.get();
-        if Self::in_ram(raw, 1) {
+        if self.region(raw, 1) == Region::Ram {
             self.store_ram(raw, value);
         } else {
             self.device.write(address, Size::Byte, value.into());
@@ -116,7 +102,7 @@ impl Bus for SystemBus<'_> {
     fn write_word(&mut self, address: Address, value: u16) {
         self.note_word(address);
         let raw = address.get();
-        if Self::in_ram(raw, 2) {
+        if self.region(raw, 2) == Region::Ram {
             let [high, low] = value.to_be_bytes();
             self.store_ram(raw, high);
             self.store_ram(raw + 1, low);

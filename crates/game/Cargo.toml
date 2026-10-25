@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anygenesis-abi = { version = "0.1.0", path = "../abi" }
 anygenesis-rom = { version = "0.1.0", path = "../rom" }
+anygenesis-runtime = { version = "0.1.0", path = "../runtime" }
 anyhow = "1.0.104"
 
 [build-dependencies]

@@ -12,6 +12,7 @@ members = [
     "crates/oracle",
     "crates/recomp",
     "crates/rom",
+    "crates/runtime",
     "crates/shared",
     "xtask",
 ]

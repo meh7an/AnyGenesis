@@ -1,33 +1,13 @@
 //! C text for the straight-line part of an IR body: values, expressions and the ops other
 //! than control transfers.
 
+use anygenesis_abi::Region;
 use anygenesis_ir::{
     BinaryOp, Body, ConvertOp, Expr, Flag, FlagOp, Op, Reg, ShiftOp, UnaryOp, Value, Width,
 };
 use anygenesis_shared::Size;
 
-/// Where an access to a constant address can go without the runtime check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Region {
-    Ram,
-    Rom,
-    Bus,
-}
-
-/// Classifies a constant 24-bit `address` accessed with `size`, given the ROM size.
-pub fn region(address: u32, size: Size, rom_size: u32) -> Region {
-    let bytes = size.bytes();
-    if address >= RAM_START && address <= ADDRESS_MASK - (bytes - 1) {
-        Region::Ram
-    } else if address + bytes <= rom_size {
-        Region::Rom
-    } else {
-        Region::Bus
-    }
-}
-
 pub const ADDRESS_MASK: u32 = 0x00FF_FFFF;
-const RAM_START: u32 = 0x00E0_0000;
 
 /// Prints the values and ops of one body; its temporaries are named with `prefix`.
 #[derive(Debug, Clone, Copy)]
@@ -200,7 +180,7 @@ impl Printer<'_> {
         match address {
             Value::Const { value, .. } => {
                 let address = value & ADDRESS_MASK;
-                let name = match region(address, size, self.rom_size) {
+                let name = match Region::of(address, size.bytes(), self.rom_size) {
                     Region::Ram => "ag_ram_read",
                     Region::Rom => "ag_rom_read",
                     Region::Bus => "ag_read",
@@ -217,7 +197,7 @@ impl Printer<'_> {
         match address {
             Value::Const { value: raw, .. } => {
                 let address = raw & ADDRESS_MASK;
-                let name = match region(address, size, self.rom_size) {
+                let name = match Region::of(address, size.bytes(), self.rom_size) {
                     Region::Ram => "ag_ram_write",
                     Region::Rom | Region::Bus => "ag_write",
                 };
@@ -344,15 +324,5 @@ mod tests {
     fn test_constants_print_as_lowercase_prefixed_hex() {
         assert_eq!(constant(0xFF00), "0xFF00u");
         assert_eq!(constant(0), "0x0u");
-    }
-
-    #[test]
-    fn test_regions_keep_long_accesses_from_wrapping_out_of_ram() {
-        assert_eq!(region(0xFFFFFC, Size::Long, 0x1000), Region::Ram);
-        assert_eq!(region(0xFFFFFE, Size::Long, 0x1000), Region::Bus);
-        assert_eq!(region(0xE0FFFE, Size::Long, 0x1000), Region::Ram);
-        assert_eq!(region(0x000FFE, Size::Word, 0x1000), Region::Rom);
-        assert_eq!(region(0x000FFE, Size::Long, 0x1000), Region::Bus);
-        assert_eq!(region(0xA10000, Size::Byte, 0x1000), Region::Bus);
     }
 }

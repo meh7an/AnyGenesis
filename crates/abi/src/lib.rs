@@ -126,6 +126,41 @@ macro_rules! c_struct {
 /// Bytes of work RAM, mirrored over 0xE00000-0xFFFFFF.
 pub const RAM_SIZE: usize = 0x1_0000;
 
+/// The lowest work RAM address; RAM and its mirrors run to the top of the address space.
+pub const RAM_START: u32 = 0xE0_0000;
+
+const ADDRESS_MASK: u32 = 0xFF_FFFF;
+
+/// Where a whole access goes: the classification ag_runtime.h's inline fast path makes,
+/// defined once for the emitter and every Rust bus that must agree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    /// Every byte lies in 0xE00000-0xFFFFFF; byte indexes wrap at 64 KiB.
+    Ram,
+    /// Every byte lies inside the ROM image.
+    Rom,
+    /// Anything else, including accesses that straddle a boundary: the runtime's bus.
+    Bus,
+}
+
+impl Region {
+    /// Classifies an access of `bytes` bytes at the 24-bit `address`, given the ROM size.
+    pub fn of(address: u32, bytes: u32, rom_size: u32) -> Self {
+        if address >= RAM_START && address <= ADDRESS_MASK - (bytes - 1) {
+            Self::Ram
+        } else if address + bytes <= rom_size {
+            Self::Rom
+        } else {
+            Self::Bus
+        }
+    }
+}
+
+/// Returns the index into [`AgState::ram`] of a work RAM address.
+pub fn ram_index(address: u32) -> usize {
+    (address as usize) & (RAM_SIZE - 1)
+}
+
 c_struct! {
     /// The machine state translated code runs on.
     pub struct AgState as STATE {
@@ -281,6 +316,17 @@ mod tests {
     fn test_state_layout_packs_flags_before_ram() {
         assert_eq!(offset("c").map(|c| c + 1), offset("ram"));
         assert_eq!(STATE.size % std::mem::align_of::<AgState>(), 0);
+    }
+
+    #[test]
+    fn test_regions_keep_long_accesses_from_wrapping_out_of_ram() {
+        assert_eq!(Region::of(0xFF_FFFC, 4, 0x1000), Region::Ram);
+        assert_eq!(Region::of(0xFF_FFFE, 4, 0x1000), Region::Bus);
+        assert_eq!(Region::of(0xE0_FFFE, 4, 0x1000), Region::Ram);
+        assert_eq!(Region::of(0x00_0FFE, 2, 0x1000), Region::Rom);
+        assert_eq!(Region::of(0x00_0FFE, 4, 0x1000), Region::Bus);
+        assert_eq!(Region::of(0xA1_0000, 1, 0x1000), Region::Bus);
+        assert_eq!(ram_index(0xE1_2345), 0x2345);
     }
 
     #[test]

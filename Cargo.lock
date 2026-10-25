@@ -55,6 +55,7 @@ dependencies = [
  "anygenesis-abi",
  "anygenesis-recomp",
  "anygenesis-rom",
+ "anygenesis-runtime",
  "anyhow",
 ]
 
@@ -117,6 +118,17 @@ dependencies = [
  "anygenesis-shared",
  "sha1_smol",
  "thiserror",
+]
+
+[[package]]
+name = "anygenesis-runtime"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-abi",
+ "anygenesis-ir",
+ "anygenesis-m68k",
+ "anygenesis-rom",
+ "anygenesis-shared",
 ]
 
 [[package]]
