@@ -1,10 +1,13 @@
 //! The recompiled game: translated 68000 code linked against the runtime.
 //!
 //! The binary loads and checks the ROM, checks the translated program's address table and
-//! runs from reset for a number of frames on the VDP, which keeps its memories, runs DMA,
-//! raises the vertical and horizontal interrupts and draws the picture. It reports where the
-//! run ended, what the VDP holds and what the runtime logged on the way, and saves the
-//! frames asked for with `--dump` as BMP files in `dumps/` under the working directory.
+//! runs from reset on the VDP, which keeps its memories, runs DMA, raises the vertical and
+//! horizontal interrupts and draws the picture. Given only the ROM it runs in a window with
+//! the keyboard and gamepad as pad 1 until the window closes. Given a frame count, or any of
+//! the options below, it runs headless for that many frames (ten seconds' worth by default)
+//! instead. Either way it reports where the run ended, what the VDP holds and what the
+//! runtime logged on the way, and headless runs save the frames asked for with `--dump` as
+//! BMP files in `dumps/` under the working directory.
 //!
 //! For the frame diff, `--state <folder>` saves the machine state at every vertical
 //! interrupt handler entry in the frame diff's dump layout, on a console without TMSS like
@@ -23,6 +26,7 @@ use std::{
 
 use anygenesis_abi::{AgState, RAM_SIZE, ram_index};
 use anygenesis_framediff::{Dump, Input, Region, dump};
+use anygenesis_frontend::Config;
 use anygenesis_rom::{Rom, Sha1Digest};
 use anygenesis_runtime::{
     Access, Buttons, Exit, Hardware, InterruptStop, Miss, Options, RUN_STACK, Runtime, Vdp,
@@ -36,7 +40,9 @@ use crate::game::CompiledGame;
 const ROM_VAR: &str = "ANYGENESIS_ROM";
 const USAGE: &str = "usage: anygenesis [<rom.bin> [<frames>]] [--dump <frame>[,<frame>...]] \
                      [--state <folder>] [--input <file>] (the ROM may come from \
-                     ANYGENESIS_ROM)";
+                     ANYGENESIS_ROM; with no frames and no options it runs in a window)";
+/// Window pixels per picture pixel when the window opens.
+const WINDOW_SCALE: u32 = 3;
 /// The vertical interrupt's level: the frame diff stops at its handler's entry.
 const VBLANK_LEVEL: u8 = 6;
 /// The version register of the reference emulator's console: overseas NTSC, no Mega CD,
@@ -62,6 +68,10 @@ fn main() -> Result<()> {
         game.table.len(),
         game.vector_handlers.len()
     );
+    let Some(frames) = arguments.frames else {
+        run_in_window(game, rom)?.print();
+        return Ok(());
+    };
     let trace = Trace {
         folder: arguments.state.clone(),
         input: arguments.input.as_deref().map(Input::load).transpose()?,
@@ -69,7 +79,7 @@ fn main() -> Result<()> {
     if let Some(folder) = &trace.folder {
         fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
     }
-    let report = run_from_reset(game, rom, arguments.frames, &arguments.dumps, trace)?;
+    let report = run_from_reset(game, rom, frames, &arguments.dumps, trace)?;
     report.print();
     if let Some(folder) = &arguments.state {
         println!(
@@ -91,8 +101,9 @@ fn main() -> Result<()> {
 struct Arguments {
     /// The first argument, else `ANYGENESIS_ROM`.
     rom: PathBuf,
-    /// The second argument, else ten seconds' worth.
-    frames: u64,
+    /// Frames to run headless: the second argument, else ten seconds' worth when another
+    /// option asks for a headless run; `None` runs in a window.
+    frames: Option<u64>,
     /// Frames to save, each from 1 to `frames`, in order.
     dumps: Vec<u64>,
     /// Where to save the state at every vertical interrupt.
@@ -144,17 +155,21 @@ impl Arguments {
         let frames = match positional.next() {
             Some(argument) => {
                 let argument = argument.to_string_lossy();
-                argument
-                    .parse()
-                    .with_context(|| format!("{argument:?} is not a frame count\n{USAGE}"))?
+                Some(
+                    argument
+                        .parse()
+                        .with_context(|| format!("{argument:?} is not a frame count\n{USAGE}"))?,
+                )
             }
-            None => DEFAULT_FRAMES,
+            None if dumps.is_empty() && state.is_none() && input.is_none() => None,
+            None => Some(DEFAULT_FRAMES),
         };
         if positional.next().is_some() {
             bail!(USAGE);
         }
-        if let Some(frame) = dumps.iter().find(|&&frame| frame == 0 || frame > frames) {
-            bail!("frame {frame} is not among the {frames} the run draws");
+        let last = frames.unwrap_or(0);
+        if let Some(frame) = dumps.iter().find(|&&frame| frame == 0 || frame > last) {
+            bail!("frame {frame} is not among the {last} the run draws");
         }
         dumps.sort_unstable();
         dumps.dedup();
@@ -319,6 +334,36 @@ fn big_endian(words: &[u16]) -> Vec<u8> {
 }
 
 impl Report {
+    /// What `runtime` holds after a run that ended with `exit`, with `pictures` kept on the
+    /// way.
+    fn new(runtime: &Runtime, exit: Exit, pictures: Vec<(u64, Frame)>) -> Self {
+        let vectors = runtime.rom().vectors();
+        let state = runtime.state();
+        Self {
+            ssp: vectors.initial_ssp(),
+            reset_pc: vectors.reset_pc() & 0xFF_FFFF,
+            exit,
+            cycles: runtime.cycles(),
+            frames: runtime.frames(),
+            vblanks: runtime.interrupts(6),
+            hblanks: runtime.interrupts(4),
+            sr: state.sr,
+            misses: runtime
+                .log()
+                .misses()
+                .iter()
+                .map(|(&address, &miss)| (address, miss))
+                .collect(),
+            accesses: runtime.log().accesses(),
+            unwinds: runtime.log().unwinds(),
+            tmss_unlocked: runtime.tmss_unlocked(),
+            z80_bytes: runtime.z80_ram().iter().filter(|&&byte| byte != 0).count(),
+            vdp: runtime.hardware::<Vdp>().cloned().unwrap_or_default(),
+            ram: Box::new(state.ram),
+            pictures,
+        }
+    }
+
     /// The work RAM byte the report shows.
     fn watched(&self) -> u8 {
         self.ram[ram_index(WATCHED_BYTE)]
@@ -404,56 +449,52 @@ fn run_from_reset(
         .name("68000".into())
         .stack_size(RUN_STACK)
         .spawn(move || {
-            let defaults = Options::default();
-            let options = Options {
-                stop_when_idle: true,
-                version: if trace.folder.is_some() {
-                    REFERENCE_VERSION
-                } else {
-                    defaults.version
-                },
-                ..defaults
-            };
-            let mut runtime = Runtime::new(rom, game.table, Box::<Vdp>::default(), options);
+            let reference = trace.folder.is_some();
+            let mut runtime = start(rom, game, reference);
             let failure = Failure::default();
             if !trace.is_empty() {
                 trace.hook(&mut runtime, game, Rc::clone(&failure));
             }
-            let ssp = runtime.state().a[7];
-            let reset_pc = runtime.state().pc;
             let (exit, pictures) = run_frames(&mut runtime, frames, &dumps);
             if let Some(error) = failure.take() {
                 return Err(error.context("saving the state at a vertical interrupt"));
             }
-            let state = runtime.state();
-            Ok(Report {
-                ssp,
-                reset_pc,
-                exit,
-                cycles: runtime.cycles(),
-                frames: runtime.frames(),
-                vblanks: runtime.interrupts(6),
-                hblanks: runtime.interrupts(4),
-                sr: state.sr,
-                misses: runtime
-                    .log()
-                    .misses()
-                    .iter()
-                    .map(|(&address, &miss)| (address, miss))
-                    .collect(),
-                accesses: runtime.log().accesses(),
-                unwinds: runtime.log().unwinds(),
-                tmss_unlocked: runtime.tmss_unlocked(),
-                z80_bytes: runtime.z80_ram().iter().filter(|&&byte| byte != 0).count(),
-                vdp: runtime.hardware::<Vdp>().cloned().unwrap_or_default(),
-                ram: Box::new(state.ram),
-                pictures,
-            })
+            Ok(Report::new(&runtime, exit, pictures))
         })
         .context("starting the 68000 thread")?;
     worker
         .join()
         .map_err(|_| anyhow!("the 68000 thread panicked"))?
+}
+
+/// Runs from reset in a window until it closes, or the run stops at a wait nothing can end.
+fn run_in_window(game: CompiledGame, rom: Rom) -> Result<Report> {
+    let config = Config {
+        title: format!("AnyGenesis - {}", game.name),
+        scale: WINDOW_SCALE,
+    };
+    let report = anygenesis_frontend::run(
+        &config,
+        move || start(rom, game, false),
+        |runtime, exit| Report::new(runtime, exit, Vec::new()),
+    )?;
+    Ok(report)
+}
+
+/// The runtime for `game` at reset on the VDP, ending a run at a wait nothing can end; on
+/// the reference emulator's console when `reference` is set.
+fn start(rom: Rom, game: CompiledGame, reference: bool) -> Runtime {
+    let defaults = Options::default();
+    let options = Options {
+        stop_when_idle: true,
+        version: if reference {
+            REFERENCE_VERSION
+        } else {
+            defaults.version
+        },
+        ..defaults
+    };
+    Runtime::new(rom, game.table, Box::<Vdp>::default(), options)
 }
 
 /// Runs until `frames` frames have ended, stopping at each frame in `dumps` (ascending, none
@@ -523,14 +564,20 @@ mod tests {
         registers
     }
 
+    /// The translated game and the ROM it came from.
+    fn sonic1() -> (CompiledGame, Rom) {
+        let game = game::compiled().expect("the game crate was built with GAME set");
+        let path = env::var_os(ROM_VAR).expect("ANYGENESIS_ROM is set");
+        let rom = load_rom(&game, Path::new(&path)).expect("the ROM matches the build");
+        (game, rom)
+    }
+
     /// Sonic 1 from reset for ten seconds of frames on the VDP, with interrupts and DMA,
     /// saving the SEGA and title screen pictures to `dumps/` at the workspace root.
     #[test]
     #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
     fn test_sonic1_runs_600_frames_without_misses() {
-        let game = game::compiled().expect("the game crate was built with GAME set");
-        let path = env::var_os(ROM_VAR).expect("ANYGENESIS_ROM is set");
-        let rom = load_rom(&game, Path::new(&path)).expect("the ROM matches the build");
+        let (game, rom) = sonic1();
         let registers = title_registers(&rom);
         let dumps = PICTURES.map(|(frame, _)| frame);
         // An empty input still sets the hook at every vertical interrupt, which must change
@@ -592,5 +639,34 @@ mod tests {
             .map(|(frame, hash)| (frame, hash.to_owned()))
             .collect();
         assert_eq!(pictures, expected);
+    }
+
+    /// Start held for ten vertical interrupts on the idle title screen (stop 298 ends frame
+    /// 600), in the frame diff's input format.
+    const START_PRESS: &str = "330 S\n340 -\n";
+    /// Frames the Start run lasts.
+    const START_FRAMES: u64 = 900;
+    /// Sonic 1's game mode byte while a level loads and runs.
+    const LEVEL_MODE: u8 = 0x0C;
+
+    /// Pressing Start on the title screen leaves it for the first level.
+    #[test]
+    #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
+    fn test_sonic1_title_screen_accepts_start() {
+        let (game, rom) = sonic1();
+        let trace = Trace {
+            folder: None,
+            input: Some(Input::parse(START_PRESS).expect("the input is valid")),
+        };
+        let report = run_from_reset(game, rom, START_FRAMES, &[], trace).expect("the run finishes");
+        report.print();
+        assert!(
+            matches!(report.exit, Exit::Frames { .. }),
+            "{}",
+            report.exit
+        );
+        assert_eq!(report.frames, START_FRAMES);
+        assert_eq!(report.unwinds, 0);
+        assert_eq!(report.watched(), LEVEL_MODE);
     }
 }

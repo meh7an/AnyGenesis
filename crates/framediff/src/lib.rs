@@ -1,12 +1,12 @@
 //! The frame diff harness: our run and an external reference emulator's run both stop at
 //! every vertical interrupt handler entry and save the machine state there (work RAM, VRAM,
-//! CRAM, VSRAM, VDP registers) in one dump layout; the diff finds the first stop where they
-//! differ.
+//! CRAM, VSRAM, VDP registers) in one dump layout; the diff lists every stop where they
+//! differ, realigning on whole-stop shifts and reporting each.
 //!
 //! Stops are counted from the first vertical interrupt taken after reset, so the runs align
 //! on what the game sees rather than on frames: a frame whose interrupt the game held back
 //! (a lag frame) merges into the next delivery in both runs, and a different count shows up
-//! as a divergence. [`input`] is the replay format both runs read, [`script`] writes the
+//! as a shift or a divergence. [`input`] is the replay format both runs read, [`script`] writes the
 //! reference emulator's debugger script, [`mask`] reads the signed-off masks.
 
 pub mod diff;
@@ -17,7 +17,7 @@ pub mod script;
 
 use std::{io, path::PathBuf};
 
-pub use diff::{Folder, Report, Run, diff};
+pub use diff::{Folder, Report, Run, Shift, diff};
 pub use dump::{Dump, Region};
 pub use input::{Buttons, Input};
 pub use mask::{Mask, Masks};

@@ -1,0 +1,10 @@
+[package]
+name = "anygenesis-frontend"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anygenesis-runtime = { version = "0.1.0", path = "../runtime" }
+sdl3 = { version = "0.20.0", features = ["build-from-source-static"] }
+thiserror = "2.0.21"

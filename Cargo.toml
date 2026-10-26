@@ -6,6 +6,7 @@ members = [
     "crates/c-oracle",
     "crates/codegen-c",
     "crates/framediff",
+    "crates/frontend",
     "crates/game",
     "crates/gamecfg",
     "crates/ir",

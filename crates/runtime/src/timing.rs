@@ -23,6 +23,8 @@
 //! the slow H40 stretch starts is chosen: Kabuto measured 32 slow pixels 24 after the right
 //! edge, and a 3420-clock line leaves room for 30.
 
+/// Master clocks per second on an NTSC console: fifteen times the colour subcarrier.
+pub const MASTER_CLOCK_HZ: u64 = 53_693_175;
 /// Master clocks per 68000 cycle.
 pub const CPU_DIVIDER: u64 = 7;
 /// Master clocks per line, in both H32 and H40.

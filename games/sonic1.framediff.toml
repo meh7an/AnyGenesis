@@ -1,0 +1,27 @@
+# Sonic the Hedgehog (REV00): the frame diff's masks against the reference emulator,
+# signed off by Mehran on 2026-10-26 (M3.6 gate, option A; the third after the realigned
+# M3.5 run showed it). Work RAM by 68000 address, end exclusive.
+
+[[mask]]
+region = "ram"
+start = 0xFFFDF0
+end = 0xFFFDF8
+reason = """the stacked PC of the vertical interrupt frame: we deliver interrupts at \
+block-start check points, the reference at instruction boundaries. The frame sits at SP \
+$FFFDEE or $FFFDF2, so both PC longwords are masked, which also hides the stacked SR word \
+of the frame at $FFFDF2"""
+
+[[mask]]
+region = "ram"
+start = 0xFFFE0C
+end = 0xFFFE10
+reason = """a counter of vertical interrupts, one higher in our run after the extra VBlank \
+our cycle estimates deliver around the SEGA-to-title transition; exact timing is Phase 4"""
+
+[[mask]]
+region = "ram"
+start = 0xFFF001
+end = 0xFFF002
+reason = """a per-VBlank counter of the sound driver, which the VBlank handler runs: one off \
+after the same extra VBlank until the title music resets it (stops 154-197 of the M3.5 run, \
+the only byte differing there at a shift of +1); exact timing is Phase 4"""
