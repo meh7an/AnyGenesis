@@ -83,6 +83,41 @@ pub enum ProblemKind {
     InsideData { address: Address, region: Location },
     /// An `[[indirect]]` hint without targets.
     NoTargets,
+    /// A `[report]` value whose `bytes` bytes from `address` leave the area they belong in.
+    OutsideArea {
+        address: Address,
+        bytes: u32,
+        area: Area,
+    },
+}
+
+/// A part of the 68000's memory map a config value must lie in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Area {
+    /// The cartridge ROM, $000000-$3FFFFF.
+    Rom,
+    /// Work RAM where games address it, $FF0000-$FFFFFF.
+    WorkRam,
+}
+
+impl Area {
+    /// Returns the area's first address and one past its last.
+    pub const fn bounds(self) -> (u32, u32) {
+        match self {
+            Self::Rom => (0, 0x40_0000),
+            Self::WorkRam => (0xFF_0000, 0x100_0000),
+        }
+    }
+}
+
+impl fmt::Display for Area {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rom => f.write_str("the ROM (0x000000-0x3FFFFF)"),
+            Self::WorkRam => f.write_str("work RAM (0xFF0000-0xFFFFFF)"),
+        }
+    }
 }
 
 impl fmt::Display for ProblemKind {
@@ -111,6 +146,16 @@ impl fmt::Display for ProblemKind {
                 )
             }
             Self::NoTargets => f.write_str("an indirect hint needs at least one target"),
+            Self::OutsideArea {
+                address,
+                bytes: 1,
+                area,
+            } => write!(f, "{address} must lie in {area}"),
+            Self::OutsideArea {
+                address,
+                bytes,
+                area,
+            } => write!(f, "the {bytes} bytes from {address} must lie in {area}"),
         }
     }
 }

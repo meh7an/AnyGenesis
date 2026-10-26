@@ -13,4 +13,8 @@ fn test_parse_games_sonic1_valid_and_keyed_on_rev00() {
         Err(error) => panic!("games/sonic1.toml:\n{error}"),
     };
     assert_eq!(config.sha1, "6ddb7de1e17e7f6cdb88927bd906352030daa194");
+    assert!(
+        config.report.is_some(),
+        "the game binary's Sonic 1 checks read [report]"
+    );
 }

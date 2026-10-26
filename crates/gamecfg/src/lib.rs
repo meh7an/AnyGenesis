@@ -8,8 +8,8 @@ mod location;
 mod parse;
 
 pub use config::{
-    DataRegion, EntryKind, FunctionHint, GameConfig, IndirectHint, JumpTable, TargetKind,
+    DataRegion, EntryKind, FunctionHint, GameConfig, IndirectHint, JumpTable, Report, TargetKind,
     UnreachedReason, UnreachedRegion,
 };
-pub use error::{ConfigError, Problem, ProblemKind};
+pub use error::{Area, ConfigError, Problem, ProblemKind};
 pub use location::Location;

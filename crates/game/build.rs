@@ -11,7 +11,7 @@ use std::{
     process::ExitCode,
 };
 
-use anygenesis_recomp::build::{self, Translation};
+use anygenesis_recomp::build::{self, Report, Translation};
 
 const GAME_VAR: &str = "GAME";
 const ROM_VAR: &str = "ANYGENESIS_ROM";
@@ -69,11 +69,38 @@ fn recompile(game: &OsString, out: &Path) -> Result<String, String> {
     let sources =
         build::write_output(&translation.output, &directory).map_err(|error| error.to_string())?;
     build::compile(LIBRARY, &directory, &sources).map_err(|error| error.to_string())?;
-    Ok(game_items(game, &translation))
+    Ok(game_items(game, &translation, config.report.as_ref()))
+}
+
+/// The `ReportConfig` expression for `report`.
+fn report_expression(report: Option<&Report>) -> String {
+    let Some(report) = report else {
+        return "None".to_owned();
+    };
+    let address = |address: Option<u32>| {
+        address.map_or_else(
+            || "None".to_owned(),
+            |address| format!("Some(0x{address:06X})"),
+        )
+    };
+    let mut values = String::new();
+    for (name, value) in &report.values {
+        write!(values, "({name:?}, 0x{value:02X}), ").expect("writing to a String cannot fail");
+    }
+    format!(
+        "Some(ReportConfig {{\n            \
+         watched: 0x{watched:06X},\n            \
+         palette: {palette},\n            \
+         vdp_setup: {vdp_setup},\n            \
+         values: &[{values}],\n        }})",
+        watched = report.watched.get(),
+        palette = address(report.palette.map(|address| address.get())),
+        vdp_setup = address(report.vdp_setup.map(|address| address.get())),
+    )
 }
 
 /// The Rust items that reach the compiled program.
-fn game_items(game: &str, translation: &Translation) -> String {
+fn game_items(game: &str, translation: &Translation, report: Option<&Report>) -> String {
     let analysis = &translation.analysis;
     let mut handlers = String::new();
     for entry in build::vector_handlers(analysis) {
@@ -99,8 +126,10 @@ fn game_items(game: &str, translation: &Translation) -> String {
          functions: {functions},\n        \
          table,\n        \
          vector_handlers: &[{handlers}],\n        \
-         function_entries: &[{entries}],\n    }})\n}}\n",
+         function_entries: &[{entries}],\n        \
+         report: {report},\n    }})\n}}\n",
         sha1 = analysis.sha1,
         functions = analysis.functions.len(),
+        report = report_expression(report),
     )
 }

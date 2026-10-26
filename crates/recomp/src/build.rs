@@ -16,6 +16,9 @@ use anygenesis_codegen_c::{CheckPoints, EmitOptions, Output, emit};
 use anygenesis_gamecfg::{ConfigError, GameConfig};
 use anygenesis_rom::{Rom, RomError};
 
+/// The config section build scripts pass on to the game binary's report.
+pub use anygenesis_gamecfg::Report;
+
 /// Game configs ship in the workspace's games/ folder; the path is fixed at build time.
 pub const GAMES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../games");
 

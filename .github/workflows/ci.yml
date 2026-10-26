@@ -22,6 +22,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # SDL3 is built from source by the frontend's sdl3-src. Its CMake fails without the X11
+      # extensions (XTest included); audio headers are left out until the audio milestones.
+      # The Windows runner already has CMake.
+      - name: Install SDL3 build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config \
+            libx11-dev libxext-dev libxcursor-dev libxrandr-dev libxfixes-dev libxi-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            libdecor-0-dev libegl1-mesa-dev libgl1-mesa-dev
+
       # Installs the version pinned in rust-toolchain.toml, with its components.
       - name: Install toolchain
         run: rustup toolchain install

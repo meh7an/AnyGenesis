@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anygenesis_shared::Address;
 use serde::Deserialize;
 use toml::Spanned;
 
 use crate::{
-    ConfigError, DataRegion, EntryKind, FunctionHint, GameConfig, IndirectHint, JumpTable,
-    Location, Problem, ProblemKind, TargetKind, UnreachedReason, UnreachedRegion,
+    Area, ConfigError, DataRegion, EntryKind, FunctionHint, GameConfig, IndirectHint, JumpTable,
+    Location, Problem, ProblemKind, Report, TargetKind, UnreachedReason, UnreachedRegion,
 };
 
 /// The file as written; values keep their byte spans until validation turns them into
@@ -25,6 +25,8 @@ struct RawConfig {
     indirect: Vec<RawIndirect>,
     #[serde(default)]
     unreached: Vec<RawUnreached>,
+    #[serde(default)]
+    report: Option<RawReport>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +69,18 @@ struct RawUnreached {
     start: Spanned<u32>,
     end: Spanned<u32>,
     reason: UnreachedReason,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReport {
+    watched: Spanned<u32>,
+    #[serde(default)]
+    palette: Option<Spanned<u32>>,
+    #[serde(default)]
+    vdp_setup: Option<Spanned<u32>>,
+    #[serde(default)]
+    values: BTreeMap<String, u8>,
 }
 
 pub(crate) fn parse(text: &str) -> Result<GameConfig, ConfigError> {
@@ -114,6 +128,10 @@ impl Validator<'_> {
             )
             .collect();
         self.disjoint(&mut spans);
+        let report = raw
+            .report
+            .as_ref()
+            .map(|report| self.report_section(report));
         GameConfig {
             sha1,
             functions,
@@ -121,7 +139,48 @@ impl Validator<'_> {
             data_regions,
             indirect,
             unreached,
+            report,
         }
+    }
+
+    fn report_section(&mut self, raw: &RawReport) -> Report {
+        let palette = raw
+            .palette
+            .as_ref()
+            .map(|value| self.inside(value, Report::PALETTE_BYTES, Area::WorkRam));
+        let vdp_setup = raw
+            .vdp_setup
+            .as_ref()
+            .map(|value| self.inside(value, Report::VDP_SETUP_BYTES, Area::Rom));
+        Report {
+            watched: self.inside(&raw.watched, 1, Area::WorkRam),
+            palette,
+            vdp_setup,
+            values: raw.values.clone(),
+        }
+    }
+
+    /// Reads an address whose `bytes` bytes must lie in `area`. Anything wider than a byte
+    /// is read as words, so it must start at an even address.
+    fn inside(&mut self, value: &Spanned<u32>, bytes: u32, area: Area) -> Address {
+        let (address, location) = if bytes > 1 {
+            self.even_address(value)
+        } else {
+            self.address(value)
+        };
+        let (start, end) = area.bounds();
+        let raw = *value.get_ref();
+        if raw <= Address::MASK && (raw < start || end.saturating_sub(raw) < bytes) {
+            self.report(
+                location,
+                ProblemKind::OutsideArea {
+                    address,
+                    bytes,
+                    area,
+                },
+            );
+        }
+        address
     }
 
     fn sha1(&mut self, value: &Spanned<String>) -> String {
@@ -331,6 +390,99 @@ mod tests {
         assert!(config.data_regions.is_empty());
         assert!(config.indirect.is_empty());
         assert!(config.unreached.is_empty());
+        assert!(config.report.is_none());
+    }
+
+    #[test]
+    fn test_parse_report_reads_values() {
+        let config = parse(&with_sha1(
+            "[report]\nwatched = 0xFF0001\npalette = 0xFFFF80\nvdp_setup = 0x3FFFDA\n\
+             [report.values]\nfirst = 0x04\nsecond = 255\n",
+        ))
+        .expect("valid");
+        assert_eq!(
+            config.report,
+            Some(Report {
+                watched: Address::new(0xFF_0001),
+                palette: Some(Address::new(0xFF_FF80)),
+                vdp_setup: Some(Address::new(0x3F_FFDA)),
+                values: BTreeMap::from([("first".to_owned(), 4), ("second".to_owned(), 255)]),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_report_with_watched_only_leaves_the_rest_empty() {
+        let config = parse(&with_sha1("[report]\nwatched = 0xFF0000\n")).expect("valid");
+        let report = config.report.expect("a report section");
+        assert_eq!(report.palette, None);
+        assert_eq!(report.vdp_setup, None);
+        assert!(report.values.is_empty());
+    }
+
+    #[test]
+    fn test_parse_report_outside_its_areas_reported() {
+        let found = problems(&with_sha1(
+            "[report]\nwatched = 0xFEFFFF\npalette = 0xFFFF82\nvdp_setup = 0x3FFFDC\n",
+        ));
+        let kinds: Vec<_> = found.iter().map(|problem| &problem.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                &ProblemKind::OutsideArea {
+                    address: Address::new(0xFF_FF82),
+                    bytes: Report::PALETTE_BYTES,
+                    area: Area::WorkRam,
+                },
+                &ProblemKind::OutsideArea {
+                    address: Address::new(0x3F_FFDC),
+                    bytes: Report::VDP_SETUP_BYTES,
+                    area: Area::Rom,
+                },
+                &ProblemKind::OutsideArea {
+                    address: Address::new(0xFE_FFFF),
+                    bytes: 1,
+                    area: Area::WorkRam,
+                },
+            ]
+        );
+        let lines: Vec<_> = found.iter().map(|problem| problem.location.line).collect();
+        assert_eq!(lines, [4, 5, 3]);
+        assert_eq!(
+            found[2].kind.to_string(),
+            "0xFEFFFF must lie in work RAM (0xFF0000-0xFFFFFF)"
+        );
+    }
+
+    #[test]
+    fn test_parse_report_odd_table_reported() {
+        let found = problems(&with_sha1(
+            "[report]\nwatched = 0xFF0000\nvdp_setup = 0x1001\n",
+        ));
+        assert_eq!(
+            found,
+            [Problem {
+                location: Location {
+                    line: 4,
+                    column: 13
+                },
+                kind: ProblemKind::OddAddress {
+                    address: Address::new(0x1001)
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_report_without_watched_returns_parse_error() {
+        let text = with_sha1("[report]\npalette = 0xFF0000\n");
+        assert!(matches!(parse(&text), Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn test_parse_report_value_over_a_byte_returns_parse_error() {
+        let text = with_sha1("[report]\nwatched = 0xFF0000\n[report.values]\nfirst = 0x100\n");
+        assert!(matches!(parse(&text), Err(ConfigError::Parse { .. })));
     }
 
     #[test]

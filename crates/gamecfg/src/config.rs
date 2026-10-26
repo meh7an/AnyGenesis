@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anygenesis_shared::Address;
 use serde::Deserialize;
 
@@ -21,6 +23,8 @@ pub struct GameConfig {
     pub indirect: Vec<IndirectHint>,
     /// Code the analysis is known not to reach, with the reason.
     pub unreached: Vec<UnreachedRegion>,
+    /// What the game binary's report and its checks read; `None` without `[report]`.
+    pub report: Option<Report>,
 }
 
 impl GameConfig {
@@ -186,6 +190,27 @@ impl UnreachedReason {
             Self::Dead => "dead",
         }
     }
+}
+
+/// Places in the game's memory the game binary's report and its checks read, `[report]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    /// The work RAM byte the report prints.
+    pub watched: Address,
+    /// Where the game keeps a copy of CRAM in work RAM, which its vertical interrupt copies
+    /// to CRAM.
+    pub palette: Option<Address>,
+    /// A ROM table of `0x8RVV` words that sets VDP registers 0-18, one word each.
+    pub vdp_setup: Option<Address>,
+    /// Values of the watched byte, by name.
+    pub values: BTreeMap<String, u8>,
+}
+
+impl Report {
+    /// Bytes of the palette copy: 64 CRAM words.
+    pub const PALETTE_BYTES: u32 = 128;
+    /// Bytes of the VDP setup table: 19 words.
+    pub const VDP_SETUP_BYTES: u32 = 38;
 }
 
 /// Explicit targets for one indirect jump or call, `[[indirect]]`.
