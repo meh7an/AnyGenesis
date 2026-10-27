@@ -5,25 +5,42 @@
 //! A line is drawn into three layers (plane B, plane A or the window, sprites) whose pixels
 //! are CRAM indices with the priority bit on top; colour 0 of every palette is transparent.
 //! The first opaque pixel in the order high sprite, high A, high B, low sprite, low A, low B
-//! wins, else the backdrop colour shows. CRAM's 3-bit channels scale linearly to 8 bits.
-//! Each line is drawn from one state, so changes in the middle of a line are not seen.
+//! wins, else the backdrop colour shows. Each line is drawn from one state, so changes in
+//! the middle of a line are not seen.
 //!
-//! Sprites are found by walking the link list from sprite 0 until a link of 0, a link past
-//! the table or the table's size; earlier sprites stay in front. A line takes 16 sprites
-//! and 256 sprite pixels in H32, 20 and 320 in H40.
+//! Colours sit on a 15-step ladder per channel (0-14, scaled linearly to 8 bits): a CRAM
+//! channel v shows at 2v, shadowed at v and highlighted at v + 7. With shadow/highlight on
+//! (register 12 bit 3), a pixel is shadowed unless plane A's or plane B's cell there has
+//! priority (transparent pixels included) or a high-priority sprite pixel wins. Sprite
+//! colours 14 and 15 of palette 3 are not drawn: where the sprite would be in front they
+//! highlight or shadow what shows through, a highlight and a shadow cancelling out and two
+//! shadows staying one. Sprite colour 14 of any other palette is never shadowed.
+//!
+//! Sprites are found by walking the link list from sprite 0 until a link of 0, a link of 80
+//! or more, or the table's size; in H32, links 64-79 read sprites 0-15. Earlier sprites stay
+//! in front. A line takes 16 sprites and 256 sprite pixels in H32, 20 and 320 in H40; a
+//! sprite past the count sets the overflow flag, and two sprites' opaque pixels meeting in
+//! the picture set the collision flag (sprites hidden by masking do not draw, so do not).
+//!
+//! Two-cell vertical scrolling gives the part-shown column left of the first whole one
+//! VSRAM words 38 AND 39 in H40 and 0 in H32, for both planes.
 //!
 //! Sources (behaviour only, no emulator code read): Plutiedev (registers, tile and sprite
-//! formats, layer priority, sprite limits), Kabuto's hardware notes on Plutiedev (sprite
-//! scan, x = 0 masking), rasterscroll.com's VDP pages (scroll ranges and directions, the
-//! window's name table and scrolling), the MegaDrive Wiki (plane sizes, scroll table
-//! layout), and SpritesMind posts (the window's row and column rule, masking after a line
-//! that used all its sprite pixels). Chosen, unverified: the backdrop under the left column
-//! blank and with the display off, the undocumented H-scroll mode 01 repeating the first
-//! eight lines' values, prohibited plane sizes drawn as 32 cells, sprite flips reversing
-//! the cell order, and the part-shown column of two-cell vertical scrolling taking column
-//! 0's value (hardware is reported to give it something else). Left out: shadow/highlight,
-//! double-resolution interlace (drawn as progressive), the sprite collision and overflow
-//! status flags, and the wrong plane A cell fetched right of a left window.
+//! formats, layer priority, sprite limits, shadow/highlight rules), Kabuto's hardware notes
+//! on Plutiedev (sprite scan, x = 0 masking), rasterscroll.com's VDP pages (scroll ranges
+//! and directions, the window's name table and scrolling, shadow/highlight: operators only
+//! where the sprite is on top, sprites never highlighted), the MegaDrive Wiki (plane sizes,
+//! scroll table layout), and SpritesMind posts (the window's row and column rule, masking
+//! after a line that used all its sprite pixels, Eke's Model 2 tests of the part-shown
+//! column). Chosen, unverified: the backdrop under the left column blank and with the
+//! display off (never shaded), the undocumented H-scroll mode 01 repeating the first eight
+//! lines' values, prohibited plane sizes drawn as 32 cells, sprite flips reversing the cell
+//! order, the linear colour ladder, operator pixels not counting as priority, H32's link
+//! aliasing, the overflow flag counting sprites only (not pixels), and collisions counted
+//! inside the picture only. Left out, signed off as known differences: mid-line changes and
+//! CRAM dots, double-resolution interlace (drawn as progressive), the sprite attribute
+//! cache (sprites are read from VRAM as the line is drawn), and the wrong plane A cell
+//! fetched right of a left window with fine horizontal scrolling.
 
 use super::{CRAM_WORDS, REGISTERS, VRAM_SIZE, VSRAM_WORDS};
 
@@ -38,6 +55,15 @@ pub const HEIGHT: usize = 224;
 const PRIORITY: u8 = 0x80;
 /// Sprite and plane positions count from this many pixels before the picture's edge.
 const SPRITE_OFFSET: usize = 128;
+/// Link values the sprite walk follows, in both modes.
+const SPRITE_LINKS: usize = 80;
+/// The CRAM indices of palette 3's colours 14 and 15, shadow/highlight's operators.
+const HIGHLIGHT_OPERATOR: u8 = 0x3E;
+const SHADOW_OPERATOR: u8 = 0x3F;
+/// The sprite colour shadowing never darkens.
+const UNSHADED_COLOUR: u8 = 14;
+/// VSRAM words that two-cell scrolling's part-shown column takes in H40, ANDed.
+const PART_COLUMN_WORDS: [usize; 2] = [38, 39];
 /// Bytes of a 4-bit 8x8 pattern.
 const PATTERN_BYTES: usize = 32;
 /// The bytes a BMP's file and info headers take.
@@ -129,6 +155,49 @@ pub(super) struct Source<'a> {
     pub vsram: &'a [u16; VSRAM_WORDS],
 }
 
+/// What a line's sprites did that the status register reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SpriteFlags {
+    /// More sprites met the line than it takes.
+    pub overflow: bool,
+    /// Two sprites' opaque pixels met in the picture.
+    pub collision: bool,
+}
+
+/// What drawing a line's sprites found.
+#[derive(Debug, Clone, Copy)]
+struct SpriteLine {
+    /// The line used all its sprite pixels.
+    pixels_ran_out: bool,
+    flags: SpriteFlags,
+}
+
+/// How bright a pixel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shade {
+    Shadow,
+    Normal,
+    Highlight,
+}
+
+impl Shade {
+    /// The shade of a pixel at `self` under a sprite operator pixel.
+    fn under(self, operator: Operator) -> Self {
+        match (self, operator) {
+            (Self::Shadow, Operator::Highlight) => Self::Normal,
+            (_, Operator::Highlight) => Self::Highlight,
+            (_, Operator::Shadow) => Self::Shadow,
+        }
+    }
+}
+
+/// What a shadow/highlight operator pixel does to the pixel under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operator {
+    Highlight,
+    Shadow,
+}
+
 /// The frame being drawn and the last one finished.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Screen {
@@ -145,8 +214,9 @@ impl Screen {
         &self.shown
     }
 
-    /// Draws picture line `line` (below [`HEIGHT`]); the last one finishes the frame.
-    pub fn draw_line(&mut self, source: Source<'_>, line: usize) {
+    /// Draws picture line `line` (below [`HEIGHT`]), returning what its sprites did; the
+    /// last line finishes the frame.
+    pub fn draw_line(&mut self, source: Source<'_>, line: usize) -> SpriteFlags {
         let layout = Layout::of(source.registers);
         if line == 0 {
             self.drawing.width = layout.width;
@@ -156,7 +226,8 @@ impl Screen {
         let row = &mut self.drawing.row_mut(line)[..];
         row[width..].fill(0);
         let row = &mut row[..width];
-        let backdrop = colour(source.cram[usize::from(layout.backdrop)]);
+        let backdrop = colour(source.cram[usize::from(layout.backdrop)], Shade::Normal);
+        let mut flags = SpriteFlags::default();
         if !layout.display {
             row.fill(backdrop);
             self.pixels_ran_out = false;
@@ -169,33 +240,75 @@ impl Screen {
             draw_window(source, &layout, line, window.clone(), plane_a);
             draw_plane(source, &layout, Plane::A, line, window.end..width, plane_a);
             let mut sprites = [0; MAX_WIDTH];
-            self.pixels_ran_out =
-                draw_sprites(source, &layout, line, self.pixels_ran_out, &mut sprites);
+            let drawn = draw_sprites(source, &layout, line, self.pixels_ran_out, &mut sprites);
+            self.pixels_ran_out = drawn.pixels_ran_out;
+            flags = drawn.flags;
             for (x, pixel) in row.iter_mut().enumerate() {
-                let layers = [sprites[x], plane_a[x], plane_b[x]];
-                let index = if x < 8 && layout.left_blank {
-                    None
+                *pixel = if x < 8 && layout.left_blank {
+                    backdrop
                 } else {
-                    layers
-                        .into_iter()
-                        .find(|&layer| layer & PRIORITY != 0 && opaque(layer))
-                        .or_else(|| layers.into_iter().find(|&layer| opaque(layer)))
-                };
-                *pixel = match index {
-                    Some(layer) => colour(source.cram[usize::from(layer & 0x3F)]),
-                    None => backdrop,
+                    let (index, shade) = compose(&layout, sprites[x], plane_a[x], plane_b[x]);
+                    colour(source.cram[usize::from(index)], shade)
                 };
             }
         }
         if line == HEIGHT - 1 {
             std::mem::swap(&mut self.shown, &mut self.drawing);
         }
+        flags
     }
 }
 
-/// A CRAM word (0x0BGR, three bits a channel at 3-1) as 0x00RRGGBB.
-fn colour(word: u16) -> u32 {
-    let channel = |shift: u16| u32::from(word >> shift & 7) * 255 / 7;
+/// The CRAM index a pixel shows, from its sprite, plane A and plane B layer pixels or else
+/// the backdrop, and how bright it shows.
+fn compose(layout: &Layout, sprite: u8, plane_a: u8, plane_b: u8) -> (u8, Shade) {
+    let front = |layers: &[u8]| {
+        layers
+            .iter()
+            .copied()
+            .find(|&layer| layer & PRIORITY != 0 && opaque(layer))
+            .or_else(|| layers.iter().copied().find(|&layer| opaque(layer)))
+            .map_or(layout.backdrop, |layer| layer & 0x3F)
+    };
+    if !layout.shadow_highlight {
+        return (front(&[sprite, plane_a, plane_b]), Shade::Normal);
+    }
+    let planes = [plane_a, plane_b];
+    let through = front(&planes);
+    let shade = if planes.iter().any(|&layer| layer & PRIORITY != 0) {
+        Shade::Normal
+    } else {
+        Shade::Shadow
+    };
+    let sprite_in_front = opaque(sprite)
+        && (sprite & PRIORITY != 0
+            || !planes
+                .iter()
+                .any(|&layer| layer & PRIORITY != 0 && opaque(layer)));
+    if !sprite_in_front {
+        return (through, shade);
+    }
+    match sprite & 0x3F {
+        HIGHLIGHT_OPERATOR => (through, shade.under(Operator::Highlight)),
+        SHADOW_OPERATOR => (through, shade.under(Operator::Shadow)),
+        index if sprite & PRIORITY != 0 || index & 0x0F == UNSHADED_COLOUR => {
+            (index, Shade::Normal)
+        }
+        index => (index, shade),
+    }
+}
+
+/// A CRAM word (0x0BGR, three bits a channel at 3-1) as 0x00RRGGBB at `shade`.
+fn colour(word: u16, shade: Shade) -> u32 {
+    let channel = |shift: u16| {
+        let value = u32::from(word >> shift & 7);
+        let level = match shade {
+            Shade::Shadow => value,
+            Shade::Normal => value * 2,
+            Shade::Highlight => value + 7,
+        };
+        level * 255 / 14
+    };
     channel(1) << 16 | channel(5) << 8 | channel(9)
 }
 
@@ -229,6 +342,7 @@ struct Layout {
     h40: bool,
     display: bool,
     left_blank: bool,
+    shadow_highlight: bool,
     backdrop: u8,
     plane_a: usize,
     plane_b: usize,
@@ -259,6 +373,7 @@ impl Layout {
             h40,
             display: registers[1] & 0x40 != 0,
             left_blank: registers[0] & 0x20 != 0,
+            shadow_highlight: registers[12] & 0x08 != 0,
             backdrop: registers[7] & 0x3F,
             plane_a: usize::from(registers[2] & 0x38) << 10,
             plane_b: usize::from(registers[4] & 0x07) << 13,
@@ -371,14 +486,17 @@ fn draw_plane(
     // Positive values move the plane right; the first column of tiles may show only in
     // part, and two-cell vertical scrolling follows the scrolled columns.
     let fine = hscroll & 15;
+    let part_column = if layout.h40 {
+        let [first, second] = PART_COLUMN_WORDS;
+        source.vsram[first] & source.vsram[second]
+    } else {
+        0
+    };
     for x in columns {
-        let vscroll = if layout.vscroll_columns {
-            // The part-shown column left of the first whole one takes column 0's value
-            // (chosen; hardware gives it something else).
-            let column = x.saturating_sub(fine) / 16;
-            source.vsram[column * 2 + slot]
-        } else {
-            source.vsram[slot]
+        let vscroll = match x.checked_sub(fine) {
+            _ if !layout.vscroll_columns => source.vsram[slot],
+            Some(scrolled) => source.vsram[scrolled / 16 * 2 + slot],
+            None => part_column,
         };
         let plane_x = x.wrapping_sub(hscroll) & (width - 1);
         let plane_y = (line + usize::from(vscroll)) & (height - 1);
@@ -406,15 +524,14 @@ fn draw_window(
     }
 }
 
-/// Draws the sprites on `line` into `out`, walking the link list from sprite 0; returns
-/// whether the line used all its sprite pixels.
+/// Draws the sprites on `line` into `out`, walking the link list from sprite 0.
 fn draw_sprites(
     source: Source<'_>,
     layout: &Layout,
     line: usize,
     pixels_ran_out: bool,
     out: &mut [u8; MAX_WIDTH],
-) -> bool {
+) -> SpriteLine {
     let (total, per_line) = if layout.h40 { (80, 20) } else { (64, 16) };
     let pixel_limit = layout.width;
     let target = line + SPRITE_OFFSET;
@@ -426,6 +543,7 @@ fn draw_sprites(
     // count against both limits.
     let mut moved_seen = pixels_ran_out;
     let mut masked = false;
+    let mut flags = SpriteFlags::default();
     for _ in 0..total {
         let entry = layout.sprites + index * 8;
         let top = usize::from(word(source.vram, entry) & 0x01FF);
@@ -437,6 +555,7 @@ fn draw_sprites(
         if row < rows * 8 {
             found += 1;
             if found > per_line {
+                flags.overflow = true;
                 break;
             }
             let pattern = word(source.vram, entry + 4);
@@ -453,8 +572,9 @@ fn draw_sprites(
             };
             let hflip = pattern & 0x0800 != 0;
             for step in 0..columns {
+                // Out of pixels, the walk goes on only to count sprites.
                 if pixels >= pixel_limit {
-                    return true;
+                    break;
                 }
                 pixels += 8;
                 if masked {
@@ -471,17 +591,26 @@ fn draw_sprites(
                     };
                     let pixel_column = if hflip { 7 - offset } else { offset };
                     let colour = pattern_pixel(source.vram, first & 0x07FF, row % 8, pixel_column);
+                    if colour == 0 {
+                        continue;
+                    }
                     // Sprites earlier in the list stay in front.
-                    if colour != 0 && !opaque(out[x]) {
+                    if opaque(out[x]) {
+                        flags.collision = true;
+                    } else {
                         out[x] = colour | attributes(pattern);
                     }
                 }
             }
         }
-        if link == 0 || link >= total {
+        if link == 0 || link >= SPRITE_LINKS {
             break;
         }
-        index = link;
+        // H32's 64-entry table: links 64-79 wrap to sprites 0-15.
+        index = link % total;
     }
-    pixels >= pixel_limit
+    SpriteLine {
+        pixels_ran_out: pixels >= pixel_limit,
+        flags,
+    }
 }

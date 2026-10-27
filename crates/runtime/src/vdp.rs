@@ -15,9 +15,10 @@
 //! Data-port writes go through a four-entry FIFO ([`fifo`]) that drains through the access
 //! slots of each line; the 68000 waits while it is full, a 68K-to-VDP DMA, a fill or a copy
 //! starts once it has drained, and a data-port read waits for it to drain and for a slot.
-//! The status register shows it empty or full. VRAM keeps bytes in the 68000's order; a word
-//! written to an odd address lands with its bytes swapped. CRAM keeps its 9 colour bits as
-//! 0x0EEE, VSRAM 11 bits.
+//! The status register shows it empty or full, and keeps the sprite overflow and collision
+//! bits of the lines drawn since the last status-port read. VRAM keeps bytes in the 68000's
+//! order; a word written to an odd address lands with its bytes swapped. CRAM keeps its 9
+//! colour bits as 0x0EEE, VSRAM 11 bits.
 //!
 //! Sources (behaviour only, no emulator code read): Plutiedev's VDP register reference
 //! (register bits, DMA registers and types), Kabuto's hardware notes (status upper bits,
@@ -65,6 +66,10 @@ pub mod status {
     pub const FIFO_EMPTY: u16 = 0x0200;
     /// The write FIFO is full: the next data-port write waits.
     pub const FIFO_FULL: u16 = 0x0100;
+    /// A line drawn since the last status read met more sprites than it takes.
+    pub const SPRITE_OVERFLOW: u16 = 0x0040;
+    /// Two sprites' opaque pixels met on a line drawn since the last status read.
+    pub const SPRITE_COLLISION: u16 = 0x0020;
     /// A fill or copy DMA is in progress.
     pub const DMA_BUSY: u16 = 0x0002;
 }
@@ -147,6 +152,8 @@ pub struct Vdp {
     fault: Option<AccessKind>,
     counts: Counts,
     screen: Screen,
+    /// The sprite overflow and collision bits, until a status read clears them.
+    sprite_status: u16,
 }
 
 impl Default for Vdp {
@@ -169,6 +176,7 @@ impl Default for Vdp {
             fault: None,
             counts: Counts::default(),
             screen: Screen::default(),
+            sprite_status: 0,
         }
     }
 }
@@ -217,7 +225,7 @@ impl Vdp {
             fifo::DEPTH.. => status::FIFO_FULL,
             _ => 0,
         };
-        status::FIXED | fifo | self.timing.status() | busy
+        status::FIXED | fifo | self.sprite_status | self.timing.status() | busy
     }
 
     /// The HV counter, frozen while register 0 bit 1 is set.
@@ -241,7 +249,13 @@ impl Vdp {
                 vsram: &self.vsram,
             };
             // Below 224, so it fits.
-            self.screen.draw_line(source, line as usize);
+            let flags = self.screen.draw_line(source, line as usize);
+            if flags.overflow {
+                self.sprite_status |= status::SPRITE_OVERFLOW;
+            }
+            if flags.collision {
+                self.sprite_status |= status::SPRITE_COLLISION;
+            }
         }
     }
 
@@ -290,12 +304,9 @@ impl Vdp {
             }
             // Mode 4 (bit 2 clear) and 128 KiB VRAM (bit 7) are not built.
             1 if value & 0x04 == 0 || value & 0x80 != 0 => self.fault(AccessKind::VdpRegister),
-            // Only both resolution bits set or both clear are documented; shadow/highlight
-            // (bit 3) and double-resolution interlace (bits 2-1 = 3) are not drawn.
-            12 if (value & 0x01 != 0) != (value & 0x80 != 0)
-                || value & 0x08 != 0
-                || value & 0x06 == 0x06 =>
-            {
+            // Only both resolution bits set or both clear are documented; double-resolution
+            // interlace (bits 2-1 = 3) is not drawn.
+            12 if (value & 0x01 != 0) != (value & 0x80 != 0) || value & 0x06 == 0x06 => {
                 self.fault(AccessKind::VdpRegister)
             }
             // A size field of `10` is prohibited, and a plane larger than 8 KiB does not fit
@@ -423,10 +434,12 @@ impl Hardware for Vdp {
         match port {
             0x00..=0x03 => self.read_data(),
             0x04..=0x07 => {
-                // Reading the status ends a half-written command.
+                // Reading the status ends a half-written command and clears the sprite bits.
                 self.pending = false;
                 self.counts.status_reads += 1;
-                self.status()
+                let value = self.status();
+                self.sprite_status = 0;
+                value
             }
             0x08..=0x0F => self.hv(),
             _ => {
@@ -683,10 +696,10 @@ mod tests {
     #[test]
     fn test_modes_the_renderer_does_not_draw_are_faults() {
         let mut vdp = vdp();
-        // Shadow/highlight, then double-resolution interlace; normal interlace is drawn.
+        // Double-resolution interlace; shadow/highlight and normal interlace are drawn.
         for (word, fault) in [
-            (0x8C89, Some(AccessKind::VdpRegister)),
             (0x8C87, Some(AccessKind::VdpRegister)),
+            (0x8C89, None),
             (0x8C83, None),
         ] {
             assert_eq!(write(&mut vdp, port::CONTROL, &[word]), fault, "{word:04X}");

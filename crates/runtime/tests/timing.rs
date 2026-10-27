@@ -1,9 +1,11 @@
-//! The synthetic timing suite (M1.2, M1.3): interpreted 68000 programs on the scheduler and
+//! The synthetic timing suite (M1.2-M1.4): interpreted 68000 programs on the scheduler and
 //! the VDP. Interrupts land at the end of the first instruction that latches them, or right
 //! after the SR write that unmasks one, budgets
 //! end where an enabled interrupt or a waited-for frame end falls, a register write that
 //! enables an interrupt cuts the budget, and the FIFO stalls data-port writes while the
 //! display draws. The FIFO's exact slot arithmetic is tested in the VDP's own unit tests.
+//! A register, CRAM or VSRAM write from a horizontal interrupt handler shows from the line
+//! after the one the counter ran out on, as games use it for split effects.
 
 mod common;
 
@@ -11,6 +13,7 @@ use anygenesis_rom::Rom;
 use anygenesis_runtime::{
     Exit, Options, Runtime, Vdp, refresh,
     timing::{CPU_DIVIDER, FRAME_CLOCKS, LINE_CLOCKS},
+    vdp::{Frame, render::HEIGHT},
 };
 
 use crate::common::{Scripted, image};
@@ -210,6 +213,112 @@ fn test_frame_limit_ends_the_run_at_its_frame_with_every_interrupt_off() {
         (end..end + 20 * CPU_DIVIDER).contains(&clock),
         "ended at master clock {clock}, frame end {end}"
     );
+}
+
+/// The horizontal interrupt's line counter in the line-change tests: interrupts at the end
+/// of lines 99 and 199.
+const CHANGE_RELOAD: u16 = 99;
+
+/// H40 with both planes made of pattern 0, whose rows 0-3 are CRAM index 1 (red) and rows
+/// 4-7 index 2 (green); auto-increment 0 and the data port left on `command`. The horizontal
+/// interrupt runs `change`, the vertical one `undo`, then each returns. Gives the frame
+/// finished after three frames.
+fn line_change_frame(command: u32, change: &[u16], undo: &[u16]) -> Frame {
+    let [high, low] = [(command >> 16) as u16, command as u16];
+    let counter = 0x8A00 | CHANGE_RELOAD;
+    let main: &[u16] = &[
+        0x4BF9, 0x00C0, 0x0004, // lea $C00004,a5
+        0x4DF9, 0x00C0, 0x0000, // lea $C00000,a6
+        0x3ABC, 0x8C81, // move.w #$8C81,(a5): H40
+        0x3ABC, 0x8F02, // move.w #$8F02,(a5): increment 2
+        0x3ABC, 0x8230, // move.w #$8230,(a5): plane A at $C000
+        0x3ABC, 0x8407, // move.w #$8407,(a5): plane B at $E000
+        0x3ABC, 0x856C, // move.w #$856C,(a5): sprites at $D800
+        0x3ABC, 0x8D3F, // move.w #$8D3F,(a5): H-scroll at $FC00
+        0x3ABC, counter, // move.w #$8Axx,(a5): line counter reload
+        0x2ABC, 0x4000, 0x0000, // move.l #$40000000,(a5): VRAM write at 0
+        0x7203, // moveq #3,d1
+        0x2CBC, 0x1111, 0x1111, // move.l #$11111111,(a6)
+        0x51C9, 0xFFF8, // dbf d1,*-6
+        0x7203, // moveq #3,d1
+        0x2CBC, 0x2222, 0x2222, // move.l #$22222222,(a6)
+        0x51C9, 0xFFF8, // dbf d1,*-6
+        0x2ABC, 0xC002, 0x0000, // move.l #$C0020000,(a5): CRAM write at index 1
+        0x2CBC, 0x000E, 0x00E0, // move.l #$000E00E0,(a6)
+        0x3ABC, 0x8F00, // move.w #$8F00,(a5): increment 0
+        0x3ABC, 0x8164, // move.w #$8164,(a5): display and VInt on
+        0x3ABC, 0x8014, // move.w #$8014,(a5): HInt on
+        0x2ABC, high, low, // move.l #command,(a5)
+        0x46FC, 0x2000, // move #$2000,sr
+        0x60FE, // bra.s *
+    ];
+    // Each handler ends in rte.
+    let [hint, vint] = [change, undo].map(|body| [body, &[0x4E73]].concat());
+    let rom = image(
+        0x200,
+        &[(HINT_VECTOR, 0x300), (VINT_VECTOR, 0x400)],
+        &[
+            (0x200, main),
+            (0x300, hint.as_slice()),
+            (0x400, vint.as_slice()),
+        ],
+    );
+    let mut runtime = vdp_runtime(rom, Options::default());
+    runtime.run_frames(3);
+    let vdp = runtime.hardware::<Vdp>().expect("the hardware is the VDP");
+    vdp.frame().clone()
+}
+
+/// A CRAM word as 0x00RRGGBB with each 3-bit channel v at ladder step `level(v)` of 14.
+fn ladder_rgb(word: u16, level: impl Fn(u32) -> u32) -> u32 {
+    let channel = |shift: u16| level(u32::from(word >> shift & 7)) * 255 / 14;
+    channel(1) << 16 | channel(5) << 8 | channel(9)
+}
+
+#[test]
+fn test_changes_a_horizontal_interrupt_makes_show_from_the_next_line() {
+    const RED: u16 = 0x000E;
+    const GREEN: u16 = 0x00E0;
+    const BLUE: u16 = 0x0E00;
+    /// What the horizontal interrupt changes.
+    #[derive(Debug, Clone, Copy)]
+    enum Change {
+        /// Register 12: shadow/highlight on, so the low-priority planes darken.
+        ShadowHighlight,
+        /// CRAM index 1: red to blue.
+        Cram,
+        /// VSRAM word 0: plane A scrolled four lines.
+        Vsram,
+    }
+    let normal = |v| 2 * v;
+    // Pattern 0's row on a line is (line + vertical scroll) % 8.
+    let stripe = |row: usize| if row % 8 < 4 { RED } else { GREEN };
+    for change in [Change::ShadowHighlight, Change::Cram, Change::Vsram] {
+        // The data-port command, then the handlers' writes: the change and its undo.
+        let (command, hint, vint): (u32, [u16; 2], [u16; 2]) = match change {
+            // move.w #$8C89,(a5); move.w #$8C81,(a5)
+            Change::ShadowHighlight => (0xC002_0000, [0x3ABC, 0x8C89], [0x3ABC, 0x8C81]),
+            // move.w #$0E00,(a6); move.w #$000E,(a6)
+            Change::Cram => (0xC002_0000, [0x3CBC, BLUE], [0x3CBC, RED]),
+            // move.w #4,(a6); move.w #0,(a6)
+            Change::Vsram => (0x4000_0010, [0x3CBC, 4], [0x3CBC, 0]),
+        };
+        let frame = line_change_frame(command, &hint, &vint);
+        for line in 0..HEIGHT {
+            let after = line > usize::from(CHANGE_RELOAD);
+            let expected = match change {
+                Change::ShadowHighlight if after => ladder_rgb(stripe(line), |v| v),
+                Change::Cram if after && stripe(line) == RED => ladder_rgb(BLUE, normal),
+                Change::Vsram if after => ladder_rgb(stripe(line + 4), normal),
+                _ => ladder_rgb(stripe(line), normal),
+            };
+            assert!(
+                frame.row(line).iter().all(|&pixel| pixel == expected),
+                "{change:?}: line {line} {:06X}, expected {expected:06X}",
+                frame.row(line)[0]
+            );
+        }
+    }
 }
 
 /// Writes 40 VRAM words in a DBF loop (18 cycles a turn) with the display in `mode`

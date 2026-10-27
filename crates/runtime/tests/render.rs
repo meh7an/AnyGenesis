@@ -15,6 +15,7 @@ use anygenesis_runtime::{
     vdp::{
         Frame, Vdp,
         render::{H32_WIDTH, HEIGHT, MAX_WIDTH},
+        status,
     },
 };
 use anygenesis_shared::Size;
@@ -33,6 +34,9 @@ const SOLID: u16 = 1;
 const ARROW: u16 = 2;
 /// Solid colour 3, the window's.
 const SOLID3: u16 = 3;
+/// Solid colours 14 and 15, shadow/highlight's operators in palette 3.
+const SOLID14: u16 = 4;
+const SOLID15: u16 = 5;
 /// Four patterns of solid colours 1-4, for telling a sprite's cells apart.
 const QUAD: u16 = 8;
 
@@ -71,6 +75,30 @@ fn cram_word(index: u8) -> u16 {
 /// The colour the frame should hold for a CRAM word: each channel scaled from 3 to 8 bits.
 fn rgb(word: u16) -> u32 {
     let channel = |shift: u16| u32::from(word >> shift & 7) * 255 / 7;
+    channel(1) << 16 | channel(5) << 8 | channel(9)
+}
+
+/// Brightness under shadow/highlight.
+#[derive(Debug, Clone, Copy)]
+enum Shade {
+    Shadow,
+    Normal,
+    Highlight,
+}
+
+/// The colour the frame should hold for CRAM index `index` at `shade`: each channel v on
+/// the documented 0-14 ladder (shadow v, normal 2v, highlight v + 7), scaled to 8 bits.
+fn shaded(index: u8, shade: Shade) -> u32 {
+    let word = cram_word(index);
+    let channel = |shift: u16| {
+        let value = u32::from(word >> shift & 7);
+        let level = match shade {
+            Shade::Shadow => value,
+            Shade::Normal => value * 2,
+            Shade::Highlight => value + 7,
+        };
+        level * 255 / 14
+    };
     channel(1) << 16 | channel(5) << 8 | channel(9)
 }
 
@@ -114,6 +142,8 @@ impl Scene {
         scene.cram(0, &colours);
         scene.pattern(SOLID, ["11111111"; 8]);
         scene.pattern(SOLID3, ["33333333"; 8]);
+        scene.pattern(SOLID14, ["EEEEEEEE"; 8]);
+        scene.pattern(SOLID15, ["FFFFFFFF"; 8]);
         for (offset, row) in ["11111111", "22222222", "33333333", "44444444"]
             .into_iter()
             .enumerate()
@@ -227,6 +257,12 @@ impl Scene {
     fn frame(&mut self) -> &Frame {
         self.vdp.advance(FRAME_CYCLES);
         self.vdp.frame()
+    }
+
+    /// Reads the status register through the control port, which clears the sprite bits.
+    fn sprite_status(&mut self) -> u16 {
+        let sprite_bits = status::SPRITE_OVERFLOW | status::SPRITE_COLLISION;
+        self.vdp.read(port::CONTROL, Size::Word) & sprite_bits
     }
 }
 
@@ -463,30 +499,38 @@ fn test_two_cell_vertical_scroll_follows_the_scrolled_columns() {
     assert_rows(frame, "vscroll columns", 0, 0, &expected);
 
     // Scrolled 4 pixels right, the column pairs move with the plane; the part-shown pair
-    // on the left takes pair 0's value.
-    let mut scene = Scene::new(true);
-    scene.register(11, 0x04);
-    for column in 0..4 {
-        scene.cell(PLANE_B, column, 1, name(SOLID, PAL_B));
+    // on the left takes VSRAM words 38 AND 39 in H40 (12 & 10 = 8 lines up), 0 in H32.
+    for h40 in [true, false] {
+        let mut scene = Scene::new(h40);
+        scene.register(11, 0x04);
+        for column in 0..4 {
+            scene.cell(PLANE_B, column, 1, name(SOLID, PAL_B));
+        }
+        scene.cell(PLANE_B, 31, 1, name(SOLID, PAL_B));
+        scene.vsram(0, &[0, 0, 0, 8]);
+        scene.vsram(38, &[12, 10]);
+        scene.hscroll(0, 0, 4);
+        let frame = scene.frame();
+        let (top, bottom) = if h40 {
+            ("bbbb", "....")
+        } else {
+            ("....", "bbbb")
+        };
+        assert_region(
+            frame,
+            "vscroll columns scrolled",
+            0,
+            0,
+            &[&format!("{top}.... ........ ....bbbb bbbbbbbb bbbb....")],
+        );
+        assert_region(
+            frame,
+            "vscroll columns scrolled",
+            0,
+            8,
+            &[&format!("{bottom}bbbb bbbbbbbb bbbb.... ........ ........")],
+        );
     }
-    scene.cell(PLANE_B, 31, 1, name(SOLID, PAL_B));
-    scene.vsram(0, &[0, 0, 0, 8]);
-    scene.hscroll(0, 0, 4);
-    let frame = scene.frame();
-    assert_region(
-        frame,
-        "vscroll columns scrolled",
-        0,
-        0,
-        &["........ ........ ....bbbb bbbbbbbb bbbb...."],
-    );
-    assert_region(
-        frame,
-        "vscroll columns scrolled",
-        0,
-        8,
-        &["bbbbbbbb bbbbbbbb bbbb.... ........ ........"],
-    );
 }
 
 #[test]
@@ -698,6 +742,143 @@ fn test_an_x_0_sprite_masks_from_the_start_after_a_line_used_all_its_pixels() {
     let mut expected = rows(&cells("."), 1);
     expected.extend(rows(&cells("s"), 7));
     assert_rows(frame, "masking after overflow", 0, 8, &expected);
+}
+
+#[test]
+fn test_h32_links_64_to_79_read_sprites_0_to_15_and_80_ends_the_walk() {
+    // H40: link 65 reads sprite 65.
+    let mut scene = Scene::new(true);
+    scene.sprite(0, 0, 0, (1, 1), 65, name(SOLID, PAL_S));
+    scene.sprite(1, 8, 0, (1, 1), 0, name(QUAD + 1, PAL_S));
+    scene.sprite(65, 16, 0, (1, 1), 0, name(SOLID, PAL_S));
+    assert_rows(scene.frame(), "links h40", 0, 0, &rows(&cells("s.s."), 8));
+
+    // H32: link 65 reads sprite 1, whose link of 80 ends the walk before sprite 16.
+    let mut scene = Scene::new(false);
+    scene.sprite(0, 0, 0, (1, 1), 65, name(SOLID, PAL_S));
+    scene.sprite(1, 8, 0, (1, 1), 80, name(QUAD + 1, PAL_S));
+    scene.sprite(16, 16, 0, (1, 1), 0, name(SOLID, PAL_S));
+    assert_rows(scene.frame(), "links h32", 0, 0, &rows(&cells("sS.."), 8));
+}
+
+#[test]
+fn test_status_reports_sprite_overflow_and_collision_until_read() {
+    let sprite = name(SOLID, PAL_S);
+    // Two sprites' opaque pixels meeting in the picture collide.
+    let mut scene = Scene::new(true);
+    scene.sprite(0, 0, 0, (1, 1), 1, sprite);
+    scene.sprite(1, 4, 0, (1, 1), 0, sprite);
+    scene.frame();
+    assert_eq!(scene.sprite_status(), status::SPRITE_COLLISION);
+    assert_eq!(scene.sprite_status(), 0);
+
+    // Off the picture, or hidden by an x = 0 mask, they do not.
+    let mut scene = Scene::new(true);
+    scene.sprite_at(0, 1, 0, (1, 1), 1, sprite);
+    scene.sprite_at(1, 1, 0, (1, 1), 2, sprite);
+    scene.sprite_at(2, 0, 0, (1, 1), 3, sprite);
+    scene.sprite(3, 0, 0, (1, 1), 4, sprite);
+    scene.sprite(4, 0, 0, (1, 1), 0, sprite);
+    scene.frame();
+    assert_eq!(scene.sprite_status(), 0);
+
+    // One sprite past a line's count overflows, also once its pixels ran out; running out
+    // of pixels alone does not.
+    for (h40, count, flag) in [
+        (true, 21, status::SPRITE_OVERFLOW),
+        (false, 17, status::SPRITE_OVERFLOW),
+        (true, 20, 0),
+        (false, 16, 0),
+    ] {
+        let mut scene = Scene::new(h40);
+        for index in 0..count {
+            let link = if index + 1 < count { index + 1 } else { 0 };
+            scene.sprite_at(index, 1, 0, (4, 1), link, sprite);
+        }
+        scene.frame();
+        assert_eq!(scene.sprite_status(), flag, "h40 {h40}, {count} sprites");
+    }
+}
+
+#[test]
+fn test_shadow_highlight_shades_by_priority_and_sprite_operators() {
+    let b = name(SOLID, PAL_B);
+    let a = name(SOLID, PAL_A);
+    let s = name(SOLID, PAL_S);
+    let highlight = name(SOLID14, PAL_S);
+    let shadow = name(SOLID15, PAL_S);
+    let b_high = b | PRIORITY;
+    let backdrop = 0x09;
+    let (dark, normal, bright) = (Shade::Shadow, Shade::Normal, Shade::Highlight);
+    // Per cell column: plane B, plane A (0, pattern 0, is empty and low), sprites front to
+    // back, and the index and shade that show.
+    let columns: [(u16, u16, &[u16], u8, Shade); 14] = [
+        (b, 0, &[], 0x11, dark),
+        (b_high, 0, &[], 0x11, normal),
+        // A high-priority cell of colour 0 lifts the shadow too.
+        (b, PRIORITY, &[], 0x11, normal),
+        (0, 0, &[], backdrop, dark),
+        (b, 0, &[s], 0x31, dark),
+        (b, 0, &[s | PRIORITY], 0x31, normal),
+        // Sprite colour 14 outside palette 3 is never shadowed.
+        (b, 0, &[name(SOLID14, PAL_A)], 0x2E, normal),
+        // Operators: a highlight undoes a shadow, two shadows stay one; over a
+        // high-priority plane only a high-priority operator is in front.
+        (b, 0, &[highlight], 0x11, normal),
+        (b_high, 0, &[highlight | PRIORITY], 0x11, bright),
+        (b_high, 0, &[shadow | PRIORITY], 0x11, dark),
+        (b, 0, &[shadow], 0x11, dark),
+        // A plane in front of the sprite leaves its operator out.
+        (0, a | PRIORITY, &[highlight], 0x21, normal),
+        (0, 0, &[highlight], backdrop, normal),
+        // An operator hides the sprites behind it and acts on the planes.
+        (b_high, 0, &[shadow | PRIORITY, s], 0x11, dark),
+    ];
+    let sprites: Vec<(u16, u16)> = columns
+        .iter()
+        .enumerate()
+        .flat_map(|(column, &(_, _, words, _, _))| {
+            words.iter().map(move |&word| (column as u16, word))
+        })
+        .collect();
+    let scene = |shadow_highlight: bool| {
+        let mut scene = Scene::new(true);
+        scene.register(12, if shadow_highlight { 0x89 } else { 0x81 });
+        scene.register(7, backdrop);
+        for (column, &(plane_b, plane_a, _, _, _)) in columns.iter().enumerate() {
+            scene.cell(PLANE_B, column as u16, 0, plane_b);
+            scene.cell(PLANE_A, column as u16, 0, plane_a);
+        }
+        for (index, &(column, word)) in sprites.iter().enumerate() {
+            let link = if index + 1 < sprites.len() {
+                index as u16 + 1
+            } else {
+                0
+            };
+            scene.sprite(index as u16, column * 8, 0, (1, 1), link, word);
+        }
+        scene
+    };
+    let mut lit = scene(true);
+    let frame = lit.frame();
+    for (column, &(_, _, _, index, shade)) in columns.iter().enumerate() {
+        let expected = shaded(index, shade);
+        let cell = |y: usize| &frame.row(y)[column * 8..][..8];
+        if !(0..8).all(|y| cell(y).iter().all(|&pixel| pixel == expected)) {
+            let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dumps");
+            let _ = fs::create_dir_all(&folder);
+            let _ = fs::write(folder.join("render-shadow-highlight.bmp"), frame.to_bmp());
+            panic!("column {column}: expected index {index:02X} {shade:?}");
+        }
+    }
+
+    // Normal brightness is the colour drawn without shadow/highlight, and with it off the
+    // operator colours draw as plain sprite colours.
+    assert!((0..64).all(|index| shaded(index, Shade::Normal) == rgb(cram_word(index))));
+    let mut plain = scene(false);
+    let frame = plain.frame();
+    assert_eq!(frame.row(0)[7 * 8], rgb(cram_word(0x3E)));
+    assert_eq!(frame.row(0)[0], rgb(cram_word(0x11)));
 }
 
 #[test]
