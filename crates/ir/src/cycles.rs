@@ -39,6 +39,85 @@ pub(crate) fn estimate(instruction: &Instruction) -> Cycles {
     }
 }
 
+/// Cycles from the start of `instruction` to where the 68000 latches the interrupt level its
+/// end acts on: after its operand reads through an effective address, at the start of the
+/// second write for MOVE.L to memory, and at its start when it reads no operand. The latch
+/// points come from the microcode (US patent 4,325,121, as read by BlastEm's author on the
+/// SpritesMind forum, 2017). Only TST and Bcc are checked against the reference so far.
+pub(crate) fn latch(instruction: &Instruction) -> u16 {
+    let size = instruction.size.unwrap_or(Size::Word);
+    let [first, second] = instruction.operands;
+    let in_register = |operand| {
+        matches!(
+            ea(operand),
+            None | Some(Ea::DataRegister(_) | Ea::AddressRegister(_))
+        )
+    };
+    match instruction.mnemonic {
+        Mnemonic::Move | Mnemonic::Movea if size == Size::Long && !in_register(second) => {
+            ea_time(first, size) + 4
+        }
+        Mnemonic::Move
+        | Mnemonic::Movea
+        | Mnemonic::Adda
+        | Mnemonic::Suba
+        | Mnemonic::Cmp
+        | Mnemonic::Cmpa => ea_time(first, size),
+        // Toward a data register the source is read, else the destination is.
+        Mnemonic::Add | Mnemonic::Sub | Mnemonic::And | Mnemonic::Or => match ea(second) {
+            Some(Ea::DataRegister(_)) => ea_time(first, size),
+            _ => ea_time(second, size),
+        },
+        Mnemonic::Mulu | Mnemonic::Muls | Mnemonic::Divu | Mnemonic::Divs | Mnemonic::Chk => {
+            ea_time(first, Size::Word)
+        }
+        Mnemonic::Eor | Mnemonic::Addq | Mnemonic::Subq => ea_time(second, size),
+        // The immediate is read first, then the destination.
+        Mnemonic::Addi
+        | Mnemonic::Subi
+        | Mnemonic::Andi
+        | Mnemonic::Ori
+        | Mnemonic::Eori
+        | Mnemonic::Cmpi => match second {
+            Some(Operand::Ccr | Operand::Sr) => 4,
+            _ => long_or(size, 8, 4) + ea_time(second, size),
+        },
+        Mnemonic::Clr
+        | Mnemonic::Neg
+        | Mnemonic::Negx
+        | Mnemonic::Not
+        | Mnemonic::Nbcd
+        | Mnemonic::Scc(_)
+        | Mnemonic::Tas
+        | Mnemonic::Tst => ea_time(first, size),
+        // Only the memory form, one operand, reads.
+        Mnemonic::Asl
+        | Mnemonic::Asr
+        | Mnemonic::Lsl
+        | Mnemonic::Lsr
+        | Mnemonic::Rol
+        | Mnemonic::Ror
+        | Mnemonic::Roxl
+        | Mnemonic::Roxr => match second {
+            None => ea_time(first, Size::Word),
+            Some(_) => 0,
+        },
+        // A static bit number is read before the target.
+        Mnemonic::Btst | Mnemonic::Bchg | Mnemonic::Bclr | Mnemonic::Bset => {
+            let number = match ea(first) {
+                Some(Ea::Immediate(_)) => 4,
+                _ => 0,
+            };
+            number + ea_time(second, Size::Byte)
+        }
+        // The memory forms read both operands.
+        Mnemonic::Addx | Mnemonic::Subx | Mnemonic::Abcd | Mnemonic::Sbcd | Mnemonic::Cmpm => {
+            2 * ea_time(first, size)
+        }
+        _ => 0,
+    }
+}
+
 fn timing(instruction: &Instruction) -> Cycles {
     let size = instruction.size.unwrap_or(Size::Word);
     let [first, second] = instruction.operands;
@@ -333,6 +412,21 @@ mod tests {
 
     fn cycles_of(words: &[u16]) -> Cycles {
         estimate(&decode(words).expect("decodes"))
+    }
+
+    fn latch_of(words: &[u16]) -> u16 {
+        latch(&decode(words).expect("decodes"))
+    }
+
+    #[test]
+    fn test_latch_follows_the_operand_reads() {
+        // tst.b ($F62A).w; bne.s; nop; move.l d0,(a0); add.w d1,(a0); addi.w #1,(a0)
+        assert_eq!(latch_of(&[0x4A38, 0xF62A]), 8);
+        assert_eq!(latch_of(&[0x66FA]), 0);
+        assert_eq!(latch_of(&[0x4E71]), 0);
+        assert_eq!(latch_of(&[0x2080]), 4);
+        assert_eq!(latch_of(&[0xD350]), 4);
+        assert_eq!(latch_of(&[0x0650, 0x0001]), 8);
     }
 
     #[test]

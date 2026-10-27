@@ -186,6 +186,8 @@ pub struct Step {
     /// The instruction's cycles on the path it took, data-dependent time and exception
     /// entry included.
     pub cycles: u16,
+    /// Cycles from the start to where the interrupt level its end acts on was latched.
+    pub latch: u16,
     pub outcome: Outcome,
 }
 
@@ -212,6 +214,7 @@ impl Interpreter {
                 Step {
                     address,
                     cycles: TRAP_CYCLES,
+                    latch: 0,
                     outcome,
                 }
             }
@@ -247,6 +250,7 @@ impl Interpreter {
         Step {
             address,
             cycles,
+            latch: lifted.latch,
             outcome,
         }
     }

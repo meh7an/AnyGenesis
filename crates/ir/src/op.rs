@@ -419,6 +419,8 @@ pub struct Lifted {
     pub length: u32,
     pub body: Body,
     pub cycles: Cycles,
+    /// Cycles from the start to where the interrupt level its end acts on is latched.
+    pub latch: u16,
 }
 
 impl Lifted {

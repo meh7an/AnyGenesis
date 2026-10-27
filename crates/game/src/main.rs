@@ -250,10 +250,12 @@ fn stop_note(index: u64, stop: &InterruptStop<'_>, vdp: &Vdp, game: &CompiledGam
         .function_at(interrupted)
         .map_or_else(|| "none".to_owned(), |entry| format!("${entry:06X}"));
     format!(
-        "stop {index}\nframe {}\nline {}\nhandler ${:06X}\nsp ${sp:08X}\n\
+        "stop {index}\nframe {}\nline {}\nhv ${:04X}\nclock {}\nhandler ${:06X}\nsp ${sp:08X}\n\
          interrupted ${interrupted:06X} with sr ${stacked_sr:04X}\nfunction {function}\n",
         Hardware::frames(vdp),
         vdp.timing().v_counter(),
+        vdp.timing().hv(),
+        vdp.timing().clock(),
         stop.handler(),
     )
 }

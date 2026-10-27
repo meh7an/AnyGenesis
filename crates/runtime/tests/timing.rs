@@ -1,5 +1,6 @@
-//! The synthetic timing suite (M1.2): interpreted 68000 programs on the scheduler and the
-//! VDP. Interrupts land on the first instruction boundary at or after their event, budgets
+//! The synthetic timing suite (M1.2, M1.3): interpreted 68000 programs on the scheduler and
+//! the VDP. Interrupts land at the end of the first instruction that latches them, or right
+//! after the SR write that unmasks one, budgets
 //! end where an enabled interrupt or a waited-for frame end falls, a register write that
 //! enables an interrupt cuts the budget, and the FIFO stalls data-port writes while the
 //! display draws. The FIFO's exact slot arithmetic is tested in the VDP's own unit tests.
@@ -40,33 +41,73 @@ fn with_refresh(executed: u64) -> u64 {
     executed + executed / interval * u64::from(refresh::DELAY)
 }
 
-#[test]
-fn test_interrupt_lands_on_the_first_instruction_boundary_after_its_event() {
-    // NOPs from $200 (4 cycles each); the level 7 handler stores its stacked PC and waits.
-    let nops = [0x4E71; 400];
-    let handler: &[u16] = &[
-        0x23EF, 0x0002, 0x00FF, 0x0000, // move.l 2(sp),$FF0000
-        0x60FE, // bra.s *
-    ];
+/// An interrupt handler for $E00: stores its stacked PC at RAM $FF0000 and waits.
+const STORE_STACKED_PC: &[u16] = &[
+    0x23EF, 0x0002, 0x00FF, 0x0000, // move.l 2(sp),$FF0000
+    0x60FE, // bra.s *
+];
+
+/// The PC stacked by the interrupt `level` raised at cycle `event` while `program` runs from
+/// $200.
+fn stacked_pc(program: &[u16], vector: u8, event: u64, level: u8) -> u32 {
     let rom = image(
         0x200,
-        &[(NMI_VECTOR, 0xE00)],
-        &[(0x200, &nops), (0xE00, handler)],
+        &[(vector, 0xE00)],
+        &[(0x200, program), (0xE00, STORE_STACKED_PC)],
     );
+    let options = Options {
+        max_cycles: 3_000,
+        ..Options::default()
+    };
+    let mut runtime = Runtime::new(rom, &[], Scripted::new(&[(event, level)]), options);
+    runtime.run();
+    let ram = &runtime.state().ram;
+    u32::from_be_bytes([ram[0], ram[1], ram[2], ram[3]])
+}
+
+#[test]
+fn test_interrupt_waits_for_an_instruction_that_latches_it() {
+    // NOPs (4 cycles) latch at their start: an event inside one is taken at the end of the
+    // next, the one instruction of latency measured on hardware.
+    let nops = [0x4E71; 400];
     for event in [1_000, 1_001, 1_234] {
-        let options = Options {
-            max_cycles: 3_000,
-            ..Options::default()
-        };
-        let mut runtime = Runtime::new(rom.clone(), &[], Scripted::new(&[(event, 7)]), options);
-        runtime.run();
-        let ram = &runtime.state().ram;
-        let stacked = u32::from_be_bytes([ram[0], ram[1], ram[2], ram[3]]);
         let nop = (0..)
             .find(|k| with_refresh(4 * k) >= event)
             .expect("a boundary");
-        assert_eq!(stacked, 0x200 + 2 * nop as u32, "event at cycle {event}");
+        let stacked = stacked_pc(&nops, NMI_VECTOR, event, 7);
+        assert_eq!(
+            stacked,
+            0x200 + 2 * (nop + 1) as u32,
+            "event at cycle {event}"
+        );
     }
+}
+
+#[test]
+fn test_interrupt_before_the_operand_read_is_taken_at_that_instruction_end() {
+    // tst.b ($0100).w (12 cycles) latches after its operand read, 8 cycles in.
+    let tests: Vec<u16> = [0x4A38, 0x0100].repeat(100);
+    for event in [600, 601, 605, 608, 609, 611] {
+        let tst = (0..)
+            .find(|k| with_refresh(12 * k + 8) >= event)
+            .expect("a latch");
+        let stacked = stacked_pc(&tests, NMI_VECTOR, event, 7);
+        assert_eq!(
+            stacked,
+            0x200 + 4 * (tst + 1) as u32,
+            "event at cycle {event}"
+        );
+    }
+}
+
+#[test]
+fn test_interrupt_waiting_behind_the_mask_is_taken_right_after_the_sr_write() {
+    // Masked from reset; the VInt comes during the NOPs, the MOVE to SR at $214 opens the
+    // mask and the interrupt is taken before the next instruction.
+    let mut program = vec![0x4E71; 10];
+    program.extend([0x46FC, 0x2000]);
+    program.extend([0x4E71; 100]);
+    assert_eq!(stacked_pc(&program, VINT_VECTOR, 12, 6), 0x218);
 }
 
 /// Sets H40 with the display on and the line counter to `reload`, idles, then turns the
@@ -113,7 +154,9 @@ fn test_horizontal_interrupt_comes_on_every_line_the_counter_runs_out_on() {
         taken.abs_diff(expected) <= 2,
         "{taken} HInts, {expected} lines after the enable"
     );
-    assert_eq!(u64::from(word(&runtime.state().ram, 0x10)), taken);
+    // The cap may fall inside the last interrupt's entry, before its handler counts it.
+    let counted = u64::from(word(&runtime.state().ram, 0x10));
+    assert!(taken - counted <= 1, "{taken} taken, {counted} counted");
 }
 
 #[test]
@@ -146,11 +189,11 @@ fn test_vertical_interrupt_enabled_mid_budget_arrives_at_its_hv_position() {
     assert_eq!(runtime.interrupts(6), 1);
     let hv = word(&runtime.state().ram, 0);
     // V counter 224 ($E0). H: the VInt point is H $01 (16 master clocks into the line); the
-    // first boundary after it is up to a 10-cycle BRA away, then 44 cycles of interrupt
-    // entry, then the MOVE reads at its start: 16 + 0..70 + 308 master clocks, plus refresh,
-    // at 16 a step.
+    // BRA it falls in latched before it, so the next BRA ends 10-20 cycles later, then 49-58
+    // cycles of interrupt entry with the acknowledge waiting for E, then the MOVE reads at
+    // its start: 16 + 70..140 + 343..406 master clocks, plus refresh, at 16 a step.
     assert_eq!(hv >> 8, 0xE0, "{hv:04X}");
-    assert!((0x14..=0x1A).contains(&(hv & 0xFF)), "{hv:04X}");
+    assert!((0x1A..=0x24).contains(&(hv & 0xFF)), "{hv:04X}");
 }
 
 #[test]

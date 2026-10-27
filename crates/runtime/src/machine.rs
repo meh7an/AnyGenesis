@@ -37,6 +37,12 @@
 //! block, or an access that makes an interrupt due there, can carry an event past an
 //! instruction boundary: the interrupt is then taken at the next check point and counted
 //! as late ([`Runtime::late_interrupts`]).
+//!
+//! An instruction acts on the interrupt level it latched partway through
+//! (`Lifted::latch`): an interrupt that becomes pending after that point waits for the end of
+//! the next instruction, which the interpreter runs as a one-instruction budget. One already
+//! pending when SR unmasks it is taken at once. Taking an interrupt costs 49-58 cycles, its
+//! acknowledge waiting for E (see [`ACKNOWLEDGE_LEAST`]).
 
 use std::{
     any::Any,
@@ -78,8 +84,18 @@ const ADDRESS_MASK: u32 = 0xFF_FFFF;
 /// The status register after reset: supervisor mode, every interrupt masked.
 const RESET_SR: u16 = 0x2700;
 
-/// Cycles the 68000 spends taking an interrupt (MC68000 User's Manual, Table 8-14).
+/// Cycles the 68000 spends taking an interrupt with a 4-cycle acknowledge (MC68000 User's
+/// Manual, Table 8-14).
 const INTERRUPT_CYCLES: i32 = 44;
+
+/// The console answers every interrupt acknowledge with VPA, so the acknowledge is a 6800
+/// cycle synchronised to E, the 68000 clock divided by [`E_PERIOD`]: 9 cycles plus E's
+/// phase where it starts, [`ACKNOWLEDGE_START`] cycles into the sequence, instead of 4
+/// (measured 9-18 on hardware, SpritesMind forum, 2015; BlastEm takes the same).
+const ACKNOWLEDGE_LEAST: i32 = 9;
+const ACKNOWLEDGE_NOMINAL: i32 = 4;
+const ACKNOWLEDGE_START: u64 = 10;
+const E_PERIOD: u64 = 10;
 
 /// The level no mask holds back.
 const NON_MASKABLE: u8 = 7;
@@ -251,6 +267,11 @@ pub(crate) struct Context {
     late: u64,
     /// Blocks `ag_hybrid` ran through the interpreter.
     hybrids: u64,
+    /// The interrupt due at the next check arrived after the instruction before it latched
+    /// the interrupt level, so the instruction after it takes it.
+    latched_late: bool,
+    /// The next budget lasts one instruction, at whose end the interrupt is taken.
+    one_more: bool,
     /// Addresses between table rows where execution stopped and may go on from the top
     /// level: where an interrupt was taken (its handler's RTE returns there) or a run
     /// ended. They resume through the interpreter without counting a miss.
@@ -463,9 +484,11 @@ impl Context {
 
     /// Starts a budget that lasts until the [`Context::horizon`] or the cycle cap, less the
     /// refresh it will cause; none while an interrupt is due, which the next check point
-    /// then takes.
+    /// then takes, or one instruction when that is the one to take it.
     fn refill(&mut self, state: &mut AgState) {
-        self.budget = if self.due(mask(state.sr)).is_some() {
+        self.budget = if std::mem::take(&mut self.one_more) {
+            1
+        } else if self.due(mask(state.sr)).is_some() {
             0
         } else {
             let left = self.options.max_cycles.saturating_sub(self.cycles);
@@ -517,6 +540,8 @@ impl Context {
     /// # Safety
     /// As for [`Context::bus`].
     unsafe fn enter_interrupt(&mut self, state: &mut AgState, level: u8, pc: u32) -> u32 {
+        self.latched_late = false;
+        self.one_more = false;
         self.stopped_between(pc);
         self.devices.hardware.acknowledge(level);
         self.interrupts[usize::from(level)] += 1;
@@ -539,12 +564,21 @@ impl Context {
         let outcome = interpreter.execute(&entry, &mut cpu, &mut bus);
         store_cpu(&cpu, state);
         self.refill(state);
-        state.cycles -= INTERRUPT_CYCLES;
+        state.cycles -= self.interrupt_cycles();
         match outcome.transfer {
             Some(Transfer::Jump(handler)) => handler.get(),
             // The entry sequence always ends in a jump through the vector table.
             _ => unreachable!("an interrupt entry leaves through its vector"),
         }
+    }
+
+    /// Cycles taking an interrupt that starts at the current budget's start: the acknowledge
+    /// waits for E, whose phase counts from power-on.
+    fn interrupt_cycles(&self) -> i32 {
+        let acknowledge = self.devices.clock_at(0) / CPU_DIVIDER + ACKNOWLEDGE_START;
+        // The phase is below E_PERIOD, so it fits.
+        let phase = (acknowledge % E_PERIOD) as i32;
+        INTERRUPT_CYCLES - ACKNOWLEDGE_NOMINAL + ACKNOWLEDGE_LEAST + phase
     }
 
     /// Calls the interrupt hook if it is set for `level`, at the entry of `handler`.
@@ -673,8 +707,13 @@ unsafe fn schedule(state: *mut AgState, pc: u32, native: bool) -> u32 {
                 return ctx.end(exit);
             }
             let Some(level) = ctx.due(mask(st.sr)) else {
+                ctx.latched_late = false;
                 break;
             };
+            if std::mem::take(&mut ctx.latched_late) {
+                ctx.one_more = true;
+                break;
+            }
             if native {
                 ctx.late += 1;
             }
@@ -937,9 +976,19 @@ unsafe fn run_interpreter(state: *mut AgState, start: u32, miss: bool) -> Ending
                 return Ending::Row(pc);
             }
             first = false;
+            // One already due is latched by any instruction; the next one by this instruction
+            // only if it comes before the latch point.
+            let began = ctx.devices.clock_at(ctx.clock(st));
+            let event = ctx.devices.hardware.next_interrupt();
+            let waiting = ctx.due(mask(cpu.sr())).is_some();
             let step = ctx.step(st, &mut cpu);
             st.cycles -= i32::from(step.cycles);
             ctx.charge_stall(st);
+            let latched = began + u64::from(step.latch) * CPU_DIVIDER;
+            let ended = ctx.devices.clock_at(ctx.clock(st));
+            if !waiting && event.is_some_and(|event| (latched + 1..=ended).contains(&event)) {
+                ctx.latched_late = true;
+            }
             if miss {
                 ctx.devices.log.miss(start).instructions += 1;
             }
@@ -949,7 +998,8 @@ unsafe fn run_interpreter(state: *mut AgState, start: u32, miss: bool) -> Ending
             if ctx.devices.hardware.take_rescheduled() {
                 ctx.reschedule(st);
             }
-            let due = ctx.due(mask(cpu.sr())).is_some();
+            // One that came after the latch waits for the next instruction's end.
+            let due = !ctx.latched_late && ctx.due(mask(cpu.sr())).is_some();
             match step.outcome.transfer {
                 Some(Transfer::Call {
                     target,
@@ -1046,6 +1096,8 @@ impl Runtime {
             interrupts: [0; 8],
             late: 0,
             hybrids: 0,
+            latched_late: false,
+            one_more: false,
             between: HashSet::new(),
             idle: None,
             hook: None,

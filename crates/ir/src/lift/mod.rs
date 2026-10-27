@@ -48,6 +48,7 @@ pub fn lift(instruction: &Instruction, address: Address) -> Result<Lifted, LiftE
         length: instruction.length(),
         body: lifter.out.finish(),
         cycles: cycles::estimate(instruction),
+        latch: cycles::latch(instruction),
     })
 }
 

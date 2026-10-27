@@ -1,27 +1,23 @@
-# Sonic the Hedgehog (REV00): the frame diff's masks against the reference emulator,
-# signed off by Mehran on 2026-10-26 (M3.6 gate, option A; the third after the realigned
-# M3.5 run showed it). Work RAM by 68000 address, end exclusive.
+# Sonic the Hedgehog (REV00): the frame diff's masks against the reference emulator. The
+# v0.1 masks were signed off by Mehran on 2026-10-26 (M3.6 gate, option A); M1.3 removed the
+# vertical interrupt counter and sound driver masks (exact timing pairs every stop) and
+# narrowed the stacked-PC mask to the bytes that differ. Work RAM by 68000 address, end
+# exclusive.
 
 [[mask]]
 region = "ram"
-start = 0xFFFDF0
+start = 0xFFFDF3
+end = 0xFFFDF4
+reason = """the low byte of the PC stacked by the vertical interrupt, frame at SP $FFFDEE \
+(at SP $FFFDF2 this is the stacked SR's low byte). Every stop interrupts the idle loop at \
+$0029AC (12 cycles, latching at 8) or $0029B0 (10 cycles, latching at its start), so this \
+byte is $AC or $B0: the loop's phase when the interrupt comes, which needs each frame's work \
+to be cycle exact. With the M1.3 interrupt response (latch points, E-clock acknowledge) 211 \
+of 294 stops match (150 before); the rest await per-frame exactness (Z80 bus use in Phase 3, VDP access \
+slot positions)"""
+
+[[mask]]
+region = "ram"
+start = 0xFFFDF7
 end = 0xFFFDF8
-reason = """the stacked PC of the vertical interrupt frame: we deliver interrupts at \
-block-start check points, the reference at instruction boundaries. The frame sits at SP \
-$FFFDEE or $FFFDF2, so both PC longwords are masked, which also hides the stacked SR word \
-of the frame at $FFFDF2"""
-
-[[mask]]
-region = "ram"
-start = 0xFFFE0C
-end = 0xFFFE10
-reason = """a counter of vertical interrupts, one higher in our run after the extra VBlank \
-our cycle estimates deliver around the SEGA-to-title transition; exact timing is Phase 4"""
-
-[[mask]]
-region = "ram"
-start = 0xFFF001
-end = 0xFFF002
-reason = """a per-VBlank counter of the sound driver, which the VBlank handler runs: one off \
-after the same extra VBlank until the title music resets it (stops 154-197 of the M3.5 run, \
-the only byte differing there at a shift of +1); exact timing is Phase 4"""
+reason = """the same stacked PC low byte for the frame at SP $FFFDF2"""

@@ -5,6 +5,9 @@
 //! stop and the [`SHIFT_CONFIRMATION`] after it all match: the runs agree but one took a
 //! vertical interrupt more than the other. Such a shift is taken and reported; a pair that
 //! differs under every allowed offset is a divergence.
+//!
+//! Realignment is a diagnostic only: it keeps the walk going so later stops still compare, but
+//! a run with a shift has not paired every stop one to one and fails like a divergence.
 
 use std::{fmt, path::PathBuf};
 
@@ -164,6 +167,13 @@ pub struct Report {
     /// Which runs ran out of stops after `compared`.
     pub ours_ended: bool,
     pub reference_ended: bool,
+}
+
+impl Report {
+    /// Whether every compared stop paired one to one with ours and matched outside the masks.
+    pub fn passed(&self) -> bool {
+        self.shifts.is_empty() && self.divergences.is_empty()
+    }
 }
 
 /// Our stop paired with the reference's stop `stop` at `offset`, if there is one.
@@ -401,6 +411,23 @@ impl fmt::Display for Shift {
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.details(f)?;
+        if self.passed() {
+            writeln!(f, "pass: every stop paired one to one")
+        } else {
+            writeln!(
+                f,
+                "fail: {} whole-stop shifts, {} divergent stops",
+                self.shifts.len(),
+                self.divergences.len()
+            )
+        }
+    }
+}
+
+impl Report {
+    /// The comparison, shift by shift and divergence by divergence.
+    fn details(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
             "compared reference stops 1-{}, {} whole-stop shifts (within {SHIFT_WINDOW}, {} \
@@ -483,7 +510,13 @@ mod tests {
         assert_eq!(report.compared, 5);
         assert!(report.shifts.is_empty() && report.divergences.is_empty());
         assert!(report.ours_ended && report.reference_ended);
-        assert!(report.to_string().contains("no differences in 5 stops"));
+        assert!(report.passed());
+        let text = report.to_string();
+        assert!(text.contains("no differences in 5 stops"), "{text}");
+        assert!(
+            text.ends_with("pass: every stop paired one to one\n"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -563,6 +596,43 @@ mod tests {
                     pairs twice with our stop 2";
         assert!(text.contains(line), "{text}");
         assert!(text.contains("no differences in 7 stops"), "{text}");
+    }
+
+    #[test]
+    fn test_diff_a_shift_alone_fails() {
+        let mut ours = counting(6);
+        ours.insert(2, ours[1].clone());
+        let report = run(&mut ours, &mut counting(6), &Masks::default());
+        assert_eq!(report.shifts.len(), 1);
+        assert!(report.divergences.is_empty());
+        assert!(!report.passed());
+        let text = report.to_string();
+        assert!(
+            text.ends_with("fail: 1 whole-stop shifts, 0 divergent stops\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_diff_a_divergence_fails() {
+        let mut reference = counting(3);
+        reference[1].region_mut(Region::Cram)[0] = 0x0E;
+        let report = run(&mut counting(3), &mut reference, &Masks::default());
+        assert!(!report.passed());
+        let text = report.to_string();
+        assert!(
+            text.ends_with("fail: 0 whole-stop shifts, 1 divergent stops\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_diff_masked_differences_pass() {
+        let mut reference = counting(3);
+        reference[1].region_mut(Region::Cram)[0] = 0x0E;
+        let text = "[[mask]]\nregion = \"cram\"\nstart = 0\nend = 2\nreason = \"backdrop\"\n";
+        let masks = Masks::parse(text).expect("ok");
+        assert!(run(&mut counting(3), &mut reference, &masks).passed());
     }
 
     #[test]

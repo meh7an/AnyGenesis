@@ -14,7 +14,8 @@ use anyhow::{Context, Result, bail};
 const USAGE: &str = "usage:\n  \
     framediff script <rom.bin> <stops> [--input <file>]   prints the reference's debugger \
     script\n  \
-    framediff diff <ours> <reference> [--masks <file>]    reports shifts and divergences";
+    framediff diff <ours> <reference> [--masks <file>]    reports shifts and divergences; \
+    either fails";
 
 /// The level of the vertical interrupt, whose handler entry is every stop.
 const VBLANK_LEVEL: u8 = 6;
@@ -48,10 +49,10 @@ fn main() -> Result<ExitCode> {
             if !masks.masks().is_empty() {
                 println!("masks in force: {}", masks.masks().len());
             }
-            Ok(if !report.divergences.is_empty() {
-                ExitCode::FAILURE
-            } else {
+            Ok(if report.passed() {
                 ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
             })
         }
         _ => bail!(USAGE),
