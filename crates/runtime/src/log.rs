@@ -38,6 +38,8 @@ pub enum AccessKind {
     /// A DMA that reads outside ROM and work RAM, fills CRAM or VSRAM, or transfers through
     /// a code with no write target.
     VdpDma,
+    /// A YM2612 timer loaded or enabled; the chip has no timers yet, so its flags stay clear.
+    YmTimer,
 }
 
 /// One kind of logged access.
@@ -62,6 +64,7 @@ impl fmt::Display for AccessKind {
             Self::VdpCommand => "VDP access without effect",
             Self::VdpRegister => "VDP register or mode not built",
             Self::VdpDma => "VDP DMA not built",
+            Self::YmTimer => "YM2612 timer not built",
         })
     }
 }

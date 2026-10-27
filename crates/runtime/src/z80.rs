@@ -1,6 +1,5 @@
 //! The Z80 side as the 68000 sees it, without a Z80: its 8 KiB of RAM, the YM2612 slot and
-//! the bus request and reset lines. Sound stays silent, so the YM2612 reads as never busy
-//! and drops writes.
+//! the bus request and reset lines.
 
 /// Bytes of Z80 RAM; the 68000 sees them twice in 0xA00000-0xA03FFF.
 pub const RAM_SIZE: usize = 0x2000;
@@ -9,7 +8,8 @@ pub const RAM_SIZE: usize = 0x2000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Target {
     Ram(usize),
-    Ym2612,
+    /// The offset into the YM2612 slot, whose four ports repeat through it.
+    Ym2612(u32),
     Unmapped,
 }
 
@@ -17,7 +17,7 @@ impl Target {
     pub(crate) fn of(offset: u32) -> Self {
         match offset {
             0x0000..=0x3FFF => Self::Ram(offset as usize % RAM_SIZE),
-            0x4000..=0x5FFF => Self::Ym2612,
+            0x4000..=0x5FFF => Self::Ym2612(offset - 0x4000),
             _ => Self::Unmapped,
         }
     }
@@ -89,8 +89,8 @@ mod tests {
         assert_eq!(Target::of(0x0000), Target::Ram(0));
         assert_eq!(Target::of(0x2001), Target::Ram(1));
         assert_eq!(Target::of(0x3FFF), Target::Ram(0x1FFF));
-        assert_eq!(Target::of(0x4000), Target::Ym2612);
-        assert_eq!(Target::of(0x5FFF), Target::Ym2612);
+        assert_eq!(Target::of(0x4000), Target::Ym2612(0));
+        assert_eq!(Target::of(0x5FFF), Target::Ym2612(0x1FFF));
         assert_eq!(Target::of(0x6000), Target::Unmapped);
         assert_eq!(Target::of(0x8000), Target::Unmapped);
     }

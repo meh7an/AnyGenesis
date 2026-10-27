@@ -14,6 +14,7 @@ use crate::{
     io::{self, Io, VERSION_HARDWARE},
     log::{Access, AccessKind, Log},
     timing::CPU_DIVIDER,
+    ym2612::Ym2612,
     z80::{self, Z80},
 };
 
@@ -35,6 +36,7 @@ const VDP_PORTS: u32 = 0x1F;
 pub(crate) struct Devices {
     pub io: Io,
     pub z80: Z80,
+    pub ym2612: Ym2612,
     pub tmss: [u8; 4],
     pub hardware: Box<dyn Hardware>,
     pub log: Log,
@@ -55,6 +57,7 @@ impl Devices {
         Self {
             io: Io::new(version),
             z80: Z80::default(),
+            ym2612: Ym2612::default(),
             tmss: [0; 4],
             hardware,
             log: Log::default(),
@@ -105,6 +108,7 @@ impl Devices {
     pub fn reset(&mut self) {
         self.io.reset();
         self.z80 = Z80::default();
+        self.ym2612 = Ym2612::default();
         self.hardware.reset();
     }
 }
@@ -219,8 +223,10 @@ impl SystemBus<'_> {
                 }
                 spread(self.devices.z80.read(index), size)
             }
-            // The YM2612 is silent and never busy.
-            z80::Target::Ym2612 => 0,
+            z80::Target::Ym2612(offset) => {
+                let now = self.devices.clock_at(self.elapsed);
+                spread(self.devices.ym2612.status(offset, now), size)
+            }
             z80::Target::Unmapped => {
                 self.note(AccessKind::Unmapped, false, size, address);
                 self.open_bus(size)
@@ -244,7 +250,12 @@ impl SystemBus<'_> {
                 }
                 self.devices.z80.write(index, byte);
             }
-            z80::Target::Ym2612 => {}
+            z80::Target::Ym2612(offset) => {
+                let now = self.devices.clock_at(self.elapsed);
+                if self.devices.ym2612.write(offset, byte, now) {
+                    self.note(AccessKind::YmTimer, true, size, address);
+                }
+            }
             z80::Target::Unmapped => self.note(AccessKind::Unmapped, true, size, address),
         }
     }
@@ -524,6 +535,33 @@ mod tests {
                 (AccessKind::Z80Word, true, 0xA0_0012),
             ]
         );
+    }
+
+    #[test]
+    fn test_ym2612_reads_busy_for_192_cycles_after_a_data_write() {
+        let mut fixture = Fixture::new(0);
+        let mut bus = fixture.bus();
+        bus.elapsed = 10;
+        bus.write_byte(at(0xA0_4000), 0x2B);
+        assert_eq!(bus.read_byte(at(0xA0_4000)), 0);
+        bus.write_byte(at(0xA0_4001), 0x80);
+        bus.elapsed = 10 + 191;
+        assert_eq!(bus.read_byte(at(0xA0_4000)), 0x80);
+        assert_eq!(bus.read_byte(at(0xA0_5FFC)), 0x80);
+        assert_eq!(bus.read_byte(at(0xA0_4002)), 0);
+        bus.elapsed = 10 + 192;
+        assert_eq!(bus.read_byte(at(0xA0_4000)), 0);
+        assert!(fixture.logged().is_empty());
+    }
+
+    #[test]
+    fn test_ym2612_timer_runs_are_logged() {
+        let mut fixture = Fixture::new(0);
+        let mut bus = fixture.bus();
+        bus.write_byte(at(0xA0_4000), 0x27);
+        bus.write_byte(at(0xA0_4001), 0x00);
+        bus.write_byte(at(0xA0_4001), 0x15);
+        assert_eq!(fixture.logged(), [(AccessKind::YmTimer, true, 0xA0_4001)]);
     }
 
     #[test]
