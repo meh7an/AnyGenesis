@@ -134,13 +134,15 @@ pub fn load_rom(path: &Path) -> Result<Rom, BuildError> {
     })
 }
 
-/// The options a game executable is built with: cycle accounting and a check point at the
-/// start of every block, the hooks the runtime's scheduler needs. Interrupts then arrive
-/// within a block of being raised.
+/// The options a game executable is built with: cycle accounting, a check point at the start
+/// of every block and an access check after every instruction that may reach a device, the
+/// hooks the runtime's scheduler needs. Interrupts then arrive at the instruction boundary
+/// the interpreter takes them at.
 pub fn game_options() -> EmitOptions {
     EmitOptions {
         cycles: true,
         check_points: CheckPoints::BlockStarts,
+        access_checks: true,
         ..EmitOptions::default()
     }
 }

@@ -5,8 +5,15 @@
 //! letters from `UDLRABCS` (up, down, left, right, A, B, C, Start) or `-` for none. Stops
 //! rise from line to line. `#` starts a comment; blank lines are ignored. Before the first
 //! line nothing is held.
+//!
+//! A [`Recorder`] writes the same format from a run as it goes, ending with the comment
+//! `# end: stop <n>, frame <f>`: the last stop the run took and the frame it ended at.
 
-use std::{fmt, fs, path::Path};
+use std::{
+    fmt, fs,
+    io::{self, Write},
+    path::Path,
+};
 
 use crate::Error;
 
@@ -125,6 +132,52 @@ impl Input {
     }
 }
 
+/// Writes the buttons a run applies at its stops as an input file, a line each time they
+/// change, flushed at once, so the file replays the run even if the run never ends cleanly.
+#[derive(Debug)]
+pub struct Recorder<W> {
+    out: W,
+    held: Buttons,
+}
+
+impl<W: Write> Recorder<W> {
+    pub fn new(out: W) -> Self {
+        Self {
+            out,
+            held: Buttons(0),
+        }
+    }
+
+    /// Notes that pad 1 holds `buttons` from `stop` on; stops must rise from call to call.
+    ///
+    /// # Errors
+    /// Writing the line.
+    pub fn record(&mut self, stop: u64, buttons: Buttons) -> io::Result<()> {
+        if buttons == self.held {
+            return Ok(());
+        }
+        self.held = buttons;
+        self.write(&format!("{stop} {buttons}\n"))
+    }
+
+    /// Ends the recording of a run that took `stops` stops and ended at frame `frames`.
+    ///
+    /// # Errors
+    /// Writing the closing comment.
+    pub fn finish(&mut self, stops: u64, frames: u64) -> io::Result<()> {
+        self.write(&format!("# end: stop {stops}, frame {frames}\n"))
+    }
+
+    pub fn into_inner(self) -> W {
+        self.out
+    }
+
+    fn write(&mut self, line: &str) -> io::Result<()> {
+        self.out.write_all(line.as_bytes())?;
+        self.out.flush()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +221,21 @@ mod tests {
         assert_eq!(buttons.0, 0x91);
         assert_eq!(buttons.bindings().collect::<Vec<_>>(), ["up", "a", "start"]);
         assert_eq!(buttons.without(Buttons(0x01)).to_string(), "AS");
+    }
+
+    #[test]
+    fn test_recorder_writes_changes_that_read_back_as_the_same_buttons() {
+        let held = ["-", "-", "S", "S", "-", "RA", "RA", "R"]
+            .map(|text| Buttons::parse(text).expect("valid buttons"));
+        let mut recorder = Recorder::new(Vec::new());
+        for (stop, buttons) in (1..).zip(held) {
+            recorder.record(stop, buttons).expect("writing to a Vec");
+        }
+        recorder.finish(8, 17).expect("writing to a Vec");
+        let text = String::from_utf8(recorder.into_inner()).expect("UTF-8");
+        assert_eq!(text, "3 S\n5 -\n6 RA\n8 R\n# end: stop 8, frame 17\n");
+        let input = Input::parse(&text).expect("the recording parses");
+        let replayed: Vec<Buttons> = (1..=8).map(|stop| input.at(stop)).collect();
+        assert_eq!(replayed, held);
     }
 }

@@ -300,6 +300,12 @@ c_externs! {
     /// block start `pc` to the next table row and returns it with `AG_HYBRID_ROW` set, or
     /// returns any other address execution goes to instead.
     fn ag_hybrid(state: *mut AgState, pc: u32) -> u32;
+    /// The slow path of a check after an instruction that may reach a device, once its
+    /// access left the budget short of the rest of the block: gives back the `ahead` cycles
+    /// charged for instructions not yet run, applies the latch rule to the instruction with
+    /// its `latch` point, interprets from `pc` to the next table row and returns it with
+    /// `AG_HYBRID_ROW` set, or returns any other address execution goes to instead.
+    fn ag_resume(state: *mut AgState, pc: u32, ahead: u32, latch: u32) -> u32;
     /// After a write to SR, at the instruction boundary `pc`: delivers the interrupts the new
     /// mask lets through and returns where execution continues (`pc` unless a handler
     /// changed the stacked PC). Never ends the run.

@@ -21,7 +21,7 @@ pub mod z80;
 
 pub use externs::{
     ag_check, ag_deliver, ag_hybrid, ag_lookup, ag_read8, ag_read16, ag_read32, ag_reset_devices,
-    ag_stop, ag_write8, ag_write16, ag_write32,
+    ag_resume, ag_stop, ag_write8, ag_write16, ag_write32,
 };
 pub use hardware::{Hardware, Memory};
 pub use io::Buttons;

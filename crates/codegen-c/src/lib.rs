@@ -51,6 +51,11 @@ pub struct EmitOptions {
     /// Charges each instruction's cycle estimate through `AG_CYCLES`.
     pub cycles: bool,
     pub check_points: CheckPoints,
+    /// With `cycles`: `AG_ACHECK` after every instruction that may reach the runtime's bus
+    /// and goes on to the next, so a device stall or an interrupt an access made due never
+    /// runs the rest of a block natively past an event. Needs a runtime whose `ag_resume`
+    /// can interpret.
+    pub access_checks: bool,
     /// Adds a `#line` directive before every instruction found in the map.
     pub lines: Option<LineMap>,
     /// Starts a new `.c` file once the current one has at least this many lines.
@@ -66,6 +71,7 @@ impl Default for EmitOptions {
         Self {
             cycles: false,
             check_points: CheckPoints::None,
+            access_checks: false,
             lines: None,
             chunk_lines: 20_000,
             symbol_prefix: String::new(),

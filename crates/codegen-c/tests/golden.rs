@@ -162,6 +162,7 @@ fn test_golden_calls_with_cycles_check_points_and_lines() {
     let options = EmitOptions {
         cycles: true,
         check_points: CheckPoints::BlockStarts,
+        access_checks: true,
         lines: Some(line_map(&program)),
         ..EmitOptions::default()
     };

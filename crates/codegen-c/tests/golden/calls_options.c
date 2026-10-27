@@ -239,12 +239,14 @@ uint32_t f_000500(AgState *s, uint32_t pc)
         uint32_t t1 = ag_load8(s, t0, 60);
         s->d[3] = (s->d[3] & 0xFFFFFF00u) | t1;
     }
+    AG_ACHECK(s, 0x50Au, 52, 52, 4);
     /* 00050A  move.w  d1, $a10000.l */
 #line 24 "synthetic.asm"
     {
         uint32_t t0 = (s->d[1]) & 0xFFFFu;
         ag_bus_write16(s, 0xA10000u, t0, 52);
     }
+    AG_ACHECK(s, 0x510u, 36, 36, 0);
     /* 000510  move.l  d3, -(a7) */
 #line 25 "synthetic.asm"
     {
@@ -254,6 +256,7 @@ uint32_t f_000500(AgState *s, uint32_t pc)
         s->a[7] = t2;
         ag_store32(s, t2, t0, 36);
     }
+    AG_ACHECK(s, 0x512u, 24, 24, 4);
     /* 000512  addq.l  #4, a7 */
 #line 26 "synthetic.asm"
     {

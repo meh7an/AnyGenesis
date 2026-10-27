@@ -3,30 +3,34 @@
 //! The binary loads and checks the ROM, checks the translated program's address table and
 //! runs from reset on the VDP, which keeps its memories, runs DMA, raises the vertical and
 //! horizontal interrupts and draws the picture. Given only the ROM it runs in a window with
-//! the keyboard and gamepad as pad 1 until the window closes. Given a frame count, or any of
-//! the options below, it runs headless for that many frames (ten seconds' worth by default)
-//! instead. Either way it reports where the run ended, what the VDP holds and what the
-//! runtime logged on the way, and headless runs save the frames asked for with `--dump` as
-//! BMP files in `dumps/` under the working directory.
+//! the keyboard and gamepad as pad 1 until the window closes; the buttons reach the game at
+//! every vertical interrupt handler entry, as they last were there. Given a frame count, or
+//! `--dump`, `--input` or `--state` without `--record`, it runs headless for that many
+//! frames (ten seconds' worth by default) instead. Either way it reports where the run
+//! ended, what the VDP holds and what the runtime logged on the way, and headless runs save
+//! the frames asked for with `--dump` as BMP files in `dumps/` under the working directory.
 //!
 //! For the frame diff, `--state <folder>` saves the machine state at every vertical
-//! interrupt handler entry in the frame diff's dump layout, on a console without TMSS like
-//! the reference emulator's, and `--input <file>` replays pad input from the frame diff's
-//! input format at the same points.
+//! interrupt handler entry in the frame diff's dump layout, `--input <file>` replays pad
+//! input from the frame diff's input format at the same points, and `--record <file>`
+//! (window only, `--state` may go with it) writes the buttons the window applied there in
+//! that format. Runs with any of the three use a console without TMSS like the reference
+//! emulator's, so a recording replays to the same machine headless and in the reference.
 
 mod game;
 
 use std::{
     cell::RefCell,
-    env, fs,
+    env,
+    fs::{self, File},
     path::{Path, PathBuf},
     rc::Rc,
     thread,
 };
 
 use anygenesis_abi::{AgState, RAM_SIZE, ram_index};
-use anygenesis_framediff::{Dump, Input, Region, dump};
-use anygenesis_frontend::Config;
+use anygenesis_framediff::{Dump, Input, Recorder, Region, dump};
+use anygenesis_frontend::{Config, Pad};
 use anygenesis_rom::{Rom, Sha1Digest};
 use anygenesis_runtime::{
     Access, Buttons, Exit, Hardware, InterruptStop, Miss, Options, RUN_STACK, Runtime, Vdp,
@@ -39,8 +43,9 @@ use crate::game::CompiledGame;
 
 const ROM_VAR: &str = "ANYGENESIS_ROM";
 const USAGE: &str = "usage: anygenesis [<rom.bin> [<frames>]] [--dump <frame>[,<frame>...]] \
-                     [--state <folder>] [--input <file>] (the ROM may come from \
-                     ANYGENESIS_ROM; with no frames and no options it runs in a window)";
+                     [--state <folder>] [--input <file>] [--record <file>] (the ROM may come \
+                     from ANYGENESIS_ROM; it runs in a window with no frames and no options, \
+                     or with --record and at most --state)";
 /// Window pixels per picture pixel when the window opens.
 const WINDOW_SCALE: u32 = 3;
 /// The vertical interrupt's level: the frame diff stops at its handler's entry.
@@ -66,18 +71,33 @@ fn main() -> Result<()> {
         game.table.len(),
         game.vector_handlers.len()
     );
-    let Some(frames) = arguments.frames else {
-        run_in_window(game, rom)?.print();
-        return Ok(());
-    };
-    let trace = Trace {
-        folder: arguments.state.clone(),
-        input: arguments.input.as_deref().map(Input::load).transpose()?,
-    };
-    if let Some(folder) = &trace.folder {
+    let reference =
+        arguments.state.is_some() || arguments.input.is_some() || arguments.record.is_some();
+    if let Some(folder) = &arguments.state {
         fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
     }
-    let report = run_from_reset(game, rom, frames, &arguments.dumps, trace)?;
+    let pad = match arguments.input.as_deref() {
+        Some(path) => PadSource::Replay(Input::load(path)?),
+        None => PadSource::Untouched,
+    };
+    let record = arguments
+        .record
+        .as_deref()
+        .map(|path| {
+            File::create(path)
+                .map(Recorder::new)
+                .with_context(|| format!("creating {}", path.display()))
+        })
+        .transpose()?;
+    let trace = Trace {
+        folder: arguments.state.clone(),
+        pad,
+        record,
+    };
+    let report = match arguments.frames {
+        Some(frames) => run_from_reset(game, rom, frames, &arguments.dumps, trace, reference)?,
+        None => run_in_window(game, rom, trace, reference)?,
+    };
     report.print();
     if let Some(folder) = &arguments.state {
         println!(
@@ -85,6 +105,14 @@ fn main() -> Result<()> {
              ${REFERENCE_VERSION:02X})",
             report.vblanks,
             folder.display()
+        );
+    }
+    if let Some(path) = &arguments.record {
+        println!(
+            "input recorded at {} vertical interrupts to {} (version register \
+             ${REFERENCE_VERSION:02X})",
+            report.vblanks,
+            path.display()
         );
     }
     for (frame, picture) in &report.pictures {
@@ -108,18 +136,21 @@ struct Arguments {
     state: Option<PathBuf>,
     /// The pad input to replay.
     input: Option<PathBuf>,
+    /// Where to record the window's pad input.
+    record: Option<PathBuf>,
 }
 
 impl Arguments {
     fn parse() -> Result<Self> {
         let mut positional = Vec::new();
         let mut dumps = Vec::new();
-        let (mut state, mut input) = (None, None);
+        let (mut state, mut input, mut record) = (None, None, None);
         let mut arguments = env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             let path = match argument.to_str() {
                 Some("--state") => Some(&mut state),
                 Some("--input") => Some(&mut input),
+                Some("--record") => Some(&mut record),
                 _ => None,
             };
             if let Some(path) = path {
@@ -159,10 +190,15 @@ impl Arguments {
                         .with_context(|| format!("{argument:?} is not a frame count\n{USAGE}"))?,
                 )
             }
-            None if dumps.is_empty() && state.is_none() && input.is_none() => None,
+            None if dumps.is_empty()
+                && input.is_none()
+                && (state.is_none() || record.is_some()) =>
+            {
+                None
+            }
             None => Some(DEFAULT_FRAMES),
         };
-        if positional.next().is_some() {
+        if positional.next().is_some() || record.is_some() && frames.is_some() {
             bail!(USAGE);
         }
         let last = frames.unwrap_or(0);
@@ -177,6 +213,7 @@ impl Arguments {
             dumps,
             state,
             input,
+            record,
         })
     }
 }
@@ -184,36 +221,106 @@ impl Arguments {
 /// Where the trace hook leaves its first error; the hook cannot return one.
 type Failure = Rc<RefCell<Option<anyhow::Error>>>;
 
-/// What a run does at every vertical interrupt handler entry for the frame diff.
+/// A recording the trace hook writes to, kept to end it once the run has.
+type Recording = Rc<RefCell<Recorder<File>>>;
+
+/// What a run does at every vertical interrupt handler entry: save the state for the frame
+/// diff, apply the pad and record what it applied.
 #[derive(Debug, Default)]
 struct Trace {
     /// Where to save the machine state.
     folder: Option<PathBuf>,
-    /// The pad input to apply.
-    input: Option<Input>,
+    pad: PadSource,
+    /// Where to record the buttons applied.
+    record: Option<Recorder<File>>,
+}
+
+/// Where the pad's buttons at a stop come from.
+#[derive(Debug, Default)]
+enum PadSource {
+    /// Nowhere: the pad stays as it is.
+    #[default]
+    Untouched,
+    /// An input file.
+    Replay(Input),
+    /// The window, as it last read the keyboard and gamepad.
+    Live(Pad),
 }
 
 impl Trace {
     fn is_empty(&self) -> bool {
-        self.folder.is_none() && self.input.is_none()
+        self.folder.is_none() && matches!(self.pad, PadSource::Untouched) && self.record.is_none()
     }
 
-    /// Sets the hook on `runtime`; the first failure to save a stop lands in `failure`, and
-    /// no stop is saved after it.
-    fn hook(self, runtime: &mut Runtime, game: CompiledGame, failure: Failure) {
+    /// Sets the hook on `runtime` and returns the recording, if any. The first failure to
+    /// save a stop or record the pad lands in `failure`, and nothing is saved or recorded
+    /// after it.
+    fn hook(
+        self,
+        runtime: &mut Runtime,
+        game: CompiledGame,
+        failure: Failure,
+    ) -> Option<Recording> {
+        let Self {
+            folder,
+            pad,
+            record,
+        } = self;
+        let recording = record.map(|recorder| Rc::new(RefCell::new(recorder)));
+        let recorder = recording.clone();
         runtime.set_interrupt_hook(VBLANK_LEVEL, move |stop| {
             let index = stop.taken();
-            if let Some(folder) = &self.folder
-                && failure.borrow().is_none()
-                && let Err(error) = save_stop(folder, index, stop, &game)
-            {
-                *failure.borrow_mut() = Some(error);
+            let buttons = match &pad {
+                PadSource::Untouched => None,
+                PadSource::Replay(input) => Some(Buttons(input.at(index).0)),
+                PadSource::Live(pad) => Some(pad.buttons()),
+            };
+            if failure.borrow().is_none() {
+                let saved = folder.as_deref().map_or(Ok(()), |folder| {
+                    save_stop(folder, index, stop, &game).context("saving the state")
+                });
+                let done = saved.and_then(|()| match (&recorder, buttons) {
+                    (Some(recorder), Some(buttons)) => recorder
+                        .borrow_mut()
+                        .record(index, anygenesis_framediff::Buttons(buttons.0))
+                        .context("recording the pad"),
+                    _ => Ok(()),
+                });
+                if let Err(error) = done {
+                    failure.replace(Some(error));
+                }
             }
-            if let Some(input) = &self.input {
-                stop.set_pad(Buttons(input.at(index).0));
+            if let Some(buttons) = buttons {
+                stop.set_pad(buttons);
             }
         });
+        recording
     }
+}
+
+/// The report of a run of `game` that ended with `exit`, with `pictures` kept on the way,
+/// after ending its recording.
+///
+/// # Errors
+/// The first failure at a stop, or ending the recording.
+fn conclude(
+    runtime: &Runtime,
+    game: &CompiledGame,
+    exit: Exit,
+    pictures: Vec<(u64, Frame)>,
+    failure: &Failure,
+    recording: Option<&Recording>,
+) -> Result<Report> {
+    if let Some(error) = failure.take() {
+        return Err(error.context("at a vertical interrupt"));
+    }
+    if let Some(recording) = recording {
+        recording
+            .borrow_mut()
+            .finish(runtime.interrupts(VBLANK_LEVEL), runtime.frames())
+            .context("ending the recording")?;
+    }
+    Ok(Report::new(runtime, game, exit, pictures))
 }
 
 /// Saves the state at stop `index` in the frame diff's layout, with a note of where the
@@ -454,30 +561,30 @@ impl Report {
 /// Runs from reset on a thread with room for the native stack until `frames` frames have
 /// ended, or the run stops earlier at a wait nothing can end, keeping the pictures of the
 /// frames in `dumps` (ascending, none past `frames`) and doing what `trace` asks at every
-/// vertical interrupt. A run that saves state runs on the reference emulator's console.
+/// vertical interrupt; on the reference emulator's console when `reference` is set.
 fn run_from_reset(
     game: CompiledGame,
     rom: Rom,
     frames: u64,
     dumps: &[u64],
     trace: Trace,
+    reference: bool,
 ) -> Result<Report> {
     let dumps = dumps.to_vec();
     let worker = thread::Builder::new()
         .name("68000".into())
         .stack_size(RUN_STACK)
         .spawn(move || {
-            let reference = trace.folder.is_some();
             let mut runtime = start(rom, game, reference);
             let failure = Failure::default();
-            if !trace.is_empty() {
-                trace.hook(&mut runtime, game, Rc::clone(&failure));
-            }
+            let recording = if trace.is_empty() {
+                None
+            } else {
+                trace.hook(&mut runtime, game, Rc::clone(&failure))
+            };
             let (exit, pictures) = run_frames(&mut runtime, frames, &dumps);
-            if let Some(error) = failure.take() {
-                return Err(error.context("saving the state at a vertical interrupt"));
-            }
-            Ok(Report::new(&runtime, &game, exit, pictures))
+            let recording = recording.as_ref();
+            conclude(&runtime, &game, exit, pictures, &failure, recording)
         })
         .context("starting the 68000 thread")?;
     worker
@@ -485,18 +592,32 @@ fn run_from_reset(
         .map_err(|_| anyhow!("the 68000 thread panicked"))?
 }
 
-/// Runs from reset in a window until it closes, or the run stops at a wait nothing can end.
-fn run_in_window(game: CompiledGame, rom: Rom) -> Result<Report> {
+/// Runs from reset in a window until it closes, or the run stops at a wait nothing can end,
+/// applying the window's pad at every vertical interrupt and doing there what `trace` asks
+/// besides (its own pad source is replaced); on the reference emulator's console when
+/// `reference` is set.
+fn run_in_window(game: CompiledGame, rom: Rom, trace: Trace, reference: bool) -> Result<Report> {
     let config = Config {
         title: format!("AnyGenesis - {}", game.name),
         scale: WINDOW_SCALE,
     };
-    let report = anygenesis_frontend::run(
+    anygenesis_frontend::run(
         &config,
-        move || start(rom, game, false),
-        move |runtime, exit| Report::new(runtime, &game, exit, Vec::new()),
-    )?;
-    Ok(report)
+        move |pad| {
+            let mut runtime = start(rom, game, reference);
+            let failure = Failure::default();
+            let trace = Trace {
+                pad: PadSource::Live(pad),
+                ..trace
+            };
+            let recording = trace.hook(&mut runtime, game, Rc::clone(&failure));
+            (runtime, (failure, recording))
+        },
+        move |runtime, exit, (failure, recording)| {
+            let recording = recording.as_ref();
+            conclude(runtime, &game, exit, Vec::new(), &failure, recording)
+        },
+    )?
 }
 
 /// The runtime for `game` at reset on the VDP, ending a run at a wait nothing can end; on
@@ -536,6 +657,7 @@ fn run_frames(runtime: &mut Runtime, frames: u64, dumps: &[u64]) -> (Exit, Vec<(
 
 #[cfg(test)]
 mod tests {
+    use anygenesis_framediff::{Folder, Masks};
     use anygenesis_runtime::vdp::CRAM_MASK;
 
     use super::*;
@@ -617,11 +739,11 @@ mod tests {
         // An empty input still sets the hook at every vertical interrupt, which must change
         // nothing below.
         let trace = Trace {
-            folder: None,
-            input: Some(Input::default()),
+            pad: PadSource::Replay(Input::default()),
+            ..Trace::default()
         };
-        let report =
-            run_from_reset(game, rom, DEFAULT_FRAMES, &dumps, trace).expect("the run finishes");
+        let report = run_from_reset(game, rom, DEFAULT_FRAMES, &dumps, trace, false)
+            .expect("the run finishes");
         let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dumps");
         for (frame, picture) in &report.pictures {
             dump(game.name, *frame, picture, &folder).expect("the picture is saved");
@@ -752,10 +874,11 @@ mod tests {
         let (game, rom) = sonic1();
         let config = report_config(&game);
         let trace = Trace {
-            folder: None,
-            input: Some(Input::parse(START_PRESS).expect("the input is valid")),
+            pad: PadSource::Replay(Input::parse(START_PRESS).expect("the input is valid")),
+            ..Trace::default()
         };
-        let report = run_from_reset(game, rom, START_FRAMES, &[], trace).expect("the run finishes");
+        let report =
+            run_from_reset(game, rom, START_FRAMES, &[], trace, false).expect("the run finishes");
         report.print();
         assert!(
             matches!(report.exit, Exit::Frames { .. }),
@@ -766,6 +889,112 @@ mod tests {
         assert_eq!(report.unwinds, 0);
         assert_eq!(
             report.watched(),
+            Some((config.watched, value(&config, "level")))
+        );
+    }
+
+    /// Frames the recorded play lasts.
+    const PLAY_FRAMES: u64 = 1_500;
+
+    /// A scripted player, by frame: Start on the idle title screen, then running right in
+    /// the level with a jump held for 45 frames out of every 90.
+    fn scripted(frame: u64) -> Buttons {
+        match frame {
+            660..700 => Buttons::START,
+            900.. if frame / 45 % 2 == 1 => Buttons(Buttons::RIGHT.0 | Buttons::C.0),
+            900.. => Buttons::RIGHT,
+            _ => Buttons::NONE,
+        }
+    }
+
+    /// Plays `frames` frames from reset one at a time as the window does, on the reference
+    /// console, holding [`scripted`]'s buttons on the pad the hook applies, recording what
+    /// it applied to `path` and saving every stop in `folder`.
+    fn play(game: CompiledGame, rom: Rom, frames: u64, path: &Path, folder: &Path) -> Report {
+        let record = Recorder::new(File::create(path).expect("the recording is created"));
+        let folder = folder.to_owned();
+        let worker = thread::Builder::new()
+            .name("68000".into())
+            .stack_size(RUN_STACK)
+            .spawn(move || {
+                let mut runtime = start(rom, game, true);
+                let pad = Pad::default();
+                let trace = Trace {
+                    folder: Some(folder),
+                    pad: PadSource::Live(pad.clone()),
+                    record: Some(record),
+                };
+                let failure = Failure::default();
+                let recording = trace.hook(&mut runtime, game, Rc::clone(&failure));
+                let exit = loop {
+                    pad.set(scripted(runtime.frames() + 1));
+                    let exit = runtime.run_frames(1);
+                    if runtime.frames() == frames || !matches!(exit, Exit::Frames { .. }) {
+                        break exit;
+                    }
+                };
+                let recording = recording.as_ref();
+                conclude(&runtime, &game, exit, Vec::new(), &failure, recording)
+            })
+            .expect("the 68000 thread starts");
+        worker
+            .join()
+            .expect("the run finishes")
+            .expect("the play is recorded")
+    }
+
+    /// What two runs of one machine must agree on at the end.
+    fn summary(report: &Report) -> Vec<String> {
+        let mut summary = vec![
+            report.exit.to_string(),
+            format!("{} cycles, {} frames", report.cycles, report.frames),
+            format!("{} VBlanks, SR ${:04X}", report.vblanks, report.sr),
+            Sha1Digest::of(&report.ram[..]).to_string(),
+        ];
+        summary.extend(vdp_hashes(&report.vdp).map(|(_, hash)| hash.to_string()));
+        summary
+    }
+
+    /// A play recorded frame by frame from a live pad replays from the recording, in one
+    /// headless run as the command line does, to the same machine at every stop.
+    #[test]
+    #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
+    fn test_sonic1_recorded_play_replays_to_the_same_machine() {
+        let (game, rom) = sonic1();
+        let config = report_config(&game);
+        let folder =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dumps/sonic1-recording-test");
+        // Stops of an earlier, longer run would outlast this one's.
+        let _ = fs::remove_dir_all(&folder);
+        let (live, replay) = (folder.join("played"), folder.join("replayed"));
+        for stops in [&live, &replay] {
+            fs::create_dir_all(stops).expect("the state folder is created");
+        }
+        let path = folder.join("input.txt");
+        let played = play(game, rom.clone(), PLAY_FRAMES, &path, &live);
+        played.print();
+        let input = Input::load(&path).expect("the recording parses");
+        let text = fs::read_to_string(&path).expect("the recording reads");
+        let changes = text.lines().filter(|line| !line.starts_with('#')).count();
+        let end = format!("# end: stop {}, frame {PLAY_FRAMES}", played.vblanks);
+        assert!(changes > 10, "{text}");
+        assert_eq!(text.lines().last(), Some(end.as_str()));
+
+        let trace = Trace {
+            folder: Some(replay.clone()),
+            pad: PadSource::Replay(input),
+            record: None,
+        };
+        let replayed =
+            run_from_reset(game, rom, PLAY_FRAMES, &[], trace, true).expect("the replay finishes");
+        replayed.print();
+        assert_eq!(summary(&replayed), summary(&played));
+        let stops =
+            anygenesis_framediff::diff(&mut Folder(replay), &mut Folder(live), &Masks::default())
+                .expect("the stops read back");
+        assert!(stops.passed(), "{stops}");
+        assert_eq!(
+            replayed.watched(),
             Some((config.watched, value(&config, "level")))
         );
     }

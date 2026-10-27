@@ -272,12 +272,32 @@ pub(crate) struct Context {
     latched_late: bool,
     /// The next budget lasts one instruction, at whose end the interrupt is taken.
     one_more: bool,
+    /// The translated instruction whose device access came last, for `ag_resume`.
+    access: NativeAccess,
+    /// The last run ended at a limit inside a check, before its interrupts and next budget:
+    /// the next run starts with that check, native (`true`) or the interpreter's.
+    recheck: Option<bool>,
     /// Addresses between table rows where execution stopped and may go on from the top
     /// level: where an interrupt was taken (its handler's RTE returns there) or a run
     /// ended. They resume through the interpreter without counting a miss.
     between: HashSet<u32>,
     idle: Option<Snapshot>,
     hook: Option<InterruptHook>,
+}
+
+/// What the interpreter's latch rule needs of a translated instruction that reached a
+/// device, noted at its first access: every access of an instruction sees its start, so a
+/// later one of the same instruction comes at that start plus the stalls since.
+#[derive(Debug, Clone, Copy, Default)]
+struct NativeAccess {
+    /// The master clock at the instruction's start.
+    began: u64,
+    /// The next enabled interrupt event then.
+    event: Option<u64>,
+    /// Whether an interrupt was due already then.
+    waiting: bool,
+    /// Where a further access of the same instruction would come: the start plus its stalls.
+    at: u64,
 }
 
 /// A function [`Runtime::set_interrupt_hook`] calls at every entry of one level's handler.
@@ -416,6 +436,20 @@ impl Context {
         state.cycles -= left;
     }
 
+    /// Before a bus extern: notes the instruction making it, unless it is the one the last
+    /// access came from.
+    pub fn before_access(&mut self, state: &AgState) {
+        let now = self.devices.clock_at(self.clock(state));
+        if now != self.access.at {
+            self.access = NativeAccess {
+                began: now,
+                event: self.devices.hardware.next_interrupt(),
+                waiting: self.due(mask(state.sr)).is_some(),
+                at: now,
+            };
+        }
+    }
+
     /// After a bus extern: a read or write cannot unwind or take an interrupt, so a deep
     /// stack or an interrupt the access made due makes the next check point call the hook,
     /// which can.
@@ -426,6 +460,24 @@ impl Context {
         }
         if self.depth(address) > self.options.soft_depth || self.due(mask(state.sr)).is_some() {
             self.check_soon(state);
+        }
+        self.access.at = self.devices.clock_at(self.clock(state));
+    }
+
+    /// The interpreter's latch rule for the translated instruction that ended at the current
+    /// count, whose interrupt latch point lies `latch` cycles after its start: an interrupt
+    /// whose event came after that point, during the instruction (its stalls included),
+    /// waits for the end of the next one.
+    fn latch_native(&mut self, state: &AgState, latch: u32) {
+        let access = self.access;
+        let latched = access.began + u64::from(latch) * CPU_DIVIDER;
+        let ended = self.devices.clock_at(self.clock(state));
+        if !access.waiting
+            && access
+                .event
+                .is_some_and(|event| (latched + 1..=ended).contains(&event))
+        {
+            self.latched_late = true;
         }
     }
 
@@ -704,6 +756,8 @@ unsafe fn schedule(state: *mut AgState, pc: u32, native: bool) -> u32 {
                 return UNWIND | pc;
             }
             if let Some(exit) = ctx.limit(pc) {
+                // The next run takes this check up again, as if the run had gone on.
+                ctx.recheck = Some(native);
                 return ctx.end(exit);
             }
             let Some(level) = ctx.due(mask(st.sr)) else {
@@ -770,6 +824,34 @@ pub(crate) unsafe fn hybrid(state: *mut AgState, pc: u32) -> u32 {
     // SAFETY: forwarded from the caller.
     unsafe {
         parts(state).1.hybrids += 1;
+        match run_interpreter(state, pc, false) {
+            Ending::Row(row) => row | HYBRID_ROW,
+            Ending::Leave(next) => next,
+        }
+    }
+}
+
+/// `ag_resume`: an access of the translated instruction before `pc` left the budget short
+/// of the rest of its block, so after giving back the `ahead` cycles charged for the
+/// instructions not yet run and applying the latch rule to that instruction (latch point
+/// `latch`), the interpreter runs from `pc` to the next table row. Returns as [`hybrid`].
+///
+/// # Safety
+/// As for [`check`].
+pub(crate) unsafe fn resume_after_access(
+    state: *mut AgState,
+    pc: u32,
+    ahead: u32,
+    latch: u32,
+) -> u32 {
+    // SAFETY: forwarded from the caller; the borrows from `parts` end before the
+    // interpreter runs.
+    unsafe {
+        let (st, ctx) = parts(state);
+        ctx.hybrids += 1;
+        // A segment's charge is at most a block's cycles, so it fits.
+        st.cycles += ahead as i32;
+        ctx.latch_native(st, latch);
         match run_interpreter(state, pc, false) {
             Ending::Row(row) => row | HYBRID_ROW,
             Ending::Leave(next) => next,
@@ -1098,6 +1180,8 @@ impl Runtime {
             hybrids: 0,
             latched_late: false,
             one_more: false,
+            access: NativeAccess::default(),
+            recheck: None,
             between: HashSet::new(),
             idle: None,
             hook: None,
@@ -1137,9 +1221,11 @@ impl Runtime {
             (*state).runtime = context.cast();
             let mut pc = (*state).pc;
             let exit = loop {
-                let next = match (*context).stopped {
-                    Some(resume) => stop(state, resume),
-                    None => {
+                let recheck = (*context).recheck.take();
+                let next = match ((*context).stopped, recheck) {
+                    (Some(resume), _) => stop(state, resume),
+                    (None, Some(native)) => schedule(state, pc, native),
+                    (None, None) => {
                         let function = (*context).resume(pc);
                         function(state, pc)
                     }

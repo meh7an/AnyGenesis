@@ -47,6 +47,24 @@
             }                                                                               \
         }                                                                                   \
     } while (0)
+/* After an instruction that may reach a device: a stall or an interrupt its access made due
+   can leave the budget, with the `ahead` cycles charged for instructions not yet run, at no
+   more than `rest`, the rest of the block's most cycles. The interpreter then runs the rest
+   from `pc`, so an interrupt is taken at its instruction boundary (one that came after the
+   instruction's `latch` point a boundary later), and execution goes on natively at the next
+   row. */
+#define AG_ACHECK(s, pc, ahead, rest, latch)                                                \
+    do {                                                                                    \
+        if ((s)->cycles + (ahead) <= (rest)) {                                              \
+            uint32_t ag_next = ag_resume((s), (pc), (ahead), (latch));                      \
+            if (ag_next & AG_HYBRID_ROW) {                                                  \
+                ag_next &= AG_ADDRESS_MASK;                                                 \
+                AgFn *ag_fn = ag_lookup((s), ag_next);                                      \
+                AG_TAIL return ag_fn((s), ag_next);                                         \
+            }                                                                               \
+            return ag_next;                                                                 \
+        }                                                                                   \
+    } while (0)
 /* After a write to SR: an interrupt the new mask lets through is taken before `pc`. */
 #define AG_DELIVER(s, pc)                                                                   \
     do {                                                                                    \

@@ -9,6 +9,29 @@ use anygenesis_shared::Size;
 
 pub const ADDRESS_MASK: u32 = 0x00FF_FFFF;
 
+/// Whether `body` has an access the printed C may send to the runtime's bus: one whose
+/// address is not known, or a constant one outside RAM (a write to ROM goes there too).
+pub fn may_reach_bus(body: &Body, rom_size: u32) -> bool {
+    let bus = |size: Size, address: Value, store: bool| match address {
+        Value::Const { value, .. } => {
+            match Region::of(value & ADDRESS_MASK, size.bytes(), rom_size) {
+                Region::Ram => false,
+                Region::Rom => store,
+                Region::Bus => true,
+            }
+        }
+        Value::Temp(_) => true,
+    };
+    body.ops.iter().any(|op| match *op {
+        Op::Store { size, address, .. } => bus(size, address, true),
+        Op::Let {
+            expr: Expr::Load { size, address },
+            ..
+        } => bus(size, address, false),
+        _ => false,
+    })
+}
+
 /// Prints the values and ops of one body; its temporaries are named with `prefix`.
 #[derive(Debug, Clone, Copy)]
 pub struct Printer<'a> {

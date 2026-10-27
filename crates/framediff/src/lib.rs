@@ -19,7 +19,7 @@ use std::{io, path::PathBuf};
 
 pub use diff::{Folder, Report, Run, Shift, diff};
 pub use dump::{Dump, Region};
-pub use input::{Buttons, Input};
+pub use input::{Buttons, Input, Recorder};
 pub use mask::{Mask, Masks};
 
 /// What reading or writing the harness's files can fail with.

@@ -16,7 +16,7 @@ use anygenesis_shared::Address;
 
 use crate::{
     CheckPoints,
-    printer::{ADDRESS_MASK, Printer, constant, used_temps},
+    printer::{ADDRESS_MASK, Printer, constant, may_reach_bus, used_temps},
     program::Context,
 };
 
@@ -235,6 +235,14 @@ impl<'a> Emitter<'a> {
             let after = constant(self.slots[index].lifted.next().get());
             self.line(4, format!("AG_DELIVER(s, {after});"));
         }
+        if charging
+            && self.context.options.access_checks
+            && body.falls_through()
+            && may_reach_bus(&body, self.context.analysis.rom_size)
+        {
+            let line = self.access_check(index);
+            self.line(4, line);
+        }
         if address == block.last && body.falls_through() {
             let lines = self.continue_at(block.end, next);
             self.lines(4, lines);
@@ -273,6 +281,29 @@ impl<'a> Emitter<'a> {
             .take_while(|slot| std::ptr::eq(slot.block, block))
             .map(|slot| slot.lifted.max_cycles())
             .sum()
+    }
+
+    /// `AG_ACHECK` after the instruction at `index`: the cycles its segment charged for the
+    /// instructions after it, and the most the rest of its block takes.
+    fn access_check(&self, index: usize) -> String {
+        let lifted = &self.slots[index].lifted;
+        let next = index + 1;
+        let same_block = self
+            .slots
+            .get(next)
+            .is_some_and(|slot| std::ptr::eq(slot.block, self.slots[index].block));
+        let ahead = if same_block && !self.starts_segment(next) {
+            self.segment_cost(next)
+        } else {
+            0
+        };
+        let rest = if same_block {
+            self.block_bound(next)
+        } else {
+            0
+        };
+        let pc = constant(lifted.next().get());
+        format!("AG_ACHECK(s, {pc}, {ahead}, {rest}, {});", lifted.latch)
     }
 
     /// Cycles of the instructions from `index` up to the next one that can leave early, as

@@ -4,8 +4,9 @@
 //!
 //! The runtime cannot leave the thread it was built on, so [`run`] builds it there. Between
 //! the two threads go only the last finished picture (a slot the run thread fills after
-//! every frame and the window empties when it draws), the pad (read before every frame) and
-//! a request to stop. The window shows each picture at the largest whole-number scale that
+//! every frame and the window empties when it draws), the [`Pad`] and a request to stop.
+//! The window only reads the buttons into the pad; the game applies them where it chooses,
+//! so a run can take them at fixed points of the emulated machine and replay them there. The window shows each picture at the largest whole-number scale that
 //! fits, with square pixels, and presents with vsync; the run thread keeps its own time, so
 //! a display that is not at 59.92 Hz repeats or skips a picture now and then. Sound stays
 //! silent.
@@ -76,29 +77,44 @@ fn sdl(error: impl Display) -> Error {
     Error::Sdl(error.to_string())
 }
 
+/// Pad 1's buttons as the window last read them from the keyboard and gamepad; the run
+/// thread reads them whenever it applies the pad.
+#[derive(Debug, Clone, Default)]
+pub struct Pad(Arc<AtomicU8>);
+
+impl Pad {
+    pub fn buttons(&self) -> Buttons {
+        Buttons(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn set(&self, buttons: Buttons) {
+        self.0.store(buttons.0, Ordering::Relaxed);
+    }
+}
+
 /// What the window and the run thread share.
 #[derive(Debug, Default)]
 struct Shared {
     /// The last finished picture the window has not drawn yet.
     picture: Mutex<Option<Frame>>,
-    /// The buttons held, as [`Buttons`] bits.
-    pad: AtomicU8,
+    pad: Pad,
     /// Set when the window closes; the run ends before its next frame.
     stop: AtomicBool,
 }
 
 /// Runs a game in a window until the window closes or the run ends by itself.
 ///
-/// `start` builds the runtime on the run thread; the runtime must hold a [`Vdp`]. After the
-/// run, `finish` sees the runtime and the exit of its last frame, and its result is
-/// returned.
+/// `start` builds the runtime on the run thread, with the pad to apply to it (nothing
+/// applies it otherwise), and anything the run should hand to `finish`; the runtime must
+/// hold a [`Vdp`]. After the run, `finish` sees the runtime, the exit of its last frame and
+/// what `start` handed over, and its result is returned.
 ///
 /// # Errors
 /// SDL failing to set up or draw, or the run thread failing to start or panicking.
-pub fn run<R: Send + 'static>(
+pub fn run<S, R: Send + 'static>(
     config: &Config,
-    start: impl FnOnce() -> Runtime + Send + 'static,
-    finish: impl FnOnce(&Runtime, Exit) -> R + Send + 'static,
+    start: impl FnOnce(Pad) -> (Runtime, S) + Send + 'static,
+    finish: impl FnOnce(&Runtime, Exit, S) -> R + Send + 'static,
 ) -> Result<R, Error> {
     let context = sdl3::init().map_err(sdl)?;
     let video = context.video().map_err(sdl)?;
@@ -129,9 +145,9 @@ pub fn run<R: Send + 'static>(
             .name("68000".into())
             .stack_size(RUN_STACK)
             .spawn(move || {
-                let mut runtime = start();
+                let (mut runtime, handed) = start(shared.pad.clone());
                 let exit = run_paced(&mut runtime, &shared);
-                finish(&runtime, exit)
+                finish(&runtime, exit, handed)
             })
             .map_err(Error::Thread)?
     };
@@ -161,8 +177,9 @@ pub fn run<R: Send + 'static>(
         if closed || worker.is_finished() {
             break Ok(());
         }
-        let buttons = input::read(&events.keyboard_state(), pad.as_ref());
-        shared.pad.store(buttons.0, Ordering::Relaxed);
+        shared
+            .pad
+            .set(input::read(&events.keyboard_state(), pad.as_ref()));
         let picture = shared
             .picture
             .lock()
@@ -221,12 +238,10 @@ fn upload(texture: &mut Texture<'_>, picture: &Frame) -> Result<(), Error> {
 }
 
 /// Runs frame after frame at the NTSC rate until `shared` asks to stop or the run ends by
-/// itself, applying the pad before each frame and leaving each finished picture in the
-/// slot; returns the last frame's exit.
+/// itself, leaving each finished picture in the slot; returns the last frame's exit.
 fn run_paced(runtime: &mut Runtime, shared: &Shared) -> Exit {
     let mut due = Instant::now();
     loop {
-        runtime.set_pad(Buttons(shared.pad.load(Ordering::Relaxed)));
         let exit = runtime.run_frames(1);
         if let Some(vdp) = runtime.hardware::<Vdp>() {
             *shared

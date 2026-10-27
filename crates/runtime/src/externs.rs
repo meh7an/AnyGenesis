@@ -1,8 +1,8 @@
 //! The `ag_*` functions translated code calls, exported under their C names.
 //!
 //! `AgState::runtime` points at the [`Context`] of the run in progress, set by
-//! [`Runtime::run`](crate::Runtime::run). `ag_check`, `ag_hybrid`, `ag_deliver` and
-//! `ag_stop` may run interrupt handlers, so they take the raw state rather than a borrow of
+//! [`Runtime::run`](crate::Runtime::run). `ag_check`, `ag_hybrid`, `ag_resume`,
+//! `ag_deliver` and `ag_stop` may run interrupt handlers, so they take the raw state rather than a borrow of
 //! it.
 
 use anygenesis_abi::{AgFn, AgState, signatures};
@@ -24,6 +24,7 @@ const _: signatures::ag_lookup = ag_lookup;
 const _: signatures::ag_stop = ag_stop;
 const _: signatures::ag_check = ag_check;
 const _: signatures::ag_hybrid = ag_hybrid;
+const _: signatures::ag_resume = ag_resume;
 const _: signatures::ag_deliver = ag_deliver;
 const _: signatures::ag_reset_devices = ag_reset_devices;
 
@@ -57,6 +58,7 @@ unsafe fn with_bus<T>(
     // SAFETY: forwarded from the caller; the runtime attached the ROM the state points at.
     unsafe {
         with_context(state, |state, context| {
+            context.before_access(state);
             let value = body(&mut context.bus(state));
             context.after_access(state, address);
             value
@@ -162,6 +164,14 @@ pub unsafe extern "C" fn ag_check(state: *mut AgState, pc: u32) -> u32 {
 pub unsafe extern "C" fn ag_hybrid(state: *mut AgState, pc: u32) -> u32 {
     // SAFETY: forwarded from the caller.
     unsafe { machine::hybrid(state, pc) }
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_resume(state: *mut AgState, pc: u32, ahead: u32, latch: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { machine::resume_after_access(state, pc, ahead, latch) }
 }
 
 /// # Safety

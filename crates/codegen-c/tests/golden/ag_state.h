@@ -108,6 +108,13 @@ uint32_t ag_check(AgState *state, uint32_t pc);
  * returns any other address execution goes to instead. */
 uint32_t ag_hybrid(AgState *state, uint32_t pc);
 
+/* The slow path of a check after an instruction that may reach a device, once its
+ * access left the budget short of the rest of the block: gives back the `ahead` cycles
+ * charged for instructions not yet run, applies the latch rule to the instruction with
+ * its `latch` point, interprets from `pc` to the next table row and returns it with
+ * `AG_HYBRID_ROW` set, or returns any other address execution goes to instead. */
+uint32_t ag_resume(AgState *state, uint32_t pc, uint32_t ahead, uint32_t latch);
+
 /* After a write to SR, at the instruction boundary `pc`: delivers the interrupts the new
  * mask lets through and returns where execution continues (`pc` unless a handler
  * changed the stacked PC). Never ends the run. */
