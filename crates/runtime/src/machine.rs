@@ -23,7 +23,8 @@
 //! and calls `ag_check` at the next check point once it runs out. The budget ends at the
 //! hardware's next event, so interrupts arrive at the first check point after they are
 //! raised; while one waits behind the interrupt mask the budget is zero, so a lowered mask
-//! is seen at the next check point.
+//! is seen at the next check point. Refresh ([`crate::refresh`]) is charged per budget on the
+//! cycles executed, and budgets shrink so that it still ends at the event.
 
 use std::{any::Any, collections::HashMap, fmt, ptr, slice};
 
@@ -41,6 +42,7 @@ use crate::{
     hardware::Hardware,
     io::{Buttons, VERSION_NO_EXPANSION, VERSION_OVERSEAS},
     log::Log,
+    refresh::{self, Refresh},
     z80,
 };
 
@@ -214,6 +216,10 @@ pub(crate) struct Context {
     /// The cycle count the current budget started from; `AgState::cycles` counts down
     /// from it.
     budget: i32,
+    /// Cycles of the current budget the 68000 did not execute: device stalls and waiting
+    /// in STOP, which cause no refresh.
+    waited: u32,
+    refresh: Refresh,
     /// The address after a STOP the CPU is waiting in.
     stopped: Option<u32>,
     /// The frame count at which [`Runtime::run_frames`] ends the run.
@@ -288,10 +294,17 @@ impl Context {
             .map(|index| self.table[index].function)
     }
 
-    /// Cycles used of the current budget.
+    /// Cycles used of the current budget, without refresh.
     fn elapsed(&self, state: &AgState) -> u32 {
         let used = i64::from(self.budget) - i64::from(state.cycles);
         u32::try_from(used.max(0)).unwrap_or(u32::MAX)
+    }
+
+    /// The time into the current budget the hardware sees: the cycles used and the refresh
+    /// they caused so far.
+    fn clock(&self, state: &AgState) -> u32 {
+        let elapsed = self.elapsed(state);
+        elapsed + self.refresh.pending(elapsed.saturating_sub(self.waited))
     }
 
     /// The bus for one access or instruction.
@@ -299,7 +312,7 @@ impl Context {
     /// # Safety
     /// `state.rom` must point at `state.rom_size` readable bytes, as [`Runtime`] sets them.
     pub unsafe fn bus<'a>(&'a mut self, state: &'a mut AgState) -> SystemBus<'a> {
-        let elapsed = self.elapsed(state);
+        let elapsed = self.clock(state);
         SystemBus {
             // SAFETY: forwarded from the caller.
             rom: unsafe { rom(state) },
@@ -366,28 +379,33 @@ impl Context {
     /// Takes the cycles a device froze the 68000 for out of the budget, as if the access
     /// that caused them had taken that long.
     fn charge_stall(&mut self, state: &mut AgState) {
-        state.cycles = state.cycles.saturating_sub(self.devices.take_stall());
+        let stall = self.devices.take_stall();
+        self.waited = self.waited.saturating_add(stall.unsigned_abs());
+        state.cycles = state.cycles.saturating_sub(stall);
     }
 
-    /// Ends the current budget: the cycles used go to the run's total and to the hardware.
+    /// Ends the current budget: the cycles used and the refresh they caused go to the run's
+    /// total and to the hardware.
     fn charge(&mut self, state: &mut AgState) {
         self.charge_stall(state);
-        let used = self.elapsed(state);
+        let elapsed = self.elapsed(state);
+        let executed = elapsed.saturating_sub(std::mem::take(&mut self.waited));
+        let used = elapsed + self.refresh.charge(executed);
         self.cycles += u64::from(used);
         self.devices.settle(used);
         self.budget = 0;
         state.cycles = 0;
     }
 
-    /// Starts a budget that lasts until the hardware's next event, a slice at most; none
-    /// while an interrupt waits behind the mask.
+    /// Starts a budget that lasts until the hardware's next event, a slice at most, shrunk
+    /// by the refresh it will cause; none while an interrupt waits behind the mask.
     fn refill(&mut self, state: &mut AgState) {
         let hardware = &self.devices.hardware;
         self.budget = if hardware.pending_interrupt().is_some() {
             0
         } else {
             let until = i32::try_from(hardware.until_event()).unwrap_or(i32::MAX);
-            self.options.slice.min(until)
+            refresh::shrink(self.options.slice.min(until))
         };
         state.cycles = self.budget;
     }
@@ -428,7 +446,7 @@ impl Context {
         let entry = interrupt_entry(level, Address::new(pc));
         // SAFETY: forwarded from the caller.
         let rom = unsafe { rom(state) };
-        let elapsed = self.elapsed(state);
+        let elapsed = self.clock(state);
         let Self {
             devices,
             interpreter,
@@ -494,7 +512,7 @@ impl Context {
         // SAFETY: forwarded from the caller.
         let rom = unsafe { rom(state) };
         let pc = cpu.pc.get();
-        let elapsed = self.elapsed(state);
+        let elapsed = self.clock(state);
         let Self {
             devices,
             interpreter,
@@ -597,8 +615,11 @@ pub(crate) unsafe fn stop(state: *mut AgState, resume: u32) -> u32 {
             if ctx.waits_forever(mask(st.sr)) {
                 return ctx.end(Exit::Stopped { resume });
             }
-            // Nothing runs while stopped, so the wait to the next event is used at once.
-            ctx.budget = i32::try_from(ctx.devices.hardware.until_event()).unwrap_or(i32::MAX);
+            // Nothing runs while stopped, so the wait to the next event is used at once, and
+            // it causes no refresh.
+            let until = ctx.devices.hardware.until_event();
+            ctx.budget = i32::try_from(until).unwrap_or(i32::MAX);
+            ctx.waited = until;
         }
     }
 }
@@ -802,11 +823,14 @@ impl Runtime {
         state.a[7] = rom.vectors().initial_ssp();
         state.pc = rom.vectors().reset_pc() & ADDRESS_MASK;
         state.sr = RESET_SR;
-        state.cycles = options.slice;
+        let budget = refresh::shrink(options.slice);
+        state.cycles = budget;
         let context = Box::new(Context {
             devices: Devices::new(hardware, options.version, options.open_bus),
             table,
-            budget: options.slice,
+            budget,
+            waited: 0,
+            refresh: Refresh::default(),
             options,
             interpreter: Interpreter::default(),
             lifts: HashMap::new(),

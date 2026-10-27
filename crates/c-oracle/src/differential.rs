@@ -1,5 +1,6 @@
 //! Function-level differential: the reference run, then the translated code from the same
-//! state, then a comparison of where and how both ended.
+//! state, then a comparison of where and how both ended, of the cycles both charged and of
+//! the time of every device access (M1.1).
 
 use std::collections::BTreeMap;
 
@@ -80,12 +81,20 @@ struct FunctionHost<'a> {
     stop: Option<CStop>,
     checks: u64,
     cap: u64,
+    /// The cycles charged before the state's count was last reset to 0.
+    consumed: u64,
 }
 
 impl FunctionHost<'_> {
     fn end(&mut self, stop: CStop) -> u32 {
         self.stop.get_or_insert(stop);
         POISON
+    }
+
+    /// The cycles charged in all, given the state's count now.
+    fn elapsed(&self, cycles: i32) -> u64 {
+        // The count starts at 0 at every reset and only goes down.
+        self.consumed + u64::from(cycles.unsigned_abs())
     }
 }
 
@@ -105,6 +114,7 @@ impl Host for FunctionHost<'_> {
 
     fn check(&mut self, state: &mut AgState, pc: Address) -> u32 {
         // The budget stays spent, so every check point calls back and is counted.
+        self.consumed = self.elapsed(state.cycles);
         state.cycles = 0;
         self.checks += 1;
         if self.checks > self.cap {
@@ -115,6 +125,10 @@ impl Host for FunctionHost<'_> {
     }
 
     fn reset_devices(&mut self) {}
+
+    fn clock(&mut self, cycles: i32) {
+        self.io.now = self.elapsed(cycles);
+    }
 }
 
 /// Runs reference and translated code from the same random states.
@@ -173,6 +187,7 @@ impl<'a> Differential<'a> {
             // Every check point starts a block: a correct run passes fewer than the
             // reference ran instructions.
             cap: outcome.steps + 1,
+            consumed: 0,
         };
         let stop = self.run_c(&mut state, &mut host, start, &outcome.arrivals);
         let trail = &outcome.trail;
@@ -186,6 +201,13 @@ impl<'a> Differential<'a> {
             let liveness = self.reference.explain(trail, outcome.live);
             format!("{error} on ending {:?}{trail}{liveness}", outcome.stop)
         })?;
+        let cycles = host.elapsed(state.cycles);
+        if cycles != outcome.cycles {
+            return Err(format!(
+                "{cycles} cycles charged against the reference's {} on ending {:?}{trail}",
+                outcome.cycles, outcome.stop
+            ));
+        }
         Ok(outcome.stop)
     }
 

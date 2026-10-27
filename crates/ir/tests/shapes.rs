@@ -4,7 +4,7 @@
 //! which flags are set and read, how edge cases are expressed). `print_shapes` (ignored)
 //! prints every case's text for review.
 
-use anygenesis_ir::{exception_entry, lift};
+use anygenesis_ir::{Op, exception_entry, lift, validate};
 use anygenesis_m68k::decode;
 use anygenesis_shared::Address;
 
@@ -444,6 +444,9 @@ t6:bool = eq t4, $0.l
 flag z = t6
 flag v = false
 flag c = false
+t7:w = ones t0
+t8:w = add t7, t7
+cycles t8
 ",
     ),
     (
@@ -462,6 +465,11 @@ t6:bool = eq t4, $0.l
 flag z = t6
 flag v = false
 flag c = false
+t7:w = shl t0, $1.b
+t8:w = xor t7, t0
+t9:w = ones t8
+t10:w = add t9, t9
+cycles t10
 ",
     ),
     (
@@ -491,6 +499,8 @@ t16:bool = and t14, t15
 flag z = t16
 flag v = t7
 flag c = false
+t17:l = divu_time t1, t3
+cycles t17
 ",
     ),
     (
@@ -521,6 +531,8 @@ t17:bool = and t15, t16
 flag z = t17
 flag v = t8
 flag c = false
+t18:l = divs_time t1, t3
+cycles t18
 ",
     ),
     (
@@ -537,6 +549,12 @@ flag v = false
 flag c = false
 t4:bool = lts t0, t1
 t5:bool = or t2, t4
+t6:w = sub t0, t1
+t7:bool = lts t6, $0.w
+t8:bool = not t7
+t9:bool = and t2, t8
+t10:b = select t9, $2.b, $0.b
+cycles t10
 if t5 exception 6 pc $001002
 ",
     ),
@@ -742,6 +760,8 @@ t12:bool = ne t1, $0.b
 t13:bool = flag x
 t14:bool = select t12, t7, t13
 flag x = t14
+t15:b = add t1, t1
+cycles t15
 ",
     ),
     (
@@ -784,6 +804,8 @@ flag v = false
 t11:bool = ne t1, $0.b
 t12:bool = and t11, t8
 flag c = t12
+t13:b = add t1, t1
+cycles t13
 ",
     ),
     (
@@ -841,6 +863,8 @@ t19:bool = ne t3, $0.b
 t20:bool = select t19, t16, t4
 flag c = t20
 flag x = t20
+t21:b = add t1, t1
+cycles t21
 ",
     ),
     (
@@ -880,6 +904,9 @@ flag z = t5
 t6:l = not t3
 t7:l = and t2, t6
 d0.l = t7
+t8:bool = ltu $f.b, t1
+t9:b = select t8, $2.b, $0.b
+cycles t9
 ",
     ),
     (
@@ -1120,6 +1147,7 @@ t1:w = sub t0, $1.w
 d0.w = t1
 t2:bool = ne t1, $ffff.w
 if t2 jump $000ffe
+cycles $2.b
 ",
     ),
     (
@@ -1130,6 +1158,8 @@ t0:bool = flag z
 t1:bool = not t0
 t2:b = select t1, $ff.b, $0.b
 d0.b = t2
+t3:b = select t1, $2.b, $0.b
+cycles t3
 ",
     ),
     (
@@ -1302,6 +1332,22 @@ fn test_lift_shapes_match_snapshots() {
         })
         .collect();
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn test_without_cycles_drops_charges_and_their_values() {
+    // muls.w d1,d0: the charge reads a chain of four temporaries.
+    let instruction = decode(&[0xC1C1]).expect("decodes");
+    let lifted = lift(&instruction, Address::new(ADDRESS)).expect("lifts");
+    let stripped = lifted.body.without_cycles();
+    validate(&stripped).expect("the stripped body validates");
+    assert!(
+        !stripped
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::Cycles { .. }))
+    );
+    assert_eq!(stripped.temps.len() + 4, lifted.body.temps.len());
 }
 
 #[test]

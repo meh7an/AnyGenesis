@@ -7,7 +7,7 @@ mod common;
 
 use anygenesis_rom::Rom;
 use anygenesis_runtime::{
-    Exit, Hardware, Options, Runtime, Vdp,
+    Exit, Hardware, Options, Runtime, Vdp, refresh,
     timing::{FRAME_CLOCKS, LINE_CLOCKS},
 };
 
@@ -258,10 +258,13 @@ fn test_dma_from_68000_memory_freezes_the_program_for_its_duration() {
     // 0x800 VRAM bytes at 167 a blanked H32 line: about 12 lines frozen.
     let stall = vdp.counts().stall_cycles;
     assert!((5_900..6_100).contains(&stall), "{stall} cycles");
-    // The loop takes 18 cycles a turn, so it turns stall / 18 fewer times.
+    // The loop takes 18 cycles a turn and refresh 2 per 128 of them, while the stall causes
+    // none, so it turns stall / (18 * 130 / 128) fewer times.
     let turns = |runtime: &Runtime| u64::from(runtime.state().d[0]);
     let lost = turns(&without) - turns(&with_dma);
-    assert!(lost.abs_diff(stall / 18) <= 2, "{lost} turns lost");
+    let interval = u64::from(refresh::INTERVAL);
+    let expected = stall * interval / (18 * (interval + u64::from(refresh::DELAY)));
+    assert!(lost.abs_diff(expected) <= 2, "{lost} turns lost");
     // The VDP's clock moved on by the stall like every other cycle.
     assert_eq!(vdp.timing().clock(), with_dma.cycles() * 7);
 }

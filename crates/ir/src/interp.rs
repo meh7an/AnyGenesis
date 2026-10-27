@@ -11,12 +11,14 @@ use crate::{
     eval,
     exception::exception_entry,
     lift::{lift, vector},
-    op::{Body, Control, Expr, Flag, Lifted, Op, Reg, ReturnKind, SR_MASK, SR_SUPERVISOR, Value},
+    op::{
+        Body, Control, Expr, Flag, Lifted, Op, PRIVILEGE_CYCLES, Reg, ReturnKind, SR_MASK,
+        SR_SUPERVISOR, Value,
+    },
 };
 
-/// Cycles the illegal-instruction and privilege-violation exceptions take (Table 8-14 of the
-/// 68000 manual). `Lifted::cycles` has one taken path, which for RTE and STOP is their
-/// normal exit, so a privilege violation is charged here instead.
+/// Cycles the illegal-instruction exception of an undecodable opcode takes (Table 8-14 of the
+/// 68000 manual).
 const TRAP_CYCLES: u16 = 34;
 
 /// The architectural state of a 68000.
@@ -172,6 +174,8 @@ pub struct Outcome {
     pub transfer: Option<Transfer>,
     /// Whether RESET asserted the reset line of the external devices.
     pub reset_devices: bool,
+    /// The cycles the body's `Op::Cycles` ops charged on the path it took.
+    pub cycles: u16,
 }
 
 /// One instruction executed by [`Interpreter::step`].
@@ -179,7 +183,8 @@ pub struct Outcome {
 pub struct Step {
     /// The instruction's address.
     pub address: Address,
-    /// The instruction's cycle estimate on the path it took, exception entry included.
+    /// The instruction's cycles on the path it took, data-dependent time and exception
+    /// entry included.
     pub cycles: u16,
     pub outcome: Outcome,
 }
@@ -232,12 +237,13 @@ impl Interpreter {
         };
         let cycles = match outcome.transfer {
             None => lifted.cycles.not_taken,
+            // As `Cycles::leaving` for the control that left.
             Some(Transfer::Exception {
                 vector: vector::PRIVILEGE,
                 ..
-            }) => TRAP_CYCLES,
+            }) => PRIVILEGE_CYCLES,
             Some(_) => lifted.cycles.taken,
-        };
+        } + outcome.cycles;
         Step {
             address,
             cycles,
@@ -277,6 +283,8 @@ impl Interpreter {
                     bus.write(size, address, self.value(value));
                 }
                 Op::ResetDevices => outcome.reset_devices = true,
+                // Data-dependent times stay far below u16::MAX (DIVS at most 160).
+                Op::Cycles { value } => outcome.cycles += self.value(value) as u16,
                 Op::Branch { condition, control } => {
                     if self.value(condition) != 0 {
                         outcome.transfer = Some(self.transfer(control));
@@ -307,6 +315,7 @@ impl Interpreter {
         Outcome {
             transfer: Some(Transfer::Exception { vector, pc }),
             reset_devices: entry.reset_devices,
+            cycles: 0,
         }
     }
 

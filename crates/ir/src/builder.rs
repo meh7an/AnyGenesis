@@ -252,6 +252,21 @@ impl Builder {
         self.binary_const(BinaryOp::Ne, masked, 0)
     }
 
+    /// Charges `value` data-dependent cycles; a constant 0 charges nothing.
+    pub(crate) fn cycles(&mut self, value: Value) {
+        if !matches!(value, Value::Const { value: 0, .. }) {
+            self.op(Op::Cycles { value });
+        }
+    }
+
+    /// `if_true` cycles when `condition` holds, else none.
+    pub(crate) fn cycles_if(&mut self, condition: Value, if_true: u32) {
+        let charge = Self::constant(Width::Byte, if_true);
+        let none = Self::constant(Width::Byte, 0);
+        let value = self.select(condition, charge, none);
+        self.cycles(value);
+    }
+
     pub(crate) fn branch(&mut self, condition: Value, control: Control) {
         self.op(Op::Branch { condition, control });
     }

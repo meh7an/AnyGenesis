@@ -75,6 +75,9 @@ struct Emitter<'a> {
     labels: BTreeSet<Address>,
     resume: BTreeSet<Address>,
     parts: Vec<Part>,
+    /// [`Printer::ahead`] for an exception frame taken by the current instruction: its own
+    /// cycles on the path that leaves, data-dependent ones included.
+    exception_ahead: String,
 }
 
 impl<'a> Emitter<'a> {
@@ -112,6 +115,7 @@ impl<'a> Emitter<'a> {
             labels: BTreeSet::new(),
             resume: BTreeSet::new(),
             parts: Vec::new(),
+            exception_ahead: NOTHING_AHEAD.to_owned(),
         }
     }
 
@@ -151,22 +155,36 @@ impl<'a> Emitter<'a> {
             }
             self.line(4, format!("AG_CHECK(s, {});", constant(address.get())));
         }
-        let segment_start = block_start || index == 0 || ends_segment(&self.slots[index - 1]);
-        if self.context.options.cycles && segment_start {
+        if self.context.options.cycles && self.starts_segment(index) {
             let cost = self.segment_cost(index);
             self.line(4, format!("AG_CYCLES(s, {cost});"));
         }
         self.comment(index);
         let next = self.slots.get(index + 1).map(|slot| slot.lifted.address);
         let slot = &self.slots[index];
-        let body = slot.lifted.body.clone();
+        let base = static_cost(&slot.lifted);
         let cycles = slot.lifted.cycles;
+        let charging = self.context.options.cycles;
+        let body = if charging {
+            slot.lifted.body.clone()
+        } else {
+            slot.lifted.body.without_cycles()
+        };
+        // The segment's cycles were charged at its start; from this instruction on they lie
+        // past the instruction's start.
+        let ahead = if charging {
+            self.segment_cost(index).to_string()
+        } else {
+            NOTHING_AHEAD.to_owned()
+        };
         let printer = Printer {
             body: &body,
             prefix: "t",
             rom_size: self.context.analysis.rom_size,
+            ahead: &ahead,
         };
         let used = used_temps(&body);
+        let mut charged = Vec::new();
         if !body.ops.is_empty() {
             self.line(4, "{");
         }
@@ -174,17 +192,28 @@ impl<'a> Emitter<'a> {
             match *op {
                 Op::Branch { condition, control } => {
                     self.line(8, format!("if ({}) {{", printer.value(condition)));
-                    if self.context.options.cycles && cycles.taken != cycles.not_taken {
-                        let extra = i32::from(cycles.taken) - i32::from(cycles.not_taken);
+                    // The segment charged the instruction's own path; this one may differ.
+                    let path = cycles.leaving(&control);
+                    if charging && path != base {
+                        let extra = i32::from(path) - i32::from(base);
                         self.line(12, format!("AG_CYCLES(s, {extra});"));
                     }
+                    self.exception_ahead = leaving_ahead(charging, path, &charged);
                     let lines = self.control(control, &printer, index, None);
                     self.lines(12, lines);
                     self.line(8, "}");
                 }
                 Op::Exit(control) => {
+                    let path = cycles.leaving(&control);
+                    self.exception_ahead = leaving_ahead(charging, path, &charged);
                     let lines = self.control(control, &printer, index, next);
                     self.lines(8, lines);
+                }
+                Op::Cycles { value } => {
+                    charged.push(printer.value(value));
+                    if let Some(statement) = printer.op(op, &used) {
+                        self.line(8, statement);
+                    }
                 }
                 _ => {
                     if let Some(statement) = printer.op(op, &used) {
@@ -228,23 +257,26 @@ impl<'a> Emitter<'a> {
     /// Cycles of the instructions from `index` up to the next one that can leave early, as
     /// they cost when nothing leaves.
     fn segment_cost(&self, index: usize) -> i32 {
-        let block = self.slots[index].block;
         let mut cost = 0;
-        for slot in &self.slots[index..] {
-            if !std::ptr::eq(slot.block, block) {
+        for at in index..self.slots.len() {
+            if at != index && self.starts_segment(at) {
                 break;
             }
-            let cycles = slot.lifted.cycles;
-            cost += i32::from(if slot.lifted.body.falls_through() {
-                cycles.not_taken
-            } else {
-                cycles.taken
-            });
-            if ends_segment(slot) {
-                break;
-            }
+            cost += i32::from(static_cost(&self.slots[at].lifted));
         }
         cost
+    }
+
+    /// Whether the instruction at `index` starts a segment, which charges the static cycles
+    /// up to the next one: at a block start, after an instruction that can leave early, and
+    /// where an exception taken by the instruction itself resumes (its frame holds the
+    /// instruction's own address: a privilege violation, ILLEGAL, line A and F).
+    fn starts_segment(&self, index: usize) -> bool {
+        let slot = &self.slots[index];
+        index == 0
+            || slot.lifted.address == slot.block.start
+            || ends_segment(&self.slots[index - 1])
+            || resumes_at_itself(&slot.lifted)
     }
 
     /// Returns the statements for `control`; `next` is the address emitted right after this
@@ -413,10 +445,12 @@ impl<'a> Emitter<'a> {
             _ => None,
         };
         let handler = self.context.handlers.get(&vector).copied();
+        let ahead = self.exception_ahead.clone();
         let printer = Printer {
             body: &entry,
             prefix: "e",
             rom_size: self.context.analysis.rom_size,
+            ahead: &ahead,
         };
         let used = used_temps(&entry);
         let mut setup = Vec::new();
@@ -435,7 +469,7 @@ impl<'a> Emitter<'a> {
         } else {
             let address = match handler_temp {
                 Some(temp) => printer.value(Value::Temp(temp)),
-                None => format!("ag_load32(s, {})", constant(u32::from(vector) * 4)),
+                None => format!("ag_load32(s, {}, {ahead})", constant(u32::from(vector) * 4)),
             };
             setup.push(format!(
                 "uint32_t handler = {address} & {};",
@@ -553,6 +587,44 @@ impl<'a> Emitter<'a> {
 }
 
 /// Whether control can leave the function body at this instruction.
+/// The static cycles of `lifted` when no branch leaves it: through its `Exit`, or falling
+/// through.
+fn static_cost(lifted: &Lifted) -> u16 {
+    match lifted.body.ops.last() {
+        Some(Op::Exit(control)) => lifted.cycles.leaving(control),
+        _ => lifted.cycles.not_taken,
+    }
+}
+
+/// [`Printer::ahead`] when nothing is charged past the instruction's start.
+const NOTHING_AHEAD: &str = "0";
+
+/// [`Printer::ahead`] where an instruction leaves: its `taken` cycles were charged by now,
+/// with the data-dependent values in `charged` (C expressions) on top.
+fn leaving_ahead(charging: bool, taken: u16, charged: &[String]) -> String {
+    if !charging {
+        return NOTHING_AHEAD.to_owned();
+    }
+    let mut ahead = taken.to_string();
+    for value in charged {
+        ahead.push_str(&format!(" + (int32_t){value}"));
+    }
+    ahead
+}
+
+/// Whether an exception `lifted` takes pushes its own address, so its handler returns to it.
+fn resumes_at_itself(lifted: &Lifted) -> bool {
+    lifted.body.ops.iter().any(|op| {
+        matches!(
+            op,
+            Op::Branch {
+                control: Control::Exception { pc, .. },
+                ..
+            } | Op::Exit(Control::Exception { pc, .. }) if *pc == lifted.address
+        )
+    })
+}
+
 fn ends_segment(slot: &Slot<'_>) -> bool {
     slot.lifted
         .body

@@ -1,6 +1,6 @@
 //! Branches, jumps, calls, returns, exceptions, STOP and RESET.
 
-use anygenesis_m68k::{Condition, Operand};
+use anygenesis_m68k::{Condition, Ea, Operand};
 use anygenesis_shared::{Address, Size};
 
 use super::{LiftError, Lifter, vector};
@@ -103,18 +103,28 @@ impl Lifter<'_> {
         let not_done = self.out.not(done);
         let taken = self.out.and(not_done, looping);
         self.out.branch(taken, Control::Jump(target));
+        // Falling through because the counter expired takes 2 cycles more than because the
+        // condition held.
+        self.out.cycles_if(not_done, 2);
         Ok(())
     }
 
     /// Scc: 0xFF when the condition holds, else 0. The 68000 reads a memory operand first;
-    /// that extra read is not modelled.
+    /// that extra read is not modelled. On a register a true condition costs 2 cycles more.
     pub(super) fn set_conditional(&mut self, condition: Condition) -> Result<(), LiftError> {
         let holds = self.condition(condition);
         let place = self.place(0, Size::Byte)?;
         let set = Builder::constant(Width::Byte, 0xFF);
         let clear = Builder::constant(Width::Byte, 0);
         let value = self.out.select(holds, set, clear);
-        self.write(place, Size::Byte, value)
+        self.write(place, Size::Byte, value)?;
+        if matches!(
+            self.instruction.operands[0],
+            Some(Operand::Ea(Ea::DataRegister(_)))
+        ) {
+            self.out.cycles_if(holds, 2);
+        }
+        Ok(())
     }
 
     /// JMP: a constant address (absolute or PC-relative) is a known jump.

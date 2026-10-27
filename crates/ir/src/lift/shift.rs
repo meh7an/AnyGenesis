@@ -62,6 +62,24 @@ impl Lifter<'_> {
             ),
             _ => return Err(self.malformed()),
         };
+        self.shift_place(kind, size, place, count, register_count)?;
+        if register_count {
+            // Two cycles per step of a register count (Table 8-7); quick counts are static.
+            let cycles = self.out.binary(BinaryOp::Add, count, count);
+            self.out.cycles(cycles);
+        }
+        Ok(())
+    }
+
+    /// Shifts or rotates the operand at `place` by `count` and sets the flags.
+    fn shift_place(
+        &mut self,
+        kind: Kind,
+        size: Size,
+        place: super::operand::Place,
+        count: Value,
+        register_count: bool,
+    ) -> Result<(), LiftError> {
         let value = self.read(place, size);
         let width = Width::from(size).bits();
         let shifted = match kind {
@@ -240,6 +258,14 @@ impl Lifter<'_> {
             }
             BitOp::Set => self.out.or(value, mask),
         };
-        self.write(place, size, result)
+        self.write(place, size, result)?;
+        // Changing a bit of a data register's upper word costs 2 cycles more; for a constant
+        // bit number the static time holds it.
+        if size == Size::Long && matches!(number, Value::Temp(_)) {
+            let fifteen = Builder::constant(Width::Byte, 15);
+            let upper = self.out.binary(BinaryOp::LtU, fifteen, number);
+            self.out.cycles_if(upper, 2);
+        }
+        Ok(())
     }
 }

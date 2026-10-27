@@ -26,7 +26,7 @@ pub use exception::{exception_entry, interrupt_entry};
 pub use flags::FlagSet;
 pub use lift::{LiftError, lift};
 pub use op::{
-    BinaryOp, Body, Control, ConvertOp, Cycles, Expr, Flag, FlagOp, Lifted, Op, Reg, ReturnKind,
-    SR_MASK, SR_SUPERVISOR, SR_TRACE, ShiftOp, Temp, UnaryOp, Value, Width,
+    BinaryOp, Body, Control, ConvertOp, Cycles, Expr, Flag, FlagOp, Lifted, Op, PRIVILEGE_CYCLES,
+    Reg, ReturnKind, SR_MASK, SR_SUPERVISOR, SR_TRACE, ShiftOp, Temp, UnaryOp, Value, Width,
 };
 pub use validate::{ValidationError, validate};

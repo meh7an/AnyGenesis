@@ -1,9 +1,10 @@
 //! Runs the whole SingleStepTests/m68000 suite through decode, lift and the IR interpreter.
 //!
-//! A case passes when D0-D7, A0-A6, USP, SSP, SR, PC (its 24 address bits) and RAM match.
-//! Cases that raise an address error are excluded (the CPU fidelity bar does not model
-//! them); every other case must pass. Cycle estimates are compared with the suite's counts
-//! and reported, never gated. Bus transactions and prefetch are not compared.
+//! A case passes when D0-D7, A0-A6, USP, SSP, SR, PC (its 24 address bits), RAM and the
+//! cycle count match. Cases that raise an address error are excluded (the CPU fidelity bar
+//! does not model them); every other case must pass. A cycle count may differ only where
+//! [`CYCLE_EXCEPTIONS`] lists it, each signed off by Mehran. Bus transactions and prefetch are
+//! not compared.
 //!
 //! Needs `cargo xtask fetch-sst`. Run with
 //! `cargo test -p anygenesis-ir --test sst -- --ignored --nocapture`; the report lands in
@@ -43,6 +44,20 @@ const SAMPLE_FAILURES: usize = 3;
 /// Files listed in the report's largest-cycle-error section.
 const WORST_CYCLE_FILES: usize = 10;
 
+/// Cycle mismatches kept per file for the report.
+const SAMPLE_CYCLE_MISMATCHES: usize = 12;
+
+/// Cases whose cycle count may differ from the suite's, each signed off by Mehran.
+struct CycleException {
+    /// The suite file the cases come from.
+    file: &'static str,
+    /// Whether a case of that file is covered.
+    covers: fn(&TestCase) -> bool,
+    reason: &'static str,
+}
+
+const CYCLE_EXCEPTIONS: &[CycleException] = &[];
+
 #[derive(Debug, Default)]
 struct FileReport {
     cases: usize,
@@ -51,12 +66,16 @@ struct FileReport {
     /// Checked cases whose expected PC has bits above the 24 the IR models.
     pc_upper_byte: usize,
     cycle_exact: usize,
-    /// Sums over checked cases of |estimate - actual| and of estimate - actual.
+    /// Checked cases a [`CycleException`] covers, and those of them whose count differs.
+    cycle_excepted: usize,
+    cycle_excepted_differing: usize,
+    /// Sums over checked cases of |ours - actual| and of ours - actual.
     cycle_absolute_error: u64,
     cycle_signed_error: i64,
     /// Mismatch counts per state field.
     mismatches: BTreeMap<&'static str, usize>,
     sample_failures: Vec<String>,
+    sample_cycle_mismatches: Vec<String>,
 }
 
 impl FileReport {
@@ -70,6 +89,8 @@ impl FileReport {
         self.passed += other.passed;
         self.pc_upper_byte += other.pc_upper_byte;
         self.cycle_exact += other.cycle_exact;
+        self.cycle_excepted += other.cycle_excepted;
+        self.cycle_excepted_differing += other.cycle_excepted_differing;
         self.cycle_absolute_error += other.cycle_absolute_error;
         self.cycle_signed_error += other.cycle_signed_error;
     }
@@ -102,7 +123,11 @@ fn test_sst_suite_through_ir_interpreter_passes() {
     let mut interpreter = Interpreter::default();
     let reports: Vec<(String, FileReport)> = files
         .iter()
-        .map(|path| (file_name(path), run_file(&mut interpreter, path)))
+        .map(|path| {
+            let name = file_name(path);
+            let report = run_file(&mut interpreter, path, &name);
+            (name, report)
+        })
         .collect();
 
     let report = render(&reports);
@@ -149,8 +174,12 @@ impl Bus for Memory {
     }
 }
 
-fn run_file(interpreter: &mut Interpreter, path: &Path) -> FileReport {
+fn run_file(interpreter: &mut Interpreter, path: &Path, name: &str) -> FileReport {
     let cases = sst::load_file(path).unwrap_or_else(|error| panic!("{error}"));
+    let exceptions: Vec<&CycleException> = CYCLE_EXCEPTIONS
+        .iter()
+        .filter(|exception| exception.file == name)
+        .collect();
     let mut report = FileReport {
         cases: cases.len(),
         ..FileReport::default()
@@ -162,7 +191,20 @@ fn run_file(interpreter: &mut Interpreter, path: &Path) -> FileReport {
         }
         let (cpu, mut memory, step) = run_case(interpreter, case);
         report.pc_upper_byte += usize::from(case.expected.registers.pc & !PC_BITS != 0);
-        let fields = mismatched_fields(&cpu, &mut memory, &step, case);
+        let mut fields = mismatched_fields(&cpu, &mut memory, &step, case);
+        let excepted = exceptions.iter().any(|exception| (exception.covers)(case));
+        let cycles_differ = u32::from(step.cycles) != case.cycles;
+        report.cycle_excepted += usize::from(excepted);
+        report.cycle_excepted_differing += usize::from(excepted && cycles_differ);
+        if cycles_differ && !excepted {
+            fields.push("cycles");
+            if report.sample_cycle_mismatches.len() < SAMPLE_CYCLE_MISMATCHES {
+                report.sample_cycle_mismatches.push(format!(
+                    "{}: ours {}, suite {}",
+                    case.name, step.cycles, case.cycles
+                ));
+            }
+        }
         if fields.is_empty() {
             report.passed += 1;
         } else if report.sample_failures.len() < SAMPLE_FAILURES {
@@ -313,10 +355,26 @@ fn render(reports: &[(String, FileReport)]) -> String {
         );
     }
 
+    let _ = writeln!(
+        out,
+        "\nCycle exceptions: {} checked cases covered, {} of them differing.",
+        total.cycle_excepted, total.cycle_excepted_differing
+    );
+    for exception in CYCLE_EXCEPTIONS {
+        let _ = writeln!(out, "- {}: {}", exception.file, exception.reason);
+    }
+
     out.push_str("\nSample failures:\n\n");
     for (name, report) in reports {
         for failure in &report.sample_failures {
             let _ = writeln!(out, "- {name}: {failure}");
+        }
+    }
+
+    out.push_str("\nSample cycle mismatches:\n\n");
+    for (name, report) in reports {
+        for mismatch in &report.sample_cycle_mismatches {
+            let _ = writeln!(out, "- {name}: {mismatch}");
         }
     }
     out

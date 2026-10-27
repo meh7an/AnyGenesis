@@ -68,6 +68,7 @@ impl UnaryOp {
         match self {
             Self::Not => "not",
             Self::Neg => "neg",
+            Self::Ones => "ones",
         }
     }
 }
@@ -89,6 +90,8 @@ impl BinaryOp {
             Self::Ne => "ne",
             Self::LtU => "ltu",
             Self::LtS => "lts",
+            Self::DivuTime => "divu_time",
+            Self::DivsTime => "divs_time",
         }
     }
 }
@@ -202,6 +205,7 @@ impl Body {
                 value,
             } => write!(f, "store.{} {address}, {value}", size_suffix(size)),
             Op::ResetDevices => f.write_str("reset devices"),
+            Op::Cycles { value } => write!(f, "cycles {value}"),
             Op::Branch { condition, control } => write!(f, "if {condition} {control}"),
             Op::Exit(control) => write!(f, "{control}"),
         }

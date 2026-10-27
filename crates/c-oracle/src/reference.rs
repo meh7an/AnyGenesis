@@ -141,6 +141,8 @@ impl Stop {
 pub struct Outcome {
     pub stop: Stop,
     pub steps: u64,
+    /// The cycles the steps took, as the interpreter charges them.
+    pub cycles: u64,
     /// Returns the translated code must resume at its top level, in order.
     pub arrivals: Vec<Address>,
     /// The flags translated code must agree on.
@@ -260,6 +262,7 @@ impl<'a> Reference<'a> {
         let mut current = start.function;
         let mut arrivals = Vec::new();
         let mut trail = Trail::default();
+        let mut cycles = 0;
         for steps in 0..cap {
             let pc = machine.cpu.pc;
             let lifted = self
@@ -269,10 +272,13 @@ impl<'a> Reference<'a> {
                 .ok_or_else(|| format!("no analysed instruction at {pc:06x}{trail}"))?;
             trail.push(pc);
             let mut watch = Watch::default();
+            // Every access of an instruction happens at its start.
+            machine.io.now = cycles;
             let step = {
                 let (cpu, mut bus) = machine.split(self.rom, Some(&mut watch));
                 self.interpreter.run(lifted, cpu, &mut bus)
             };
+            cycles += u64::from(step.cycles);
             if let Some(lockstep) = lockstep.as_deref_mut() {
                 let instruction = &self.analysis.instructions[&pc];
                 lockstep
@@ -319,6 +325,7 @@ impl<'a> Reference<'a> {
                 return Ok(Outcome {
                     stop,
                     steps: steps + 1,
+                    cycles,
                     arrivals,
                     live,
                     machine,
@@ -329,6 +336,7 @@ impl<'a> Reference<'a> {
         Ok(Outcome {
             stop: Stop::Cap,
             steps: cap,
+            cycles,
             arrivals,
             live: FlagSet::EMPTY,
             machine,

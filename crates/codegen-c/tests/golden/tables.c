@@ -36,9 +36,9 @@ L_000200:;
                 ag_write_sr(s, e2);
                 uint32_t e3 = s->a[7];
                 uint32_t e4 = e3 - 0x6u;
-                ag_store16(s, e4, e0);
+                ag_store16(s, e4, e0, 0);
                 uint32_t e5 = e4 + 0x2u;
-                ag_store32(s, e5, 0x200u);
+                ag_store32(s, e5, 0x200u, 0);
                 s->a[7] = e4;
                 uint32_t next = f_000200(s, 0x200u);
                 if (next != 0x200u)
@@ -47,11 +47,11 @@ L_000200:;
             goto L_000200;
         }
         uint32_t t2 = s->a[7];
-        uint32_t t3 = ag_load16(s, t2);
+        uint32_t t3 = ag_load16(s, t2, 0);
         uint32_t t4 = t2 + 0x2u;
         s->a[7] = t4;
         uint32_t t5 = s->a[7];
-        uint32_t t6 = ag_load32(s, t5);
+        uint32_t t6 = ag_load32(s, t5, 0);
         uint32_t t7 = t5 + 0x4u;
         s->a[7] = t7;
         ag_write_sr(s, t3);
@@ -72,7 +72,7 @@ uint32_t f_000300(AgState *s, uint32_t pc)
         uint32_t t0 = (s->d[0]) & 0xFFFFu;
         uint32_t t1 = ag_sext(t0, 16u);
         uint32_t t2 = 0x308u + t1;
-        uint32_t t3 = ag_load16(s, t2);
+        uint32_t t3 = ag_load16(s, t2, 0);
         s->d[1] = (s->d[1] & 0xFFFF0000u) | t3;
         uint32_t t4 = ag_lts(t3, 0x0u, 16u);
         s->n = (uint8_t)t4;
@@ -107,7 +107,7 @@ L_00030C:;
         uint32_t t0 = s->a[1];
         uint32_t t1 = s->a[7];
         uint32_t t2 = t1 - 0x4u;
-        ag_store32(s, t2, 0x30Eu);
+        ag_store32(s, t2, 0x30Eu, 0);
         s->a[7] = t2;
         {
             uint32_t target = t0 & 0xFFFFFFu;
@@ -147,7 +147,7 @@ uint32_t f_000410(AgState *s, uint32_t pc)
     /* 000410  rts */
     {
         uint32_t t0 = s->a[7];
-        uint32_t t1 = ag_load32(s, t0);
+        uint32_t t1 = ag_load32(s, t0, 0);
         uint32_t t2 = t0 + 0x4u;
         s->a[7] = t2;
         return t1 & 0xFFFFFFu;
@@ -168,7 +168,7 @@ uint32_t f_000420(AgState *s, uint32_t pc)
     /* 000422  rts */
     {
         uint32_t t0 = s->a[7];
-        uint32_t t1 = ag_load32(s, t0);
+        uint32_t t1 = ag_load32(s, t0, 0);
         uint32_t t2 = t0 + 0x4u;
         s->a[7] = t2;
         return t1 & 0xFFFFFFu;

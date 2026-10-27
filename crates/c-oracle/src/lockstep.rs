@@ -75,6 +75,8 @@ impl Lockstep {
         watch: &Watch,
     ) -> Result<(), String> {
         let mut own = Watch::default();
+        // Musashi's timing is not compared: its accesses get the reference's times.
+        self.io.now = machine.io.now;
         {
             let mut bus = SystemBus {
                 ram: &mut self.ram,

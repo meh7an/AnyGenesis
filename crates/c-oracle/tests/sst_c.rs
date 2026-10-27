@@ -1,6 +1,6 @@
 //! The translated SingleStepTests sample: each case's one-instruction function runs from the
 //! case's initial state, and D0-D7, A0-A6, USP, SSP, SR, PC (24 bits) and RAM must match the
-//! expected state, as in M2.2.
+//! expected state, as in M2.2, and the cycles the code charged the suite's count (M1.1).
 //!
 //! Needs `cargo xtask fetch-sst` before the crate is built (the build script translates the
 //! sample). Run with `cargo test -p anygenesis-c-oracle --test sst_c -- --ignored
@@ -249,6 +249,10 @@ fn mismatched_fields(
         .any(|&(at, value)| byte(at & PC_BITS) != value)
     {
         fields.push("RAM");
+    }
+    // The count started at 0 and only went down.
+    if i64::from(state.cycles) != -i64::from(case.cycles) {
+        fields.push("cycles");
     }
     fields
 }

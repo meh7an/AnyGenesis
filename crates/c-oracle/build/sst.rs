@@ -225,7 +225,9 @@ fn translate(prepared: &Prepared, prefix: &str) -> Output {
         "a flag was pruned at {:06x}",
         prepared.address.get()
     );
+    // Cycle accounting without check points: the state's count is the instruction's time.
     let options = EmitOptions {
+        cycles: true,
         symbol_prefix: prefix.to_owned(),
         ..EmitOptions::default()
     };

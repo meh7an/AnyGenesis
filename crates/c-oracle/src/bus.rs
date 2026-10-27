@@ -27,6 +27,8 @@ pub struct Access {
     pub size: Size,
     pub address: u32,
     pub value: u16,
+    /// The run's cycle count when it happened: the start of its instruction.
+    pub time: u64,
 }
 
 /// What a bus saw during one instruction, for the lockstep comparison.
@@ -114,12 +116,14 @@ impl Bus for SystemBus<'_> {
 
 /// I/O for function runs: reads answer from a seeded hash of the address and of how often
 /// it was read before, so every side sees the same values whatever else it reads; writes
-/// are dropped. Every access is logged.
+/// are dropped. Every access is logged with the time its side set in `now`.
 #[derive(Debug, Clone)]
 pub struct Io {
     seed: u64,
     reads: HashMap<u32, u64>,
     pub log: Vec<Access>,
+    /// The cycle count the next access happens at.
+    pub now: u64,
 }
 
 impl Io {
@@ -128,6 +132,7 @@ impl Io {
             seed,
             reads: HashMap::new(),
             log: Vec::new(),
+            now: 0,
         }
     }
 }
@@ -143,6 +148,7 @@ impl Device for Io {
             size,
             address: address.get(),
             value,
+            time: self.now,
         });
         value
     }
@@ -153,6 +159,7 @@ impl Device for Io {
             size,
             address: address.get(),
             value,
+            time: self.now,
         });
     }
 }

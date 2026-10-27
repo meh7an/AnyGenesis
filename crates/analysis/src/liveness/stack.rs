@@ -137,7 +137,8 @@ fn evaluate(body: &Body, mut frame: Frame, mut exit: impl FnMut(&Control, Frame)
             | Op::SetFlag { .. }
             | Op::WriteCcr { .. }
             | Op::Store { .. }
-            | Op::ResetDevices => {}
+            | Op::ResetDevices
+            | Op::Cycles { .. } => {}
         }
     }
     frame

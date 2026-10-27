@@ -106,7 +106,11 @@ pub fn written(body: &Body, mut exit: impl FnMut(&Control, FlagSet)) -> FlagSet 
             Op::SetFlag { flag, .. } => written |= FlagSet::of(flag),
             Op::WriteSr { .. } | Op::WriteCcr { .. } => written = FlagSet::ALL,
             Op::Branch { control, .. } | Op::Exit(control) => exit(&control, written),
-            Op::Let { .. } | Op::WriteReg { .. } | Op::Store { .. } | Op::ResetDevices => {}
+            Op::Let { .. }
+            | Op::WriteReg { .. }
+            | Op::Store { .. }
+            | Op::ResetDevices
+            | Op::Cycles { .. } => {}
         }
     }
     written
@@ -122,10 +126,20 @@ pub fn prune(body: &Body, live_out: FlagSet, exit: impl FnMut(&Control) -> FlagS
             dead_flags[index] = !live.contains(flag);
         }
     });
-    let keep = kept_ops(body, &dead_flags);
+    rebuild(body, &kept_ops(body, &dead_flags))
+}
+
+/// Returns `body` without the ops `dropped` marks and without the pure `Let`s only they
+/// used, the temporaries renumbered.
+pub(crate) fn without(body: &Body, dropped: &[bool]) -> Body {
+    rebuild(body, &kept_ops(body, dropped))
+}
+
+/// The ops of `body` that `keep` marks, the temporaries renumbered in order.
+fn rebuild(body: &Body, keep: &[bool]) -> Body {
     let mut renamed = vec![None; body.temps.len()];
     let mut pruned = Body::default();
-    for (op, _) in body.ops.iter().zip(&keep).filter(|(_, kept)| **kept) {
+    for (op, _) in body.ops.iter().zip(keep).filter(|(_, kept)| **kept) {
         let mut op = *op;
         rename_op(&mut op, &renamed);
         if let Op::Let { dst, .. } = &mut op {
@@ -167,21 +181,25 @@ fn walk_backward(
             Op::Let {
                 expr: Expr::ReadSr, ..
             } => live = FlagSet::ALL,
-            Op::Let { .. } | Op::WriteReg { .. } | Op::Store { .. } | Op::ResetDevices => {}
+            Op::Let { .. }
+            | Op::WriteReg { .. }
+            | Op::Store { .. }
+            | Op::ResetDevices
+            | Op::Cycles { .. } => {}
         }
     }
     live
 }
 
-/// Marks the ops to keep: everything but the dead `SetFlag`s and the side-effect-free
-/// `Let`s whose temporaries nothing kept uses.
-fn kept_ops(body: &Body, dead_flags: &[bool]) -> Vec<bool> {
+/// Marks the ops to keep: everything but the `SetFlag` and `Cycles` ops `dropped` marks and
+/// the side-effect-free `Let`s whose temporaries nothing kept uses.
+fn kept_ops(body: &Body, dropped: &[bool]) -> Vec<bool> {
     let mut used = vec![false; body.temps.len()];
     let mut keep = vec![false; body.ops.len()];
     for (index, op) in body.ops.iter().enumerate().rev() {
         keep[index] = match op {
             Op::Let { dst, expr } => used[dst.index()] || matches!(expr, Expr::Load { .. }),
-            Op::SetFlag { .. } => !dead_flags[index],
+            Op::SetFlag { .. } | Op::Cycles { .. } => !dropped[index],
             _ => true,
         };
         if keep[index] {
@@ -247,7 +265,8 @@ fn for_each_operand_mut(op: &mut Op, mut visit: impl FnMut(&mut Value)) {
         Op::WriteReg { value, .. }
         | Op::SetFlag { value, .. }
         | Op::WriteSr { value }
-        | Op::WriteCcr { value } => visit(value),
+        | Op::WriteCcr { value }
+        | Op::Cycles { value } => visit(value),
         Op::Store { address, value, .. } => {
             visit(address);
             visit(value);

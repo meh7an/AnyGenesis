@@ -14,6 +14,7 @@ pub mod hardware;
 pub mod io;
 pub mod log;
 mod machine;
+pub mod refresh;
 pub mod timing;
 pub mod vdp;
 pub mod z80;

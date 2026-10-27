@@ -25,6 +25,8 @@ pub trait Host {
     /// `ag_check`: returns where execution continues.
     fn check(&mut self, state: &mut AgState, pc: Address) -> u32;
     fn reset_devices(&mut self);
+    /// Called before each bus extern with the state's cycle count at that moment.
+    fn clock(&mut self, _cycles: i32) {}
 }
 
 /// The function `ag_lookup` hands out when a run must end: it returns [`POISON`].
@@ -75,6 +77,7 @@ unsafe fn with_bus<T>(state: *mut AgState, body: impl FnOnce(&mut SystemBus<'_>)
     // SAFETY: forwarded from the caller.
     unsafe {
         with_host(state, |state, host| {
+            host.clock(state.cycles);
             let (rom, device) = host.memory();
             let mut bus = SystemBus {
                 ram: &mut state.ram,

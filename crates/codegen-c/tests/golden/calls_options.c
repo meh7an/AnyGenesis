@@ -33,6 +33,7 @@ L_000200:;
         uint32_t t0 = ag_supervisor(s);
         uint32_t t1 = t0 ^ 1u;
         if (t1) {
+            AG_CYCLES(s, 14);
             {
                 uint32_t e0 = ag_read_sr(s);
                 uint32_t e1 = e0 | 0x2000u;
@@ -40,9 +41,9 @@ L_000200:;
                 ag_write_sr(s, e2);
                 uint32_t e3 = s->a[7];
                 uint32_t e4 = e3 - 0x6u;
-                ag_store16(s, e4, e0);
+                ag_store16(s, e4, e0, 34);
                 uint32_t e5 = e4 + 0x2u;
-                ag_store32(s, e5, 0x200u);
+                ag_store32(s, e5, 0x200u, 34);
                 s->a[7] = e4;
                 uint32_t next = f_000200(s, 0x200u);
                 if (next != 0x200u)
@@ -51,11 +52,11 @@ L_000200:;
             goto L_000200;
         }
         uint32_t t2 = s->a[7];
-        uint32_t t3 = ag_load16(s, t2);
+        uint32_t t3 = ag_load16(s, t2, 20);
         uint32_t t4 = t2 + 0x2u;
         s->a[7] = t4;
         uint32_t t5 = s->a[7];
-        uint32_t t6 = ag_load32(s, t5);
+        uint32_t t6 = ag_load32(s, t5, 20);
         uint32_t t7 = t5 + 0x4u;
         s->a[7] = t7;
         ag_write_sr(s, t3);
@@ -84,7 +85,7 @@ uint32_t f_000300(AgState *s, uint32_t pc)
     {
         uint32_t t0 = s->a[7];
         uint32_t t1 = t0 - 0x4u;
-        ag_store32(s, t1, 0x304u);
+        ag_store32(s, t1, 0x304u, 18);
         s->a[7] = t1;
         {
             uint32_t next = f_000400(s, 0x400u);
@@ -99,7 +100,7 @@ L_000304:;
     {
         uint32_t t0 = s->a[7];
         uint32_t t1 = t0 - 0x4u;
-        ag_store32(s, t1, 0x30Au);
+        ag_store32(s, t1, 0x30Au, 20);
         s->a[7] = t1;
         {
             uint32_t next = f_000500(s, 0x500u);
@@ -198,6 +199,7 @@ L_000402:;
             AG_CYCLES(s, -2);
             goto L_000402;
         }
+        AG_CYCLES(s, (int32_t)0x2u);
     }
 L_000408:;
     AG_CHECK(s, 0x408u);
@@ -206,7 +208,7 @@ L_000408:;
 #line 20 "synthetic.asm"
     {
         uint32_t t0 = s->a[7];
-        uint32_t t1 = ag_load32(s, t0);
+        uint32_t t1 = ag_load32(s, t0, 16);
         uint32_t t2 = t0 + 0x4u;
         s->a[7] = t2;
         return t1 & 0xFFFFFFu;
@@ -234,14 +236,14 @@ uint32_t f_000500(AgState *s, uint32_t pc)
 #line 23 "synthetic.asm"
     {
         uint32_t t0 = s->a[1];
-        uint32_t t1 = ag_load8(s, t0);
+        uint32_t t1 = ag_load8(s, t0, 60);
         s->d[3] = (s->d[3] & 0xFFFFFF00u) | t1;
     }
     /* 00050A  move.w  d1, $a10000.l */
 #line 24 "synthetic.asm"
     {
         uint32_t t0 = (s->d[1]) & 0xFFFFu;
-        ag_write16(s, 0xA10000u, t0);
+        ag_bus_write16(s, 0xA10000u, t0, 52);
     }
     /* 000510  move.l  d3, -(a7) */
 #line 25 "synthetic.asm"
@@ -250,7 +252,7 @@ uint32_t f_000500(AgState *s, uint32_t pc)
         uint32_t t1 = s->a[7];
         uint32_t t2 = t1 - 0x4u;
         s->a[7] = t2;
-        ag_store32(s, t2, t0);
+        ag_store32(s, t2, t0, 36);
     }
     /* 000512  addq.l  #4, a7 */
 #line 26 "synthetic.asm"
@@ -263,7 +265,7 @@ uint32_t f_000500(AgState *s, uint32_t pc)
 #line 27 "synthetic.asm"
     {
         uint32_t t0 = s->a[7];
-        uint32_t t1 = ag_load32(s, t0);
+        uint32_t t1 = ag_load32(s, t0, 16);
         uint32_t t2 = t0 + 0x4u;
         s->a[7] = t2;
         return t1 & 0xFFFFFFu;
@@ -279,7 +281,7 @@ uint32_t f_000600(AgState *s, uint32_t pc)
 #line 28 "synthetic.asm"
     {
         uint32_t t0 = s->a[7];
-        uint32_t t1 = ag_load32(s, t0);
+        uint32_t t1 = ag_load32(s, t0, 16);
         uint32_t t2 = t0 + 0x4u;
         s->a[7] = t2;
         return t1 & 0xFFFFFFu;

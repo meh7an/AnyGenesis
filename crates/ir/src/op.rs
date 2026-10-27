@@ -128,6 +128,8 @@ pub enum UnaryOp {
     Not,
     /// Two's complement negation, wrapping.
     Neg,
+    /// The number of set bits (data-dependent MULU/MULS timing).
+    Ones,
 }
 
 /// A two-operand operation over operands of one width.
@@ -157,6 +159,16 @@ pub enum BinaryOp {
     LtU,
     /// Signed less than; the result is `Bool`.
     LtS,
+    /// The cycles DIVU's division takes past its static time, for the dividend `left` and
+    /// the divisor in the low 16 bits of `right` (`Long`, nonzero): 10 when the quotient
+    /// cannot fit, else 16 plus 4, 6 or 8 per step of a 15-step restoring division. Fitted
+    /// to SingleStepTests (M1.1).
+    DivuTime,
+    /// As [`BinaryOp::DivuTime`] for DIVS, on the low 16 bits of `right` as a signed divisor:
+    /// 16 (18 for a negative dividend) when the magnitudes cannot fit, else 150, plus 4 for
+    /// a negative dividend and 2 for a negative quotient, minus 2 per set bit in bits 15-1
+    /// of the magnitudes' quotient. Fitted to SingleStepTests (M1.1).
+    DivsTime,
 }
 
 impl BinaryOp {
@@ -277,6 +289,11 @@ pub enum Op {
     },
     /// RESET: asserts the reset line of the external devices; the CPU itself is unaffected.
     ResetDevices,
+    /// Charges `value` (a sized width) cycles on top of [`Lifted::cycles`]: the part of the
+    /// instruction's time that depends on data. It comes after every `Load` and `Store` of
+    /// its instruction, so device accesses see the instruction's start time in every
+    /// consumer; one after a taken `Branch` does not run.
+    Cycles { value: Value },
     /// Leaves the instruction through `control` when `condition` (`Bool`) holds.
     Branch { condition: Value, control: Control },
     /// Leaves the instruction through `control`. Only ever the last op; an instruction
@@ -341,16 +358,46 @@ impl Body {
     pub fn falls_through(&self) -> bool {
         !matches!(self.ops.last(), Some(Op::Exit(_)))
     }
+
+    /// Returns the body without its [`Op::Cycles`] ops and the values only they read, for
+    /// consumers that keep no time. The temporaries are renumbered, so the result validates.
+    pub fn without_cycles(&self) -> Self {
+        let charges: Vec<bool> = self
+            .ops
+            .iter()
+            .map(|op| matches!(op, Op::Cycles { .. }))
+            .collect();
+        crate::flags::without(self, &charges)
+    }
 }
 
-/// Cycle estimates for one instruction, from the 68000 manual's timing tables. Approximate by
-/// design: the CPU fidelity bar does not require exact timing.
+/// The static cycles of one instruction per path, opcode fetch and prefetch included; the
+/// data-dependent rest comes from its [`Op::Cycles`] ops. Together they equal SingleStepTests'
+/// counts (M1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cycles {
     /// When the instruction falls through.
     pub not_taken: u16,
     /// When a `Branch` or `Exit` leaves it.
     pub taken: u16,
+}
+
+/// The cycles a privilege violation takes (Table 8-14 of the 68000 manual).
+pub const PRIVILEGE_CYCLES: u16 = 34;
+
+impl Cycles {
+    /// The static cycles when the instruction leaves through `control`. A privilege
+    /// violation always takes [`PRIVILEGE_CYCLES`]: for RTE and STOP `taken` is their normal
+    /// exit.
+    pub const fn leaving(self, control: &Control) -> u16 {
+        match control {
+            Control::Exception {
+                vector: crate::lift::vector::PRIVILEGE,
+                ..
+            } => PRIVILEGE_CYCLES,
+            _ => self.taken,
+        }
+    }
 }
 
 /// One instruction lifted to the IR.

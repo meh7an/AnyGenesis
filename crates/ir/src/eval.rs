@@ -23,8 +23,53 @@ pub fn unary(op: UnaryOp, width: Width, value: u32) -> u32 {
     let result = match op {
         UnaryOp::Not => !value,
         UnaryOp::Neg => value.wrapping_neg(),
+        UnaryOp::Ones => (value & width.mask()).count_ones(),
     };
     result & width.mask()
+}
+
+/// DIVU's data-dependent cycles (see [`BinaryOp::DivuTime`]).
+fn divu_time(dividend: u32, divisor: u32) -> u32 {
+    let divisor = (divisor & 0xFFFF) << 16;
+    if dividend >= divisor {
+        return 10;
+    }
+    let mut remainder = dividend;
+    let mut cycles = 16;
+    for _ in 0..15 {
+        let carry = remainder & 0x8000_0000 != 0;
+        remainder <<= 1;
+        cycles += if carry {
+            remainder = remainder.wrapping_sub(divisor);
+            4
+        } else if remainder >= divisor {
+            remainder -= divisor;
+            6
+        } else {
+            8
+        };
+    }
+    cycles
+}
+
+/// DIVS's data-dependent cycles (see [`BinaryOp::DivsTime`]).
+fn divs_time(dividend: u32, divisor: u32) -> u32 {
+    let negative_dividend = dividend & 0x8000_0000 != 0;
+    let negative_divisor = divisor & 0x8000 != 0;
+    let magnitude = (dividend as i32).unsigned_abs();
+    let by = u32::from((divisor as u16 as i16).unsigned_abs());
+    if by == 0 || magnitude >> 16 >= by {
+        return if negative_dividend { 18 } else { 16 };
+    }
+    let quotient = magnitude / by;
+    let mut cycles = 150 - 2 * (quotient & 0xFFFE).count_ones();
+    if negative_dividend {
+        cycles += 4;
+    }
+    if negative_dividend != negative_divisor {
+        cycles += 2;
+    }
+    cycles
 }
 
 /// Evaluates a [`BinaryOp`] on operands of `width`; comparisons yield 0 or 1.
@@ -50,6 +95,8 @@ pub fn binary(op: BinaryOp, width: Width, left: u32, right: u32) -> u32 {
         BinaryOp::Ne => u32::from(left != right),
         BinaryOp::LtU => u32::from(left < right),
         BinaryOp::LtS => u32::from(signed(width, left) < signed(width, right)),
+        BinaryOp::DivuTime => divu_time(left, right),
+        BinaryOp::DivsTime => divs_time(left, right),
     };
     if op.is_comparison() {
         result
@@ -128,6 +175,33 @@ mod tests {
             binary(BinaryOp::RemS, Width::Long, (-7i32) as u32, 2),
             u32::MAX
         );
+    }
+
+    #[test]
+    fn test_division_times_follow_the_fitted_models() {
+        // Quotient too wide; 0x10000 / 1 shifts a carry out of every step but none set.
+        assert_eq!(binary(BinaryOp::DivuTime, Width::Long, 0x0001_0000, 1), 10);
+        assert_eq!(binary(BinaryOp::DivuTime, Width::Long, 0, 1), 16 + 15 * 8);
+        assert_eq!(
+            binary(BinaryOp::DivuTime, Width::Long, 0xFFFF, 1),
+            16 + 15 * 6
+        );
+        // DIVS: magnitudes too wide; 0 / 1; -1 / 1 (negative dividend and quotient).
+        let minus_one = u32::MAX;
+        assert_eq!(
+            binary(BinaryOp::DivsTime, Width::Long, minus_one << 16, 1),
+            18
+        );
+        assert_eq!(binary(BinaryOp::DivsTime, Width::Long, 0, 1), 150);
+        assert_eq!(binary(BinaryOp::DivsTime, Width::Long, minus_one, 1), 156);
+        // 0x7FFE / 1: quotient bits 15-1 hold 14 ones.
+        assert_eq!(binary(BinaryOp::DivsTime, Width::Long, 0x7FFE, 1), 150 - 28);
+    }
+
+    #[test]
+    fn test_ones_counts_bits_of_the_width() {
+        assert_eq!(unary(UnaryOp::Ones, Width::Word, 0xF0F0), 8);
+        assert_eq!(unary(UnaryOp::Ones, Width::Byte, 0x81), 2);
     }
 
     #[test]

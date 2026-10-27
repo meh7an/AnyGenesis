@@ -6,7 +6,9 @@ use anygenesis_shared::Size;
 use super::{LiftError, Lifter, operand::Place, vector};
 use crate::{
     builder::Builder,
-    op::{BinaryOp, Control, ConvertOp, Expr, Flag, FlagOp, Op, Reg, ShiftOp, Value, Width},
+    op::{
+        BinaryOp, Control, ConvertOp, Expr, Flag, FlagOp, Op, Reg, ShiftOp, UnaryOp, Value, Width,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +298,17 @@ impl Lifter<'_> {
         let result = self.out.binary(BinaryOp::Mul, left, right);
         self.out.write_reg(reg, Size::Long, result);
         self.set_logic_flags(result);
+        // Two cycles per set bit of the source for MULU, per 01 or 10 pair of its bits (a 0
+        // below bit 0) for MULS (Table 8-9's 2n).
+        let pattern = if signed {
+            let moved = self.out.shift_const(ShiftOp::Shl, source, 1);
+            self.out.xor(moved, source)
+        } else {
+            source
+        };
+        let ones = self.out.unary(UnaryOp::Ones, pattern);
+        let cycles = self.out.binary(BinaryOp::Add, ones, ones);
+        self.out.cycles(cycles);
         Ok(())
     }
 
@@ -316,10 +329,20 @@ impl Lifter<'_> {
                 pc: self.next(),
             },
         );
-        let (extend, divide, remainder) = if signed {
-            (ConvertOp::SignExtend, BinaryOp::DivS, BinaryOp::RemS)
+        let (extend, divide, remainder, time) = if signed {
+            (
+                ConvertOp::SignExtend,
+                BinaryOp::DivS,
+                BinaryOp::RemS,
+                BinaryOp::DivsTime,
+            )
         } else {
-            (ConvertOp::ZeroExtend, BinaryOp::DivU, BinaryOp::RemU)
+            (
+                ConvertOp::ZeroExtend,
+                BinaryOp::DivU,
+                BinaryOp::RemU,
+                BinaryOp::DivuTime,
+            )
         };
         let divisor = self.out.convert(extend, Width::Long, source);
         let quotient = self.out.binary(divide, dividend, divisor);
@@ -346,6 +369,8 @@ impl Lifter<'_> {
         self.out.set_flag(Flag::Z, zero);
         self.out.set_flag(Flag::V, overflow);
         self.out.set_flag(Flag::C, Builder::boolean(false));
+        let cycles = self.out.binary(time, dividend, divisor);
+        self.out.cycles(cycles);
         Ok(())
     }
 
@@ -363,6 +388,13 @@ impl Lifter<'_> {
         self.out.set_flag(Flag::C, Builder::boolean(false));
         let above = self.out.binary(BinaryOp::LtS, bound, value);
         let out_of_bounds = self.out.or(negative, above);
+        // The trap takes 2 cycles more when Dn is negative and bound - Dn has bit 15 clear
+        // (fitted to SingleStepTests); without a trap Dn is never negative.
+        let difference = self.out.binary(BinaryOp::Sub, bound, value);
+        let difference_negative = self.out.is_negative(difference);
+        let difference_positive = self.out.not(difference_negative);
+        let slow = self.out.and(negative, difference_positive);
+        self.out.cycles_if(slow, 2);
         self.out.branch(
             out_of_bounds,
             Control::Exception {

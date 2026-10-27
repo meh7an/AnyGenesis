@@ -8,7 +8,8 @@
 //! - g (0x500): RAM, ROM and I/O stores and loads, then a loop polling an I/O word until
 //!   bit 1 is set, then a push popped again.
 //! - p (0x600): pops its own return address when d3 is negative, so it returns to reset's
-//!   caller (a popped caller).
+//!   caller (a popped caller). An `ori.w #0,sr` in the middle of its block resumes at itself
+//!   after a privilege violation, a table row inside a cycle segment.
 //! - spin (0x700, hinted): `bra.s *`, which never returns: every run reaches the cap.
 //! - every exception vector points at an rte at 0x200.
 
@@ -72,7 +73,8 @@ const CODE: &[(u32, &[u16])] = &[
         0x600,
         &[
             0x4A03, // tst.b d3
-            0x6B02, // bmi.s $606
+            0x007C, 0x0000, // ori.w #0,sr
+            0x6B02, // bmi.s $60a
             0x588F, // addq.l #4,a7
             0x4E75, // rts
         ],

@@ -15,6 +15,9 @@ pub struct Printer<'a> {
     pub body: &'a Body,
     pub prefix: &'static str,
     pub rom_size: u32,
+    /// A C `int32_t` expression: the cycles already charged past the start of the
+    /// instruction, which every device access subtracts so it sees that start.
+    pub ahead: &'a str,
 }
 
 impl Printer<'_> {
@@ -62,6 +65,7 @@ impl Printer<'_> {
                 value,
             } => format!("{};", self.store(size, address, value)),
             Op::ResetDevices => "ag_reset_devices(s);".to_owned(),
+            Op::Cycles { value } => format!("AG_CYCLES(s, (int32_t){});", self.value(value)),
             Op::Branch { .. } | Op::Exit(_) => return None,
         };
         Some(statement)
@@ -150,6 +154,7 @@ impl Printer<'_> {
             UnaryOp::Not if width == Width::Bool => format!("{operand} ^ 1u"),
             UnaryOp::Not => masked(format!("~{operand}"), width),
             UnaryOp::Neg => masked(format!("0u - {operand}"), width),
+            UnaryOp::Ones => format!("(uint32_t)__builtin_popcount({operand})"),
         }
     }
 
@@ -172,38 +177,46 @@ impl Printer<'_> {
             BinaryOp::Ne => format!("(uint32_t)({l} != {r})"),
             BinaryOp::LtU => format!("(uint32_t)({l} < {r})"),
             BinaryOp::LtS => format!("ag_lts({l}, {r}, {bits}u)"),
+            BinaryOp::DivuTime => format!("ag_divu_time({l}, {r})"),
+            BinaryOp::DivsTime => format!("ag_divs_time({l}, {r})"),
         }
     }
 
+    /// A read; one that can reach a device passes [`Printer::ahead`].
     fn load(&self, size: Size, address: Value) -> String {
         let bits = size.bytes() * 8;
+        let ahead = self.ahead;
         match address {
             Value::Const { value, .. } => {
-                let address = value & ADDRESS_MASK;
-                let name = match Region::of(address, size.bytes(), self.rom_size) {
-                    Region::Ram => "ag_ram_read",
-                    Region::Rom => "ag_rom_read",
-                    Region::Bus => "ag_read",
-                };
-                format!("{name}{bits}(s, {})", constant(address))
+                let address = constant(value & ADDRESS_MASK);
+                match Region::of(value & ADDRESS_MASK, size.bytes(), self.rom_size) {
+                    Region::Ram => format!("ag_ram_read{bits}(s, {address})"),
+                    Region::Rom => format!("ag_rom_read{bits}(s, {address})"),
+                    Region::Bus => format!("ag_bus_read{bits}(s, {address}, {ahead})"),
+                }
             }
-            Value::Temp(_) => format!("ag_load{bits}(s, {})", self.value(address)),
+            Value::Temp(_) => format!("ag_load{bits}(s, {}, {ahead})", self.value(address)),
         }
     }
 
     fn store(&self, size: Size, address: Value, value: Value) -> String {
         let bits = size.bytes() * 8;
         let value = self.value(value);
+        let ahead = self.ahead;
         match address {
             Value::Const { value: raw, .. } => {
-                let address = raw & ADDRESS_MASK;
-                let name = match Region::of(address, size.bytes(), self.rom_size) {
-                    Region::Ram => "ag_ram_write",
-                    Region::Rom | Region::Bus => "ag_write",
-                };
-                format!("{name}{bits}(s, {}, {value})", constant(address))
+                let address = constant(raw & ADDRESS_MASK);
+                match Region::of(raw & ADDRESS_MASK, size.bytes(), self.rom_size) {
+                    Region::Ram => format!("ag_ram_write{bits}(s, {address}, {value})"),
+                    Region::Rom | Region::Bus => {
+                        format!("ag_bus_write{bits}(s, {address}, {value}, {ahead})")
+                    }
+                }
             }
-            Value::Temp(_) => format!("ag_store{bits}(s, {}, {value})", self.value(address)),
+            Value::Temp(_) => format!(
+                "ag_store{bits}(s, {}, {value}, {ahead})",
+                self.value(address)
+            ),
         }
     }
 }
@@ -255,7 +268,8 @@ pub fn used_temps(body: &Body) -> Vec<bool> {
             Op::WriteReg { value, .. }
             | Op::SetFlag { value, .. }
             | Op::WriteSr { value }
-            | Op::WriteCcr { value } => mark(value),
+            | Op::WriteCcr { value }
+            | Op::Cycles { value } => mark(value),
             Op::Store { address, value, .. } => {
                 mark(address);
                 mark(value);

@@ -37,9 +37,9 @@ L_000200:;
                 ag_write_sr(s, e2);
                 uint32_t e3 = s->a[7];
                 uint32_t e4 = e3 - 0x6u;
-                ag_store16(s, e4, e0);
+                ag_store16(s, e4, e0, 0);
                 uint32_t e5 = e4 + 0x2u;
-                ag_store32(s, e5, 0x200u);
+                ag_store32(s, e5, 0x200u, 0);
                 s->a[7] = e4;
                 uint32_t next = f_000200(s, 0x200u);
                 if (next != 0x200u)
@@ -48,11 +48,11 @@ L_000200:;
             goto L_000200;
         }
         uint32_t t2 = s->a[7];
-        uint32_t t3 = ag_load16(s, t2);
+        uint32_t t3 = ag_load16(s, t2, 0);
         uint32_t t4 = t2 + 0x2u;
         s->a[7] = t4;
         uint32_t t5 = s->a[7];
-        uint32_t t6 = ag_load32(s, t5);
+        uint32_t t6 = ag_load32(s, t5, 0);
         uint32_t t7 = t5 + 0x4u;
         s->a[7] = t7;
         ag_write_sr(s, t3);
@@ -74,7 +74,7 @@ uint32_t f_000300(AgState *s, uint32_t pc)
     {
         uint32_t t0 = s->a[7];
         uint32_t t1 = t0 - 0x4u;
-        ag_store32(s, t1, 0x304u);
+        ag_store32(s, t1, 0x304u, 0);
         s->a[7] = t1;
         {
             uint32_t next = f_000400(s, 0x400u);
@@ -87,7 +87,7 @@ L_000304:;
     {
         uint32_t t0 = s->a[7];
         uint32_t t1 = t0 - 0x4u;
-        ag_store32(s, t1, 0x30Au);
+        ag_store32(s, t1, 0x30Au, 0);
         s->a[7] = t1;
         {
             uint32_t next = f_000500(s, 0x500u);
@@ -164,7 +164,7 @@ L_000402:;
     /* 000408  rts */
     {
         uint32_t t0 = s->a[7];
-        uint32_t t1 = ag_load32(s, t0);
+        uint32_t t1 = ag_load32(s, t0, 0);
         uint32_t t2 = t0 + 0x4u;
         s->a[7] = t2;
         return t1 & 0xFFFFFFu;
@@ -187,13 +187,13 @@ uint32_t f_000500(AgState *s, uint32_t pc)
     /* 000508  move.b  (a1), d3 */
     {
         uint32_t t0 = s->a[1];
-        uint32_t t1 = ag_load8(s, t0);
+        uint32_t t1 = ag_load8(s, t0, 0);
         s->d[3] = (s->d[3] & 0xFFFFFF00u) | t1;
     }
     /* 00050A  move.w  d1, $a10000.l */
     {
         uint32_t t0 = (s->d[1]) & 0xFFFFu;
-        ag_write16(s, 0xA10000u, t0);
+        ag_bus_write16(s, 0xA10000u, t0, 0);
     }
     /* 000510  move.l  d3, -(a7) */
     {
@@ -201,7 +201,7 @@ uint32_t f_000500(AgState *s, uint32_t pc)
         uint32_t t1 = s->a[7];
         uint32_t t2 = t1 - 0x4u;
         s->a[7] = t2;
-        ag_store32(s, t2, t0);
+        ag_store32(s, t2, t0, 0);
     }
     /* 000512  addq.l  #4, a7 */
     {
@@ -212,7 +212,7 @@ uint32_t f_000500(AgState *s, uint32_t pc)
     /* 000514  rts */
     {
         uint32_t t0 = s->a[7];
-        uint32_t t1 = ag_load32(s, t0);
+        uint32_t t1 = ag_load32(s, t0, 0);
         uint32_t t2 = t0 + 0x4u;
         s->a[7] = t2;
         return t1 & 0xFFFFFFu;
@@ -225,7 +225,7 @@ uint32_t f_000600(AgState *s, uint32_t pc)
     /* 000600  rts */
     {
         uint32_t t0 = s->a[7];
-        uint32_t t1 = ag_load32(s, t0);
+        uint32_t t1 = ag_load32(s, t0, 0);
         uint32_t t2 = t0 + 0x4u;
         s->a[7] = t2;
         return t1 & 0xFFFFFFu;

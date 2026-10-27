@@ -30,6 +30,7 @@ L_000200:;
         uint32_t t0 = ag_supervisor(s);
         uint32_t t1 = t0 ^ 1u;
         if (t1) {
+            AG_CYCLES(s, 14);
             {
                 uint32_t e0 = ag_read_sr(s);
                 uint32_t e1 = e0 | 0x2000u;
@@ -37,9 +38,9 @@ L_000200:;
                 ag_write_sr(s, e2);
                 uint32_t e3 = s->a[7];
                 uint32_t e4 = e3 - 0x6u;
-                ag_store16(s, e4, e0);
+                ag_store16(s, e4, e0, 34);
                 uint32_t e5 = e4 + 0x2u;
-                ag_store32(s, e5, 0x200u);
+                ag_store32(s, e5, 0x200u, 34);
                 s->a[7] = e4;
                 uint32_t next = f_000200(s, 0x200u);
                 if (next != 0x200u)
@@ -48,11 +49,11 @@ L_000200:;
             goto L_000200;
         }
         uint32_t t2 = s->a[7];
-        uint32_t t3 = ag_load16(s, t2);
+        uint32_t t3 = ag_load16(s, t2, 20);
         uint32_t t4 = t2 + 0x2u;
         s->a[7] = t4;
         uint32_t t5 = s->a[7];
-        uint32_t t6 = ag_load32(s, t5);
+        uint32_t t6 = ag_load32(s, t5, 20);
         uint32_t t7 = t5 + 0x4u;
         s->a[7] = t7;
         ag_write_sr(s, t3);
@@ -82,9 +83,9 @@ uint32_t f_000300(AgState *s, uint32_t pc)
             ag_write_sr(s, e2);
             uint32_t e3 = s->a[7];
             uint32_t e4 = e3 - 0x6u;
-            ag_store16(s, e4, e0);
+            ag_store16(s, e4, e0, 34);
             uint32_t e5 = e4 + 0x2u;
-            ag_store32(s, e5, 0x302u);
+            ag_store32(s, e5, 0x302u, 34);
             s->a[7] = e4;
             uint32_t next = f_000200(s, 0x200u);
             if (next != 0x302u)
@@ -106,9 +107,9 @@ L_000302:;
                 ag_write_sr(s, e2);
                 uint32_t e3 = s->a[7];
                 uint32_t e4 = e3 - 0x6u;
-                ag_store16(s, e4, e0);
+                ag_store16(s, e4, e0, 34);
                 uint32_t e5 = e4 + 0x2u;
-                ag_store32(s, e5, 0x302u);
+                ag_store32(s, e5, 0x302u, 34);
                 s->a[7] = e4;
                 uint32_t next = f_000200(s, 0x200u);
                 if (next != 0x302u)
@@ -119,14 +120,14 @@ L_000302:;
         uint32_t t2 = (s->d[0]) & 0xFFFFu;
         ag_write_sr(s, t2);
     }
-    AG_CYCLES(s, 140);
+    AG_CYCLES(s, 0);
     /* 000304  divu.w  d1, d0 */
     {
         uint32_t t0 = (s->d[1]) & 0xFFFFu;
         uint32_t t1 = s->d[0];
         uint32_t t2 = (uint32_t)(t0 == 0x0u);
         if (t2) {
-            AG_CYCLES(s, -102);
+            AG_CYCLES(s, 38);
             {
                 uint32_t e0 = ag_read_sr(s);
                 uint32_t e1 = e0 | 0x2000u;
@@ -134,9 +135,9 @@ L_000302:;
                 ag_write_sr(s, e2);
                 uint32_t e3 = s->a[7];
                 uint32_t e4 = e3 - 0x6u;
-                ag_store16(s, e4, e0);
+                ag_store16(s, e4, e0, 38);
                 uint32_t e5 = e4 + 0x2u;
-                ag_store32(s, e5, 0x306u);
+                ag_store32(s, e5, 0x306u, 38);
                 s->a[7] = e4;
                 uint32_t next = f_000200(s, 0x200u);
                 if (next != 0x306u)
@@ -163,6 +164,8 @@ L_000302:;
         s->z = (uint8_t)t16;
         s->v = (uint8_t)t7;
         s->c = (uint8_t)0x0u;
+        uint32_t t17 = ag_divu_time(t1, t3);
+        AG_CYCLES(s, (int32_t)t17);
     }
 L_000306:;
     AG_CYCLES(s, 4);
@@ -171,6 +174,7 @@ L_000306:;
         uint32_t t0 = ag_supervisor(s);
         uint32_t t1 = t0 ^ 1u;
         if (t1) {
+            AG_CYCLES(s, 30);
             {
                 uint32_t e0 = ag_read_sr(s);
                 uint32_t e1 = e0 | 0x2000u;
@@ -178,9 +182,9 @@ L_000306:;
                 ag_write_sr(s, e2);
                 uint32_t e3 = s->a[7];
                 uint32_t e4 = e3 - 0x6u;
-                ag_store16(s, e4, e0);
+                ag_store16(s, e4, e0, 34);
                 uint32_t e5 = e4 + 0x2u;
-                ag_store32(s, e5, 0x306u);
+                ag_store32(s, e5, 0x306u, 34);
                 s->a[7] = e4;
                 uint32_t next = f_000200(s, 0x200u);
                 if (next != 0x306u)
@@ -210,9 +214,9 @@ L_00030A:;
                 ag_write_sr(s, e2);
                 uint32_t e3 = s->a[7];
                 uint32_t e4 = e3 - 0x6u;
-                ag_store16(s, e4, e0);
+                ag_store16(s, e4, e0, 34);
                 uint32_t e5 = e4 + 0x2u;
-                ag_store32(s, e5, 0x30Au);
+                ag_store32(s, e5, 0x30Au, 34);
                 s->a[7] = e4;
                 uint32_t next = f_000200(s, 0x200u);
                 if (next != 0x30Au)
@@ -232,7 +236,7 @@ L_00030A:;
     {
         uint32_t t0 = s->a[7];
         uint32_t t1 = t0 - 0x4u;
-        ag_store32(s, t1, 0x312u);
+        ag_store32(s, t1, 0x312u, 18);
         s->a[7] = t1;
         AG_TAIL return f_000700(s, 0x700u);
     }

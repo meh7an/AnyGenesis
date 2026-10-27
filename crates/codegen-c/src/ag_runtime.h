@@ -115,6 +115,51 @@ static inline uint32_t ag_sar(uint32_t value, uint32_t count, unsigned bits)
     return (uint32_t)(extended >> (count >= bits ? bits - 1u : count));
 }
 
+/* DIVU's data-dependent cycles: 10 when the quotient cannot fit, else a 15-step restoring
+ * division at 4, 6 or 8 cycles a step after 16. */
+static inline uint32_t ag_divu_time(uint32_t dividend, uint32_t divisor)
+{
+    uint32_t shifted = (divisor & 0xFFFFu) << 16;
+    uint32_t remainder = dividend;
+    uint32_t cycles = 16u;
+    if (dividend >= shifted)
+        return 10u;
+    for (int step = 0; step < 15; step++) {
+        uint32_t carry = remainder & 0x80000000u;
+        remainder <<= 1;
+        if (carry) {
+            remainder -= shifted;
+            cycles += 4u;
+        } else if (remainder >= shifted) {
+            remainder -= shifted;
+            cycles += 6u;
+        } else {
+            cycles += 8u;
+        }
+    }
+    return cycles;
+}
+
+/* DIVS's data-dependent cycles: 16 (18 for a negative dividend) when the magnitudes'
+ * quotient cannot fit, else 150 plus 4 for a negative dividend and 2 for a negative quotient,
+ * minus 2 per set bit in bits 15-1 of the magnitudes' quotient. */
+static inline uint32_t ag_divs_time(uint32_t dividend, uint32_t divisor)
+{
+    uint32_t negative_dividend = dividend >> 31;
+    uint32_t negative_divisor = divisor >> 15 & 1u;
+    uint32_t magnitude = negative_dividend ? 0u - dividend : dividend;
+    uint32_t by = negative_divisor ? 0x10000u - (divisor & 0xFFFFu) : divisor & 0xFFFFu;
+    uint32_t cycles;
+    if (by == 0u || magnitude >> 16 >= by)
+        return negative_dividend ? 18u : 16u;
+    cycles = 150u - 2u * (uint32_t)__builtin_popcount(magnitude / by & 0xFFFEu);
+    if (negative_dividend)
+        cycles += 4u;
+    if (negative_dividend != negative_divisor)
+        cycles += 2u;
+    return cycles;
+}
+
 static inline uint32_t ag_top(uint32_t value, unsigned bits)
 {
     return value >> (bits - 1u) & 1u;
@@ -200,23 +245,41 @@ static inline uint32_t ag_rom_read32(const AgState *s, uint32_t address)
     return ag_rom_read16(s, address) << 16 | ag_rom_read16(s, address + 2u);
 }
 
+/* Device accesses see the time at the start of their instruction: code charges a segment's
+ * cycles before running it, and `ahead` of them lie past that start. */
 #define AG_ACCESSORS(bits, bytes)                                                           \
-    static inline uint32_t ag_load##bits(AgState *s, uint32_t address)                      \
+    static inline uint32_t ag_bus_read##bits(AgState *s, uint32_t address, int32_t ahead)   \
+    {                                                                                       \
+        uint32_t value;                                                                     \
+        s->cycles += ahead;                                                                 \
+        value = ag_read##bits(s, address);                                                  \
+        s->cycles -= ahead;                                                                 \
+        return value;                                                                       \
+    }                                                                                       \
+    static inline void ag_bus_write##bits(AgState *s, uint32_t address, uint32_t value,     \
+                                          int32_t ahead)                                    \
+    {                                                                                       \
+        s->cycles += ahead;                                                                 \
+        ag_write##bits(s, address, value);                                                  \
+        s->cycles -= ahead;                                                                 \
+    }                                                                                       \
+    static inline uint32_t ag_load##bits(AgState *s, uint32_t address, int32_t ahead)       \
     {                                                                                       \
         address &= AG_ADDRESS_MASK;                                                         \
         if (ag_in_ram(address, bytes))                                                      \
             return ag_ram_read##bits(s, address);                                           \
         if (ag_in_rom(s, address, bytes))                                                   \
             return ag_rom_read##bits(s, address);                                           \
-        return ag_read##bits(s, address);                                                   \
+        return ag_bus_read##bits(s, address, ahead);                                        \
     }                                                                                       \
-    static inline void ag_store##bits(AgState *s, uint32_t address, uint32_t value)         \
+    static inline void ag_store##bits(AgState *s, uint32_t address, uint32_t value,         \
+                                      int32_t ahead)                                        \
     {                                                                                       \
         address &= AG_ADDRESS_MASK;                                                         \
         if (ag_in_ram(address, bytes))                                                      \
             ag_ram_write##bits(s, address, value);                                          \
         else                                                                                \
-            ag_write##bits(s, address, value);                                              \
+            ag_bus_write##bits(s, address, value, ahead);                                   \
     }
 
 AG_ACCESSORS(8, 1u)

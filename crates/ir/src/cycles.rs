@@ -1,31 +1,27 @@
-//! Cycle estimates from the timing tables in Section 8 of the MC68000 User's Manual
-//! (M68000UM, 16-bit instruction execution times). Every figure includes the instruction
-//! fetch, as the manual's do.
+//! Static cycle times from the timing tables in Section 8 of the MC68000 User's Manual
+//! (M68000UM, 16-bit instruction execution times), corrected where SingleStepTests' counts
+//! differ (M1.1; each correction says so). Every figure includes the instruction fetch, as
+//! the manual's do.
 //!
-//! The estimates are approximate by design (the CPU fidelity bar): times that depend on data
-//! use one fixed value each, documented where it is chosen.
+//! Times that depend on data are split: the static part here is the least the instruction
+//! takes, and the lifter adds the rest with `Op::Cycles` (shift and rotate counts, MULU/MULS
+//! source bits, DIVU/DIVS steps, DBcc expiry, Scc on a register, bit numbers in Dn).
 
 use anygenesis_m68k::{Ea, Instruction, Mnemonic, Operand};
 use anygenesis_shared::Size;
 
 use crate::op::Cycles;
 
-/// MULU/MULS take 38 + 2n, n depending on the source bits; n = 8 is half of them set.
-const MULTIPLY: u16 = 38 + 2 * 8;
+/// MULU/MULS take 38 + 2n; the lifter charges the 2n.
+const MULTIPLY: u16 = 38;
 
-/// The manual's DIVU/DIVS times, which it calls maximums with less than 10% spread.
-const DIVU: u16 = 140;
-const DIVS: u16 = 158;
-
-/// A register shift count is data; this many steps is assumed (2 cycles each).
-const REGISTER_SHIFT_COUNT: u16 = 8;
-
-/// Group 2 exception times (Table 8-14), without effective address time.
+/// Group 2 exception times (Table 8-14), without effective address time. SingleStepTests
+/// takes CHK's trap in 38 cycles, not the manual's 40.
 const TRAP: u16 = 34;
-const CHK_TRAP: u16 = 40;
+const CHK_TRAP: u16 = 38;
 const ZERO_DIVIDE: u16 = 38;
 
-/// Returns the estimate for `instruction` on both paths.
+/// Returns the static time of `instruction` on both paths.
 pub(crate) fn estimate(instruction: &Instruction) -> Cycles {
     let cycles = timing(instruction);
     // Writes to SR and MOVE USP fall through unless the privilege violation is taken.
@@ -76,7 +72,7 @@ fn timing(instruction: &Instruction) -> Cycles {
             _ => long_or(size, 12, 8) + ea_time(second, size),
         }),
         Mnemonic::Addi | Mnemonic::Subi | Mnemonic::Andi | Mnemonic::Ori | Mnemonic::Eori => {
-            both(immediate(instruction.mnemonic, size, second))
+            both(immediate(size, second))
         }
         Mnemonic::Cmpi => both(match second {
             Some(Operand::Ea(Ea::DataRegister(_))) => long_or(size, 14, 8),
@@ -84,11 +80,8 @@ fn timing(instruction: &Instruction) -> Cycles {
         }),
         Mnemonic::Addq | Mnemonic::Subq => both(match second {
             Some(Operand::Ea(Ea::DataRegister(_))) => long_or(size, 8, 4),
-            // The manual lists ADDQ.w #,An as 4 and SUBQ.w #,An as 8; both long forms take 8.
-            Some(Operand::Ea(Ea::AddressRegister(_))) => match instruction.mnemonic {
-                Mnemonic::Addq => long_or(size, 8, 4),
-                _ => 8,
-            },
+            // The manual lists ADDQ.w #,An as 4; SingleStepTests takes 8, as for SUBQ.
+            Some(Operand::Ea(Ea::AddressRegister(_))) => 8,
             _ => long_or(size, 12, 8) + ea_time(second, size),
         }),
         Mnemonic::Clr | Mnemonic::Neg | Mnemonic::Negx | Mnemonic::Not => both(single(
@@ -98,9 +91,10 @@ fn timing(instruction: &Instruction) -> Cycles {
             long_or(size, 12, 8),
         )),
         Mnemonic::Nbcd => both(single(size, first, 6, 8)),
-        // Scc on a register takes 4 when false and 6 when true; the true time is used.
-        Mnemonic::Scc(_) => both(single(size, first, 6, 8)),
-        Mnemonic::Tas => both(single(size, first, 4, 14)),
+        // Scc on a register takes 4 when false; the lifter adds 2 when true.
+        Mnemonic::Scc(_) => both(single(size, first, 4, 8)),
+        // The manual gives 14 + EA on memory; SingleStepTests takes 10 + EA.
+        Mnemonic::Tas => both(single(size, first, 4, 10)),
         Mnemonic::Tst => both(4 + ea_time(first, size)),
         Mnemonic::Asl
         | Mnemonic::Asr
@@ -120,7 +114,7 @@ fn timing(instruction: &Instruction) -> Cycles {
         Mnemonic::Bra => both(10),
         Mnemonic::Bsr => both(18),
         // Falling through is either the condition holding (12) or the counter expiring
-        // (14); the first is used.
+        // (14); the lifter adds the 2.
         Mnemonic::Dbcc(_) => paths(12, 10),
         Mnemonic::Jmp => both(control(first)),
         Mnemonic::Jsr => both(control(first) + 8),
@@ -138,12 +132,9 @@ fn timing(instruction: &Instruction) -> Cycles {
             _ => 18,
         }),
         Mnemonic::Mulu | Mnemonic::Muls => both(MULTIPLY + ea_time(first, Size::Word)),
-        Mnemonic::Divu => paths(
-            DIVU + ea_time(first, Size::Word),
-            ZERO_DIVIDE + ea_time(first, Size::Word),
-        ),
-        Mnemonic::Divs => paths(
-            DIVS + ea_time(first, Size::Word),
+        // The whole division time depends on data (`BinaryOp::DivuTime`, `DivsTime`).
+        Mnemonic::Divu | Mnemonic::Divs => paths(
+            ea_time(first, Size::Word),
             ZERO_DIVIDE + ea_time(first, Size::Word),
         ),
         Mnemonic::Chk => paths(
@@ -238,14 +229,11 @@ fn standard(size: Size, source: Option<Operand>, destination: Option<Operand>) -
 }
 
 /// ADDI, SUBI, ANDI, ORI and EORI (Table 8-5), including the CCR and SR forms (Table 8-12).
-fn immediate(mnemonic: Mnemonic, size: Size, destination: Option<Operand>) -> u16 {
+fn immediate(size: Size, destination: Option<Operand>) -> u16 {
     match destination {
         Some(Operand::Ccr | Operand::Sr) => 20,
-        Some(Operand::Ea(Ea::DataRegister(_))) => match (mnemonic, size) {
-            (Mnemonic::Andi, Size::Long) => 14,
-            (_, Size::Long) => 16,
-            _ => 8,
-        },
+        // The manual lists ANDI.l #,Dn as 14; SingleStepTests takes 16, as for the others.
+        Some(Operand::Ea(Ea::DataRegister(_))) => long_or(size, 16, 8),
         _ => long_or(size, 20, 12) + ea_time(destination, size),
     }
 }
@@ -258,32 +246,41 @@ fn single(size: Size, operand: Option<Operand>, register: u16, memory: u16) -> u
     }
 }
 
-/// Shifts and rotates (Table 8-7): 2 cycles per step on a register, one step in memory.
+/// Shifts and rotates (Table 8-7): 2 cycles per step on a register, one step in memory. A
+/// register count's steps are the lifter's.
 fn shift(size: Size, first: Option<Operand>, second: Option<Operand>) -> u16 {
     let steps = match (first, second) {
         (Some(Operand::Quick(count)), Some(_)) => count.unsigned_abs().into(),
-        (Some(Operand::Ea(Ea::DataRegister(_))), Some(_)) => REGISTER_SHIFT_COUNT,
+        (Some(Operand::Ea(Ea::DataRegister(_))), Some(_)) => 0,
         _ => return 8 + ea_time(first, Size::Word),
     };
     long_or(size, 8, 6) + 2 * steps
 }
 
 /// Bit operations (Table 8-8): dynamic with the bit number in Dn, static with it immediate.
+/// On a data register, changing a bit of the upper word costs 2 cycles more (SingleStepTests;
+/// the manual gives only the maximum): static numbers are charged here, the lifter charges
+/// numbers from Dn.
 fn bit(mnemonic: Mnemonic, number: Option<Operand>, target: Option<Operand>) -> u16 {
     let dynamic = matches!(ea(number), Some(Ea::DataRegister(_)));
-    let on_register = matches!(ea(target), Some(Ea::DataRegister(_)));
     let (register, memory) = match (mnemonic, dynamic) {
         (Mnemonic::Btst, true) => (6, 4),
         (Mnemonic::Btst, false) => (10, 8),
-        (Mnemonic::Bclr, true) => (10, 8),
-        (Mnemonic::Bclr, false) => (14, 12),
-        (_, true) => (8, 8),
-        (_, false) => (12, 12),
+        (Mnemonic::Bclr, true) => (8, 8),
+        (Mnemonic::Bclr, false) => (12, 12),
+        (_, true) => (6, 8),
+        (_, false) => (10, 12),
     };
-    if on_register {
-        register
-    } else {
-        memory + ea_time(target, Size::Byte)
+    match (ea(target), ea(number)) {
+        (Some(Ea::DataRegister(_)), Some(Ea::Immediate(value)))
+            if mnemonic != Mnemonic::Btst && value & 31 >= 16 =>
+        {
+            register + 2
+        }
+        (Some(Ea::DataRegister(_)), _) => register,
+        // BTST Dn,#imm: SingleStepTests takes 10, 2 more than the memory row gives.
+        (Some(Ea::Immediate(_)), _) => 10,
+        _ => memory + ea_time(target, Size::Byte),
     }
 }
 
@@ -395,6 +392,15 @@ mod tests {
         // trap #0; divu (a0),d0 by zero; chk (a0),d0
         assert_eq!(cycles_of(&[0x4E40]).taken, 34);
         assert_eq!(cycles_of(&[0x80D0]).taken, 38 + 4);
-        assert_eq!(cycles_of(&[0x4190]).taken, 40 + 4);
+        assert_eq!(cycles_of(&[0x4190]).taken, 38 + 4);
+    }
+
+    #[test]
+    fn test_estimate_bit_on_register_upper_word_costs_two_more() {
+        // bset #3,d0; bset #20,d0; btst #20,d0; bset d1,d0 (number from data)
+        assert_eq!(cycles_of(&[0x08C0, 3]).not_taken, 10);
+        assert_eq!(cycles_of(&[0x08C0, 20]).not_taken, 12);
+        assert_eq!(cycles_of(&[0x0800, 20]).not_taken, 10);
+        assert_eq!(cycles_of(&[0x03C0]).not_taken, 6);
     }
 }

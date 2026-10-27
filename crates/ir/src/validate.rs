@@ -16,6 +16,7 @@ pub struct ValidationError {
 ///   temporary is assigned exactly once and before any use;
 /// - operand widths fit each operation, constants fit their width;
 /// - register numbers are 0 to 7, and address registers are written whole;
+/// - no `Load` or `Store` follows an `Op::Cycles`;
 /// - an `Exit` comes only last.
 ///
 /// # Errors
@@ -25,6 +26,7 @@ pub fn validate(body: &Body) -> Result<(), ValidationError> {
         body,
         defined: 0,
         op: 0,
+        charged: false,
     };
     for (index, op) in body.ops.iter().enumerate() {
         checker.op = index;
@@ -43,6 +45,8 @@ struct Checker<'a> {
     body: &'a Body,
     defined: usize,
     op: usize,
+    /// Whether an `Op::Cycles` came before the current op.
+    charged: bool,
 }
 
 impl Checker<'_> {
@@ -104,6 +108,15 @@ impl Checker<'_> {
     }
 
     fn op(&mut self, op: &Op, last: bool) -> Result<(), ValidationError> {
+        let access = matches!(
+            op,
+            Op::Store { .. }
+                | Op::Let {
+                    expr: Expr::Load { .. },
+                    ..
+                }
+        );
+        self.ensure(!(access && self.charged), "bus access after a cycle charge")?;
         match *op {
             Op::Let { dst, expr } => {
                 self.ensure(
@@ -144,6 +157,10 @@ impl Checker<'_> {
                 self.expect(value, size.into(), "store width mismatch")?;
             }
             Op::ResetDevices => {}
+            Op::Cycles { value } => {
+                self.sized(value)?;
+                self.charged = true;
+            }
             Op::Branch { condition, control } => {
                 self.expect(condition, Width::Bool, "branch condition not bool")?;
                 self.control(control)?;
@@ -164,8 +181,8 @@ impl Checker<'_> {
             Expr::Unary { op, value } => {
                 let width = self.value(value)?;
                 self.ensure(
-                    op != UnaryOp::Neg || width != Width::Bool,
-                    "negation of a bool",
+                    op == UnaryOp::Not || width != Width::Bool,
+                    "arithmetic on a bool",
                 )
             }
             Expr::Binary { op, left, right } => {
@@ -175,7 +192,12 @@ impl Checker<'_> {
                     op,
                     BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Eq | BinaryOp::Ne
                 );
-                self.ensure(bool_allowed || width != Width::Bool, "arithmetic on a bool")
+                self.ensure(bool_allowed || width != Width::Bool, "arithmetic on a bool")?;
+                let timing = matches!(op, BinaryOp::DivuTime | BinaryOp::DivsTime);
+                self.ensure(
+                    !timing || width == Width::Long,
+                    "division time not on longs",
+                )
             }
             Expr::Shift { value, count, .. } => {
                 self.sized(value)?;
@@ -296,6 +318,22 @@ mod tests {
             ],
         };
         assert_eq!(problem(&body), "flag value not bool");
+    }
+
+    #[test]
+    fn test_validate_bus_access_after_cycle_charge_is_rejected() {
+        let body = Body {
+            temps: Vec::new(),
+            ops: vec![
+                Op::Cycles { value: long(2) },
+                Op::Store {
+                    size: Size::Long,
+                    address: long(0xFF_0000),
+                    value: long(0),
+                },
+            ],
+        };
+        assert_eq!(problem(&body), "bus access after a cycle charge");
     }
 
     #[test]
