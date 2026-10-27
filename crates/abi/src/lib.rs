@@ -296,6 +296,14 @@ c_externs! {
     /// The check-point hook, called when `cycles` ran out at `pc`: delivers due interrupts
     /// and returns where execution continues (`pc` unless a handler changed the stacked PC).
     fn ag_check(state: *mut AgState, pc: u32) -> u32;
+    /// The slow path of a check point whose block an event falls inside: interprets from the
+    /// block start `pc` to the next table row and returns it with `AG_HYBRID_ROW` set, or
+    /// returns any other address execution goes to instead.
+    fn ag_hybrid(state: *mut AgState, pc: u32) -> u32;
+    /// After a write to SR, at the instruction boundary `pc`: delivers the interrupts the new
+    /// mask lets through and returns where execution continues (`pc` unless a handler
+    /// changed the stacked PC). Never ends the run.
+    fn ag_deliver(state: *mut AgState, pc: u32) -> u32;
     /// RESET: asserts the reset line of the external devices.
     fn ag_reset_devices(state: *mut AgState);
 }

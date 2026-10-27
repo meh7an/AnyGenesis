@@ -301,6 +301,10 @@ struct Report {
     frames: u64,
     vblanks: u64,
     hblanks: u64,
+    /// Interrupts taken late, at a native check point (see `Runtime::late_interrupts`).
+    late: u64,
+    /// Blocks the hybrid path ran through the interpreter.
+    hybrids: u64,
     /// The status register's system byte at the end.
     sr: u16,
     misses: Vec<(u32, Miss)>,
@@ -352,6 +356,8 @@ impl Report {
             frames: runtime.frames(),
             vblanks: runtime.interrupts(6),
             hblanks: runtime.interrupts(4),
+            late: runtime.late_interrupts(),
+            hybrids: runtime.hybrid_blocks(),
             sr: state.sr,
             misses: runtime
                 .log()
@@ -388,6 +394,10 @@ impl Report {
         println!(
             "interrupts taken: {} VBlank (level 6), {} HBlank (level 4); SR ${:04X}{watched}",
             self.vblanks, self.hblanks, self.sr
+        );
+        println!(
+            "interrupt delivery: {} late, {} blocks interpreted on the hybrid path",
+            self.late, self.hybrids
         );
         println!(
             "TMSS {}, Z80 RAM {} bytes set, native stack unwinds {}",
@@ -664,6 +674,67 @@ mod tests {
             .map(|(frame, hash)| (frame, hash.to_owned()))
             .collect();
         assert_eq!(pictures, expected);
+    }
+
+    /// The machine where a run ended, for comparing two runs.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Outcome {
+        exit: Exit,
+        cycles: u64,
+        vblanks: u64,
+        d: [u32; 8],
+        a: [u32; 8],
+        sr: u16,
+        /// SHA-1s of work RAM, then of the VDP's memories and registers.
+        hashes: Vec<String>,
+    }
+
+    /// Runs `frames` frames from reset with budgets of at most `slice` cycles, on a thread
+    /// with room for the native stack. Also returns the late interrupts and hybrid blocks.
+    fn outcome(game: CompiledGame, rom: Rom, frames: u64, slice: i32) -> (Outcome, u64, u64) {
+        let worker = thread::Builder::new()
+            .name("68000".into())
+            .stack_size(RUN_STACK)
+            .spawn(move || {
+                let options = Options {
+                    slice,
+                    ..Options::default()
+                };
+                let mut runtime = Runtime::new(rom, game.table, Box::<Vdp>::default(), options);
+                let exit = runtime.run_frames(frames);
+                let state = runtime.state();
+                let vdp = runtime.hardware::<Vdp>().expect("the hardware is the VDP");
+                let mut hashes = vec![Sha1Digest::of(&state.ram).to_string()];
+                hashes.extend(vdp_hashes(vdp).map(|(_, hash)| hash.to_string()));
+                let outcome = Outcome {
+                    exit,
+                    cycles: runtime.cycles(),
+                    vblanks: runtime.interrupts(6),
+                    d: state.d,
+                    a: state.a,
+                    sr: state.sr,
+                    hashes,
+                };
+                (outcome, runtime.late_interrupts(), runtime.hybrid_blocks())
+            })
+            .expect("the 68000 thread starts");
+        worker.join().expect("the run finishes")
+    }
+
+    /// The hybrid path against translated code: with one-cycle budgets every budget ends
+    /// inside its block, so every block runs through the interpreter, and the machine must
+    /// end as it does with native blocks. Only an interrupt native code took late could tell
+    /// them apart.
+    #[test]
+    #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
+    fn test_sonic1_interpreted_blocks_end_where_native_ones_do() {
+        let (game, rom) = sonic1();
+        let slice = Options::default().slice;
+        let (native, late, hybrids) = outcome(game, rom.clone(), DEFAULT_FRAMES, slice);
+        let (interpreted, _, every) = outcome(game, rom, DEFAULT_FRAMES, 1);
+        println!("native: {late} late, {hybrids} hybrid blocks; one-cycle budgets: {every}");
+        assert_eq!(late, 0);
+        assert_eq!(native, interpreted);
     }
 
     /// Start held for ten vertical interrupts on the idle title screen (stop 298 ends frame

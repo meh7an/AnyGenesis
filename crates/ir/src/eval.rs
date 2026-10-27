@@ -157,6 +157,21 @@ mod tests {
     }
 
     #[test]
+    fn test_division_times_stay_within_the_largest_charge() {
+        let most = u32::from(crate::MAX_CHARGE);
+        // Every restoring step at its slowest, and DIVS with every sign penalty and no
+        // quotient bits.
+        assert_eq!(divu_time(0, 0xFFFF), 136);
+        assert_eq!(divs_time((-1i32) as u32, 0x0002), most);
+        for dividend in (0..u32::MAX).step_by(0x0101_0101) {
+            for divisor in (1..=0xFFFF).step_by(0x0F0F) {
+                assert!(divu_time(dividend, divisor) <= most);
+                assert!(divs_time(dividend, divisor) <= most);
+            }
+        }
+    }
+
+    #[test]
     fn test_division_edges_are_total() {
         assert_eq!(binary(BinaryOp::DivU, Width::Long, 7, 0), 0);
         assert_eq!(binary(BinaryOp::RemS, Width::Long, 7, 0), 0);

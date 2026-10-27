@@ -19,14 +19,30 @@
 //!   addresses): it carries a pc in its low bits down to the top level, which resumes there
 //!   with an empty native stack or ends the run.
 //!
-//! Time: translated code counts `AgState::cycles` down from a budget the scheduler sets,
-//! and calls `ag_check` at the next check point once it runs out. The budget ends at the
-//! hardware's next event, so interrupts arrive at the first check point after they are
-//! raised; while one waits behind the interrupt mask the budget is zero, so a lowered mask
-//! is seen at the next check point. Refresh ([`crate::refresh`]) is charged per budget on the
-//! cycles executed, and budgets shrink so that it still ends at the event.
+//! Time: translated code counts `AgState::cycles` down from a budget the scheduler sets.
+//! The scheduler keeps the master clock ([`Devices`]); a budget ends only where something
+//! can raise an enabled interrupt ([`Hardware::next_interrupt`]), at the end of a frame
+//! while [`Runtime::run_frames`] waits for one, and at the cycle cap, a slice at most. A
+//! register write that moves the next interrupt earlier cuts the budget there. Refresh
+//! ([`crate::refresh`]) is charged per budget on the cycles executed, and a budget ends
+//! where those and their refresh first reach the event.
+//!
+//! Interrupts are taken at instruction boundaries (the M0.2 hybrid model). Each block-start
+//! check point knows the most cycles its block can take: when the budget may end inside it,
+//! `ag_hybrid` runs the block through the interpreter, which calls the scheduler at the
+//! boundary where the budget runs out, and execution goes on natively at the next table
+//! row. A write to SR (MOVE, ANDI, ORI, EORI to SR, RTE) calls `ag_deliver`, which takes an
+//! interrupt the new mask lets through before the next instruction; an interrupt waiting
+//! behind the mask therefore leaves the budget alone. Only a device stall inside a native
+//! block, or an access that makes an interrupt due there, can carry an event past an
+//! instruction boundary: the interrupt is then taken at the next check point and counted
+//! as late ([`Runtime::late_interrupts`]).
 
-use std::{any::Any, collections::HashMap, fmt, ptr, slice};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    fmt, ptr, slice,
+};
 
 use anygenesis_abi::{AgEntry, AgFn, AgState, RAM_SIZE, Region};
 use anygenesis_ir::{
@@ -42,12 +58,17 @@ use crate::{
     hardware::Hardware,
     io::{Buttons, VERSION_NO_EXPANSION, VERSION_OVERSEAS},
     log::Log,
-    refresh::{self, Refresh},
+    refresh::Refresh,
+    timing::CPU_DIVIDER,
     z80,
 };
 
 /// Set in a return value that must reach the top level; the low 24 bits hold a pc.
 pub const UNWIND: u32 = 0x8000_0000;
+
+/// Set in `ag_hybrid`'s result when it is a table row to go on at natively
+/// (`AG_HYBRID_ROW` in the generated C).
+const HYBRID_ROW: u32 = 0x4000_0000;
 
 /// A thread stack with room for the native-depth guard's default limits.
 pub const RUN_STACK: usize = 64 << 20;
@@ -88,8 +109,8 @@ impl Default for Options {
             // An overseas NTSC console with TMSS (hardware version 1), no Mega CD.
             version: VERSION_OVERSEAS | VERSION_NO_EXPANSION | 1,
             open_bus: 0,
-            // One NTSC scanline, rounded down.
-            slice: 488,
+            // One NTSC frame, rounded down: budgets end at events, not at slices.
+            slice: 128_005,
             max_cycles: u64::MAX,
             stop_when_idle: false,
             soft_depth: 8 << 20,
@@ -226,6 +247,14 @@ pub(crate) struct Context {
     frame_limit: Option<u64>,
     /// Interrupts taken, by level.
     interrupts: [u64; 8],
+    /// Interrupts taken at a native check point after an instruction boundary had passed.
+    late: u64,
+    /// Blocks `ag_hybrid` ran through the interpreter.
+    hybrids: u64,
+    /// Addresses between table rows where execution stopped and may go on from the top
+    /// level: where an interrupt was taken (its handler's RTE returns there) or a run
+    /// ended. They resume through the interpreter without counting a miss.
+    between: HashSet<u32>,
     idle: Option<Snapshot>,
     hook: Option<InterruptHook>,
 }
@@ -371,9 +400,44 @@ impl Context {
     /// which can.
     pub fn after_access(&mut self, state: &mut AgState, address: u32) {
         self.charge_stall(state);
+        if self.devices.hardware.take_rescheduled() {
+            self.reschedule(state);
+        }
         if self.depth(address) > self.options.soft_depth || self.due(mask(state.sr)).is_some() {
             self.check_soon(state);
         }
+    }
+
+    /// An access moved the hardware's next interrupt: the budget ends there if that is
+    /// sooner, the cycles used so far still counting.
+    fn reschedule(&mut self, state: &mut AgState) {
+        // From the time the count stands at, which is past the access: it holds the rest of
+        // the instruction (or, in translated code, of its segment) already.
+        let now = self.devices.clock_at(self.clock(state));
+        let horizon = self.horizon(now).unsigned_abs();
+        let done = self.elapsed(state).saturating_sub(self.waited);
+        // A horizon is at most a slice, so it fits.
+        let left = self.refresh.until(done, horizon) as i32;
+        let cut = state.cycles - left;
+        if cut > 0 {
+            self.budget -= cut;
+            state.cycles -= cut;
+        }
+    }
+
+    /// 68000 cycles from master clock `from` to the next point a budget must end at: where
+    /// an enabled interrupt may become pending, and the end of a frame while a frame limit
+    /// is set; a slice at most, at least 1.
+    fn horizon(&self, from: u64) -> i32 {
+        let hardware = &self.devices.hardware;
+        let frame = self.frame_limit.map(|_| hardware.next_frame());
+        let event = hardware.next_interrupt().into_iter().chain(frame).min();
+        let until = event.map_or(i64::MAX, |event| {
+            let clocks = event.saturating_sub(from);
+            i64::try_from(clocks.div_ceil(CPU_DIVIDER)).unwrap_or(i64::MAX)
+        });
+        // At most the slice, so it fits.
+        until.clamp(1, i64::from(self.options.slice.max(1))) as i32
     }
 
     /// Takes the cycles a device froze the 68000 for out of the budget, as if the access
@@ -397,15 +461,18 @@ impl Context {
         state.cycles = 0;
     }
 
-    /// Starts a budget that lasts until the hardware's next event, a slice at most, shrunk
-    /// by the refresh it will cause; none while an interrupt waits behind the mask.
+    /// Starts a budget that lasts until the [`Context::horizon`] or the cycle cap, less the
+    /// refresh it will cause; none while an interrupt is due, which the next check point
+    /// then takes.
     fn refill(&mut self, state: &mut AgState) {
-        let hardware = &self.devices.hardware;
-        self.budget = if hardware.pending_interrupt().is_some() {
+        self.budget = if self.due(mask(state.sr)).is_some() {
             0
         } else {
-            let until = i32::try_from(hardware.until_event()).unwrap_or(i32::MAX);
-            refresh::shrink(self.options.slice.min(until))
+            let left = self.options.max_cycles.saturating_sub(self.cycles);
+            let cap = i32::try_from(left).unwrap_or(i32::MAX).max(1);
+            let horizon = self.horizon(self.devices.clock_at(0)).min(cap);
+            // At most the horizon, so it fits.
+            self.refresh.until(0, horizon.unsigned_abs()) as i32
         };
         state.cycles = self.budget;
     }
@@ -427,10 +494,20 @@ impl Context {
             && self.waits_forever(mask(state.sr))
     }
 
-    /// Ends the run at `pc`.
+    /// Ends the run at `pc`. The interpreter can end it between table rows; the next run
+    /// goes on there through the interpreter.
     fn end(&mut self, exit: Exit) -> u32 {
         self.exit = Some(exit);
-        UNWIND | exit.pc()
+        let pc = exit.pc();
+        self.stopped_between(pc);
+        UNWIND | pc
+    }
+
+    /// Notes that execution stopped at `pc`, which may lie between table rows.
+    fn stopped_between(&mut self, pc: u32) {
+        if self.row(pc).is_none() {
+            self.between.insert(pc);
+        }
     }
 
     /// Takes the interrupt at `level` before the instruction at `pc`: acknowledges it,
@@ -440,6 +517,7 @@ impl Context {
     /// # Safety
     /// As for [`Context::bus`].
     unsafe fn enter_interrupt(&mut self, state: &mut AgState, level: u8, pc: u32) -> u32 {
+        self.stopped_between(pc);
         self.devices.hardware.acknowledge(level);
         self.interrupts[usize::from(level)] += 1;
         let mut cpu = load_cpu(state, pc);
@@ -496,12 +574,17 @@ impl Context {
         })
     }
 
-    /// The top level continuing at `address` after a return reached it.
+    /// The top level continuing at `address` after a return reached it, or where the last
+    /// run ended.
     fn resume(&mut self, address: u32) -> AgFn {
-        self.row(address).unwrap_or_else(|| {
+        if let Some(function) = self.row(address) {
+            function
+        } else if self.between.contains(&address) {
+            interpret_block
+        } else {
             self.devices.log.miss(address).resumes += 1;
             interpret
-        })
+        }
     }
 
     /// Runs one instruction at `cpu.pc`, lifted from the cache when it lies in ROM.
@@ -551,15 +634,33 @@ unsafe fn parts<'a>(state: *mut AgState) -> (&'a mut AgState, &'a mut Context) {
     }
 }
 
-/// `ag_check`, also called by the interpreter: the scheduler. It charges the budget's
-/// cycles, applies the depth guard and the run limits, delivers every interrupt the mask
-/// lets through (handlers run natively from here), and starts the next budget. Returns
-/// `pc` to continue, or where execution goes instead.
+/// `ag_check`: the scheduler at a native check point, where an interrupt it takes is late
+/// (see the module docs).
+///
+/// # Safety
+/// As for [`check`].
+pub(crate) unsafe fn check_native(state: *mut AgState, pc: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { schedule(state, pc, true) }
+}
+
+/// The scheduler at an instruction boundary of the interpreter.
 ///
 /// # Safety
 /// `state` must be the state of a running [`Runtime::run`], with nothing borrowing it or its
 /// context.
-pub(crate) unsafe fn check(state: *mut AgState, pc: u32) -> u32 {
+unsafe fn check(state: *mut AgState, pc: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { schedule(state, pc, false) }
+}
+
+/// The scheduler: charges the budget's cycles, applies the depth guard and the run limits,
+/// delivers every interrupt the mask lets through (handlers run natively from here), and
+/// starts the next budget. Returns `pc` to continue, or where execution goes instead.
+///
+/// # Safety
+/// As for [`check`].
+unsafe fn schedule(state: *mut AgState, pc: u32, native: bool) -> u32 {
     // SAFETY: every borrow from `parts` ends before the next native call.
     unsafe {
         loop {
@@ -574,6 +675,9 @@ pub(crate) unsafe fn check(state: *mut AgState, pc: u32) -> u32 {
             let Some(level) = ctx.due(mask(st.sr)) else {
                 break;
             };
+            if native {
+                ctx.late += 1;
+            }
             let next = interrupt(state, level, pc);
             if next != pc {
                 return next;
@@ -585,6 +689,52 @@ pub(crate) unsafe fn check(state: *mut AgState, pc: u32) -> u32 {
         }
         ctx.refill(st);
         pc
+    }
+}
+
+/// `ag_deliver`, also called by the interpreter: after a write to SR, at the instruction
+/// boundary `pc`, takes every interrupt the new mask lets through. Never ends the run.
+///
+/// # Safety
+/// As for [`check`].
+pub(crate) unsafe fn deliver(state: *mut AgState, pc: u32) -> u32 {
+    // SAFETY: every borrow from `parts` ends before the next native call.
+    unsafe {
+        let (st, ctx) = parts(state);
+        if ctx.due(mask(st.sr)).is_none() {
+            return pc;
+        }
+        loop {
+            let (st, ctx) = parts(state);
+            ctx.charge(st);
+            let Some(level) = ctx.due(mask(st.sr)) else {
+                break;
+            };
+            let next = interrupt(state, level, pc);
+            if next != pc {
+                return next;
+            }
+        }
+        let (st, ctx) = parts(state);
+        ctx.refill(st);
+        pc
+    }
+}
+
+/// `ag_hybrid`: the budget may end inside the block starting at `pc`, so the interpreter
+/// runs it, up to the next table row. Returns that row with [`HYBRID_ROW`] set, or where
+/// execution goes instead (a return, a rewritten stacked PC, an unwind).
+///
+/// # Safety
+/// As for [`check`].
+pub(crate) unsafe fn hybrid(state: *mut AgState, pc: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe {
+        parts(state).1.hybrids += 1;
+        match run_interpreter(state, pc, false) {
+            Ending::Row(row) => row | HYBRID_ROW,
+            Ending::Leave(next) => next,
+        }
     }
 }
 
@@ -617,9 +767,9 @@ pub(crate) unsafe fn stop(state: *mut AgState, resume: u32) -> u32 {
             }
             // Nothing runs while stopped, so the wait to the next event is used at once, and
             // it causes no refresh.
-            let until = ctx.devices.hardware.until_event();
-            ctx.budget = i32::try_from(until).unwrap_or(i32::MAX);
-            ctx.waited = until;
+            let until = ctx.horizon(ctx.devices.clock_at(0));
+            ctx.budget = until;
+            ctx.waited = until.unsigned_abs();
         }
     }
 }
@@ -730,6 +880,39 @@ fn store_cpu(cpu: &Cpu, state: &mut AgState) {
 /// Called by translated code or the top level, with the state of a running
 /// [`Runtime::run`].
 unsafe extern "C" fn interpret(state: *mut AgState, start: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    match unsafe { run_interpreter(state, start, true) } {
+        Ending::Row(next) | Ending::Leave(next) => next,
+    }
+}
+
+/// The entry the top level goes on through where the last run ended between table rows:
+/// the rest of that block, run as `ag_hybrid` runs it.
+///
+/// # Safety
+/// As for [`interpret`].
+unsafe extern "C" fn interpret_block(state: *mut AgState, start: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    match unsafe { run_interpreter(state, start, false) } {
+        Ending::Row(next) | Ending::Leave(next) => next,
+    }
+}
+
+/// How the interpreter handed control back.
+enum Ending {
+    /// The next instruction has a table row.
+    Row(u32),
+    /// A return, a call that came back elsewhere, a rewritten stacked PC or an unwind.
+    Leave(u32),
+}
+
+/// Runs instructions from `start` until the next one has an `ag_table` row (see
+/// [`interpret`]). `miss` counts them as a dispatcher miss; the hybrid path runs translated
+/// blocks and counts none.
+///
+/// # Safety
+/// As for [`interpret`].
+unsafe fn run_interpreter(state: *mut AgState, start: u32, miss: bool) -> Ending {
     // SAFETY: the state of a running run points at its context, and neither is borrowed
     // while this function runs; borrows made here end before every nested native call,
     // which derives its own.
@@ -738,53 +921,76 @@ unsafe extern "C" fn interpret(state: *mut AgState, start: u32) -> u32 {
         let mut first = true;
         loop {
             let pc = cpu.pc.get();
-            let (st, ctx) = parts(state);
-            if !first && ctx.row(pc).is_some() {
-                store_cpu(&cpu, st);
-                return pc;
-            }
-            first = false;
+            let (st, _) = parts(state);
+            // A budget that ran out here is this boundary's, even where a row starts.
             if st.cycles <= 0 {
                 store_cpu(&cpu, st);
                 let next = check(state, pc);
                 if next != pc {
-                    return next;
+                    return Ending::Leave(next);
                 }
                 cpu = load_cpu(&*state, pc);
             }
             let (st, ctx) = parts(state);
+            if !first && ctx.row(pc).is_some() {
+                store_cpu(&cpu, st);
+                return Ending::Row(pc);
+            }
+            first = false;
             let step = ctx.step(st, &mut cpu);
             st.cycles -= i32::from(step.cycles);
             ctx.charge_stall(st);
-            ctx.devices.log.miss(start).instructions += 1;
+            if miss {
+                ctx.devices.log.miss(start).instructions += 1;
+            }
             if step.outcome.reset_devices {
                 ctx.devices.reset();
             }
-            if ctx.due(mask(cpu.sr())).is_some() {
-                ctx.check_soon(st);
+            if ctx.devices.hardware.take_rescheduled() {
+                ctx.reschedule(st);
             }
+            let due = ctx.due(mask(cpu.sr())).is_some();
             match step.outcome.transfer {
                 Some(Transfer::Call {
                     target,
                     return_address,
                 }) => {
+                    if due {
+                        ctx.check_soon(st);
+                    }
                     store_cpu(&cpu, st);
                     let function = ctx.lookup(target.get());
                     let next = function(state, target.get());
                     if next != return_address.get() {
-                        return next;
+                        return Ending::Leave(next);
                     }
                     cpu = load_cpu(&*state, next);
                 }
+                // As translated code does: an interrupt RTE let through is taken at its target.
                 Some(Transfer::Return { target, .. }) => {
                     store_cpu(&cpu, st);
-                    return target.get();
+                    let next = if due {
+                        deliver(state, target.get())
+                    } else {
+                        target.get()
+                    };
+                    return Ending::Leave(next);
                 }
                 Some(Transfer::Stop { resume }) => {
                     store_cpu(&cpu, st);
                     let next = stop(state, resume.get());
                     if next != resume.get() {
-                        return next;
+                        return Ending::Leave(next);
+                    }
+                    cpu = load_cpu(&*state, next);
+                }
+                // An interrupt the instruction made due is taken before the next one.
+                _ if due => {
+                    let next = cpu.pc.get();
+                    store_cpu(&cpu, st);
+                    let after = deliver(state, next);
+                    if after != next {
+                        return Ending::Leave(after);
                     }
                     cpu = load_cpu(&*state, next);
                 }
@@ -823,12 +1029,10 @@ impl Runtime {
         state.a[7] = rom.vectors().initial_ssp();
         state.pc = rom.vectors().reset_pc() & ADDRESS_MASK;
         state.sr = RESET_SR;
-        let budget = refresh::shrink(options.slice);
-        state.cycles = budget;
-        let context = Box::new(Context {
+        let mut context = Box::new(Context {
             devices: Devices::new(hardware, options.version, options.open_bus),
             table,
-            budget,
+            budget: 0,
             waited: 0,
             refresh: Refresh::default(),
             options,
@@ -840,9 +1044,13 @@ impl Runtime {
             stopped: None,
             frame_limit: None,
             interrupts: [0; 8],
+            late: 0,
+            hybrids: 0,
+            between: HashSet::new(),
             idle: None,
             hook: None,
         });
+        context.refill(&mut state);
         Self {
             rom,
             state,
@@ -931,6 +1139,17 @@ impl Runtime {
             .get(usize::from(level))
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Interrupts taken at a native check point after the instruction boundary they were due
+    /// at had passed: an event a device stall carried past, or one an access made due.
+    pub fn late_interrupts(&self) -> u64 {
+        self.context.late
+    }
+
+    /// Blocks run through the interpreter because the budget could end inside them.
+    pub fn hybrid_blocks(&self) -> u64 {
+        self.context.hybrids
     }
 
     /// Whether the CPU is waiting in a STOP.

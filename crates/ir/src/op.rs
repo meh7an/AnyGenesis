@@ -369,6 +369,12 @@ impl Body {
             .collect();
         crate::flags::without(self, &charges)
     }
+
+    /// Returns whether the body writes the whole status register (MOVE, ANDI, ORI and EORI
+    /// to SR, RTE, STOP), which may let a waiting interrupt through.
+    pub fn writes_sr(&self) -> bool {
+        self.ops.iter().any(|op| matches!(op, Op::WriteSr { .. }))
+    }
 }
 
 /// The static cycles of one instruction per path, opcode fetch and prefetch included; the
@@ -384,6 +390,10 @@ pub struct Cycles {
 
 /// The cycles a privilege violation takes (Table 8-14 of the 68000 manual).
 pub const PRIVILEGE_CYCLES: u16 = 34;
+
+/// The most one [`Op::Cycles`] charge can be: DIVS's 150 + 4 + 2 (DIVU's most is 136, a
+/// register-count shift's 126, MUL's 32, the conditional charges' 2).
+pub const MAX_CHARGE: u16 = 156;
 
 impl Cycles {
     /// The static cycles when the instruction leaves through `control`. A privilege
@@ -415,6 +425,23 @@ impl Lifted {
     /// Returns the address of the instruction after this one.
     pub const fn next(&self) -> Address {
         self.address.wrapping_add(self.length)
+    }
+
+    /// The most cycles the instruction can take on any path, data-dependent charges at
+    /// their maximum: a bound for deciding whether an event can fall inside it.
+    pub fn max_cycles(&self) -> u32 {
+        let mut most = self.cycles.not_taken;
+        let mut charges = 0;
+        for op in &self.body.ops {
+            match op {
+                Op::Branch { control, .. } | Op::Exit(control) => {
+                    most = most.max(self.cycles.leaving(control));
+                }
+                Op::Cycles { .. } => charges += 1,
+                _ => {}
+            }
+        }
+        u32::from(most) + charges * u32::from(MAX_CHARGE)
     }
 }
 

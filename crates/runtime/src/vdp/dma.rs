@@ -34,10 +34,11 @@ fn slots_per_line(mode: HMode) -> (u64, u64) {
     }
 }
 
-/// The master clock where `slots` access slots from now have been used.
-pub(super) fn end(timing: &Timing, slots: u64) -> u64 {
+/// The master clock where `slots` access slots from master clock `from` on have been used.
+/// The one place the slot layout lives: real per-line slot positions would replace it.
+pub(super) fn end(timing: &Timing, from: u64, slots: u64) -> u64 {
     let (drawn, blanked) = slots_per_line(timing.mode());
-    let mut clock = timing.clock();
+    let mut clock = from;
     let mut left = slots;
     loop {
         let position = clock % LINE_CLOCKS;
@@ -47,8 +48,14 @@ pub(super) fn end(timing: &Timing, slots: u64) -> u64 {
         } else {
             drawn
         };
-        // The slot at or after the position, and how many the line still has.
-        let first = (position * rate).div_ceil(LINE_CLOCKS);
+        // Slot k of the line starts at ceil(k * LINE_CLOCKS / rate): the first one starting at
+        // or after the position, and how many the line still has. A run of slots ends where
+        // the next one starts, so the next run takes that one.
+        let first = if position == 0 {
+            0
+        } else {
+            (position - 1) * rate / LINE_CLOCKS + 1
+        };
         let free = rate - first;
         if left <= free {
             return start + ((first + left) * LINE_CLOCKS).div_ceil(rate);
@@ -123,7 +130,8 @@ impl Vdp {
             Target::Vram => 2 * u64::from(length),
             Target::Cram | Target::Vsram => length.into(),
         };
-        let end = end(&self.timing, slots);
+        // The transfer starts once the writes waiting in the FIFO have gone out.
+        let end = end(&self.timing, self.drained(), slots);
         self.stall_until(end);
         self.counts.transfers += 1;
     }
@@ -148,7 +156,8 @@ impl Vdp {
         // A length of 0x10000 brings the source round to where it started.
         let source = self.dma_source().wrapping_add(length as u16);
         self.finish_dma(source);
-        self.busy_until = end(&self.timing, length.into());
+        // The data write went through the FIFO; the fill follows it.
+        self.busy_until = end(&self.timing, self.drained(), length.into());
         self.counts.fills += 1;
     }
 
@@ -162,7 +171,7 @@ impl Vdp {
             self.address = self.address.wrapping_add(self.increment());
         }
         self.finish_dma(source);
-        self.busy_until = end(&self.timing, 2 * u64::from(length));
+        self.busy_until = end(&self.timing, self.drained(), 2 * u64::from(length));
         self.counts.copies += 1;
     }
 }
@@ -274,7 +283,8 @@ mod tests {
         );
         assert_eq!(vdp.registers()[19..22], [0, 0, 7]);
         assert_eq!(vdp.take_stall(), 0);
-        let end = (7 * LINE_CLOCKS).div_ceil(167);
+        // The data write's two slots in the FIFO, then the fill's seven.
+        let end = (9 * LINE_CLOCKS).div_ceil(167);
         assert_ne!(read(&mut vdp, port::CONTROL) & status::DMA_BUSY, 0);
         vdp.advance((end / 7) as u32);
         assert_ne!(vdp.status() & status::DMA_BUSY, 0);
@@ -318,9 +328,17 @@ mod tests {
         timing.set_register(12, 0x81);
         timing.set_register(1, 0x44);
         // 18 slots a drawn H40 line: 36 take two whole lines.
-        assert_eq!(end(&timing, 36), 2 * LINE_CLOCKS);
+        assert_eq!(end(&timing, 0, 36), 2 * LINE_CLOCKS);
         timing.set_register(1, 0x04);
-        assert_eq!(end(&timing, 36), (36 * LINE_CLOCKS).div_ceil(205));
-        assert_eq!(end(&timing, 0), 0);
+        assert_eq!(end(&timing, 0, 36), (36 * LINE_CLOCKS).div_ceil(205));
+        assert_eq!(end(&timing, 0, 0), 0);
+        // From inside a line, the slots left in it come first.
+        timing.set_register(1, 0x44);
+        let half = LINE_CLOCKS / 2;
+        assert_eq!(end(&timing, half, 9), LINE_CLOCKS);
+        assert_eq!(
+            end(&timing, half, 10),
+            LINE_CLOCKS + LINE_CLOCKS.div_ceil(18)
+        );
     }
 }

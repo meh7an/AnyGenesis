@@ -106,9 +106,13 @@ impl<'a> Program<'a> {
         }
     }
 
-    /// Returns the flags live when the instruction falls through.
+    /// Returns the flags live when the instruction falls through. After a write to SR an
+    /// interrupt may be taken at once, so with check points reading SR its frame needs all.
     pub fn live_out(&self, site: &Site, context: &impl Context) -> FlagSet {
-        if site.lifted.body.falls_through() {
+        let body = &site.lifted.body;
+        if body.falls_through() && body.writes_sr() && context.check_points_read_sr() {
+            FlagSet::ALL
+        } else if body.falls_through() {
             context.target(site.lifted.next())
         } else {
             FlagSet::EMPTY

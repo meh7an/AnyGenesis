@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anygenesis_analysis::{Block, Function};
-use anygenesis_ir::{Control, Lifted, Op, Value, exception_entry};
+use anygenesis_ir::{Control, Lifted, Op, ReturnKind, Value, exception_entry};
 use anygenesis_m68k::{Dialect, FormatOptions};
 use anygenesis_shared::Address;
 
@@ -153,7 +153,13 @@ impl<'a> Emitter<'a> {
                 self.resume.insert(address);
                 self.labels.insert(address);
             }
-            self.line(4, format!("AG_CHECK(s, {});", constant(address.get())));
+            let pc = constant(address.get());
+            if self.context.options.cycles {
+                let bound = self.block_bound(index);
+                self.line(4, format!("AG_HCHECK(s, {pc}, {bound});"));
+            } else {
+                self.line(4, format!("AG_CHECK(s, {pc});"));
+            }
         }
         if self.context.options.cycles && self.starts_segment(index) {
             let cost = self.segment_cost(index);
@@ -225,6 +231,10 @@ impl<'a> Emitter<'a> {
         if !body.ops.is_empty() {
             self.line(4, "}");
         }
+        if body.falls_through() && body.writes_sr() {
+            let after = constant(self.slots[index].lifted.next().get());
+            self.line(4, format!("AG_DELIVER(s, {after});"));
+        }
         if address == block.last && body.falls_through() {
             let lines = self.continue_at(block.end, next);
             self.lines(4, lines);
@@ -252,6 +262,17 @@ impl<'a> Emitter<'a> {
             let directive = format!("#line {line} \"{}\"", escape(&lines.file));
             self.parts.push(Part::Line(directive));
         }
+    }
+
+    /// The most cycles the block can take from its start at `index` to its end, for
+    /// `AG_HCHECK`: a budget holding more cannot end inside it.
+    fn block_bound(&self, index: usize) -> u32 {
+        let block = self.slots[index].block;
+        self.slots[index..]
+            .iter()
+            .take_while(|slot| std::ptr::eq(slot.block, block))
+            .map(|slot| slot.lifted.max_cycles())
+            .sum()
     }
 
     /// Cycles of the instructions from `index` up to the next one that can leave early, as
@@ -299,6 +320,17 @@ impl<'a> Emitter<'a> {
                 target,
                 return_address,
             } => self.indirect_call(printer.value(target), index, return_address, next),
+            // RTE may lower the mask: an interrupt it lets through is taken at its target.
+            Control::Return {
+                kind: ReturnKind::Rte,
+                target,
+            } => {
+                vec![format!(
+                    "return ag_deliver(s, {} & {});",
+                    printer.value(target),
+                    constant(ADDRESS_MASK)
+                )]
+            }
             Control::Return { target, .. } => {
                 vec![format!(
                     "return {} & {};",

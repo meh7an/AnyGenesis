@@ -55,7 +55,7 @@ L_000200:;
         uint32_t t7 = t5 + 0x4u;
         s->a[7] = t7;
         ag_write_sr(s, t3);
-        return t6 & 0xFFFFFFu;
+        return ag_deliver(s, t6 & 0xFFFFFFu);
     }
 }
 

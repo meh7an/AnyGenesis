@@ -25,7 +25,7 @@ uint32_t f_000200(AgState *s, uint32_t pc)
 {
     (void)pc;
 L_000200:;
-    AG_CHECK(s, 0x200u);
+    AG_HCHECK(s, 0x200u, 34);
     AG_CYCLES(s, 20);
     /* 000200  rte */
 #line 10 "synthetic.asm"
@@ -60,7 +60,7 @@ L_000200:;
         uint32_t t7 = t5 + 0x4u;
         s->a[7] = t7;
         ag_write_sr(s, t3);
-        return t6 & 0xFFFFFFu;
+        return ag_deliver(s, t6 & 0xFFFFFFu);
     }
 }
 
@@ -78,7 +78,7 @@ uint32_t f_000300(AgState *s, uint32_t pc)
             goto L_000310;
         }
     }
-    AG_CHECK(s, 0x300u);
+    AG_HCHECK(s, 0x300u, 52);
     AG_CYCLES(s, 18);
     /* 000300  bsr     $400 */
 #line 11 "synthetic.asm"
@@ -131,7 +131,7 @@ L_00030A:;
         }
     }
 L_00030E:;
-    AG_CHECK(s, 0x30Eu);
+    AG_HCHECK(s, 0x30Eu, 4);
     AG_CYCLES(s, 4);
     /* 00030E  addq.w  #1, d2 */
 #line 15 "synthetic.asm"
@@ -150,7 +150,7 @@ L_00030E:;
         s->x = (uint8_t)t5;
     }
 L_000310:;
-    AG_CHECK(s, 0x310u);
+    AG_HCHECK(s, 0x310u, 10);
     AG_CYCLES(s, 10);
     /* 000310  bra     $600 */
 #line 16 "synthetic.asm"
@@ -169,7 +169,7 @@ uint32_t f_000400(AgState *s, uint32_t pc)
             goto L_000408;
         }
     }
-    AG_CHECK(s, 0x400u);
+    AG_HCHECK(s, 0x400u, 4);
     AG_CYCLES(s, 4);
     /* 000400  moveq   #$3, d0 */
 #line 17 "synthetic.asm"
@@ -177,7 +177,7 @@ uint32_t f_000400(AgState *s, uint32_t pc)
         s->d[0] = 0x3u;
     }
 L_000402:;
-    AG_CHECK(s, 0x402u);
+    AG_HCHECK(s, 0x402u, 172);
     AG_CYCLES(s, 16);
     /* 000402  addq.w  #1, d2 */
 #line 18 "synthetic.asm"
@@ -202,7 +202,7 @@ L_000402:;
         AG_CYCLES(s, (int32_t)0x2u);
     }
 L_000408:;
-    AG_CHECK(s, 0x408u);
+    AG_HCHECK(s, 0x408u, 16);
     AG_CYCLES(s, 16);
     /* 000408  rts */
 #line 20 "synthetic.asm"
@@ -218,7 +218,7 @@ L_000408:;
 uint32_t f_000500(AgState *s, uint32_t pc)
 {
     (void)pc;
-    AG_CHECK(s, 0x500u);
+    AG_HCHECK(s, 0x500u, 84);
     AG_CYCLES(s, 84);
     /* 000500  move.w  d0, $8000.w */
 #line 21 "synthetic.asm"
@@ -275,7 +275,7 @@ uint32_t f_000500(AgState *s, uint32_t pc)
 uint32_t f_000600(AgState *s, uint32_t pc)
 {
     (void)pc;
-    AG_CHECK(s, 0x600u);
+    AG_HCHECK(s, 0x600u, 16);
     AG_CYCLES(s, 16);
     /* 000600  rts */
 #line 28 "synthetic.asm"

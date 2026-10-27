@@ -55,7 +55,7 @@ L_000200:;
         uint32_t t7 = t5 + 0x4u;
         s->a[7] = t7;
         ag_write_sr(s, t3);
-        return t6 & 0xFFFFFFu;
+        return ag_deliver(s, t6 & 0xFFFFFFu);
     }
 }
 
@@ -115,6 +115,7 @@ L_000302:;
         uint32_t t2 = (s->d[0]) & 0xFFFFu;
         ag_write_sr(s, t2);
     }
+    AG_DELIVER(s, 0x304u);
     /* 000304  divu.w  d1, d0 */
     {
         uint32_t t0 = (s->d[1]) & 0xFFFFu;

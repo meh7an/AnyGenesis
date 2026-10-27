@@ -57,11 +57,19 @@ pub trait Hardware: Any + Debug {
     fn read(&mut self, port: u8, size: Size) -> u16;
     /// Writes `port`; `memory` is there for DMA from ROM or RAM.
     fn write(&mut self, port: u8, size: Size, value: u16, memory: Memory<'_>);
-    /// Moves the hardware's clock on by `cycles` 68000 cycles.
-    fn advance(&mut self, cycles: u32);
-    /// 68000 cycles until the next point where an interrupt may become pending, at least 1:
-    /// the scheduler runs code that long before it looks again.
-    fn until_event(&self) -> u32;
+    /// Moves the hardware's clock on to `clock`, in master clocks since power-on; the
+    /// scheduler never moves it back.
+    fn advance_to(&mut self, clock: u64);
+    /// The master clock after now where an enabled interrupt may next become pending;
+    /// `None` while none can. The scheduler runs code up to there before it looks again.
+    fn next_interrupt(&self) -> Option<u64>;
+    /// The master clock after now where the next frame ends.
+    fn next_frame(&self) -> u64;
+    /// Whether an access since the last call may have moved [`Hardware::next_interrupt`]
+    /// earlier (an enable bit, a reload value, the mode), so the budget must be cut to it.
+    fn take_rescheduled(&mut self) -> bool {
+        false
+    }
     /// Frames that have ended so far: vertical blanking periods begun.
     fn frames(&self) -> u64;
     /// Returns the highest interrupt level the hardware asserts.

@@ -256,11 +256,51 @@ impl Timing {
         self.clock = target;
     }
 
-    /// 68000 cycles until the next point where an interrupt may become pending, at least 1.
-    pub fn until_event(&self) -> u32 {
-        let clocks = self.next_event() - self.clock;
-        // A line is far below u32::MAX cycles.
-        clocks.div_ceil(CPU_DIVIDER) as u32
+    /// The master clock after now where an enabled interrupt next becomes pending: the
+    /// vertical interrupt point while it is enabled, and the line where the line counter
+    /// runs out while the horizontal one is; `None` while neither is enabled. Register
+    /// writes can move it.
+    pub fn next_interrupt(&self) -> Option<u64> {
+        let vint = self.vint_enabled.then(|| self.next_frame());
+        let hint = self.hint_enabled.then(|| self.next_hint());
+        vint.into_iter().chain(hint).min()
+    }
+
+    /// The master clock after now where the next frame ends: its vertical interrupt point.
+    pub fn next_frame(&self) -> u64 {
+        let position = self.clock % FRAME_CLOCKS;
+        let point = ACTIVE_LINES * LINE_CLOCKS + self.mode.line_positions().vint;
+        let start = self.clock - position;
+        if position < point {
+            start + point
+        } else {
+            start + FRAME_CLOCKS + point
+        }
+    }
+
+    /// Where the line counter next runs out, stepping it ahead as [`Timing::apply`] does.
+    fn next_hint(&self) -> u64 {
+        let at = self.mode.line_positions().hblank_start;
+        let position = self.position();
+        // A step at the current clock has been applied already.
+        let mut line_start = self.clock - position;
+        if position >= at {
+            line_start += LINE_CLOCKS;
+        }
+        let mut counter = self.line_counter;
+        // The counter reloads every frame, so a frame and its reload lines bound the walk.
+        for _ in 0..2 * LINES {
+            let line = line_start / LINE_CLOCKS % LINES;
+            if line > ACTIVE_LINES {
+                counter = self.line_reload;
+            } else if counter == 0 {
+                return line_start + at;
+            } else {
+                counter -= 1;
+            }
+            line_start += LINE_CLOCKS;
+        }
+        unreachable!("the line counter runs out within two frames")
     }
 
     /// The level the VDP asserts: a pending interrupt whose enable bit is set.
@@ -524,17 +564,40 @@ mod tests {
     }
 
     #[test]
-    fn test_until_event_reaches_the_next_line_counter_step() {
-        let mut timing = Timing::default();
-        let wait = timing.until_event();
-        assert_eq!(wait, cycles(H32.hblank_start));
-        timing.advance(wait - 1);
-        assert_eq!(timing.until_event(), 1);
-        timing.advance(1);
-        assert!(timing.clock() >= H32.hblank_start);
+    fn test_next_interrupt_is_an_enabled_one_only() {
+        let mut timing = h40();
+        assert_eq!(timing.next_interrupt(), None);
+        let vint = ACTIVE_LINES * LINE_CLOCKS + H40.vint;
+        assert_eq!(timing.next_frame(), vint);
+        timing.set_register(1, 0x64);
+        assert_eq!(timing.next_interrupt(), Some(vint));
+        // From the VInt point on, the next one is a frame later.
+        advance_to(&mut timing, vint);
+        assert_eq!(timing.next_interrupt(), Some(vint + FRAME_CLOCKS));
+    }
+
+    #[test]
+    fn test_next_interrupt_finds_the_line_the_counter_runs_out_on() {
+        let mut timing = h40();
+        timing.set_register(10, 4);
+        timing.set_register(0, 0x10);
+        // The counter starts at 0: it fires on line 0, then every 5 lines.
+        assert_eq!(timing.next_interrupt(), Some(H40.hblank_start));
+        advance_to(&mut timing, H40.hblank_start);
+        assert_eq!(timing.pending(), Some(HINT_LEVEL));
+        let next = 5 * LINE_CLOCKS + H40.hblank_start;
+        assert_eq!(timing.next_interrupt(), Some(next));
+        advance_to(&mut timing, next - CPU_DIVIDER);
+        timing.acknowledge(HINT_LEVEL);
+        assert_eq!(timing.pending(), None);
+        advance_to(&mut timing, next);
+        assert_eq!(timing.pending(), Some(HINT_LEVEL));
+        // Line 220 fires; 225 would come next, but lines past 224 reload the counter, so the
+        // next frame starts counting from 4 and runs out on line 4.
+        advance_to(&mut timing, 220 * LINE_CLOCKS + H40.hblank_start);
         assert_eq!(
-            u64::from(timing.until_event()),
-            (LINE_CLOCKS + H32.hblank_start - timing.clock()).div_ceil(CPU_DIVIDER)
+            timing.next_interrupt(),
+            Some(FRAME_CLOCKS + 4 * LINE_CLOCKS + H40.hblank_start)
         );
     }
 

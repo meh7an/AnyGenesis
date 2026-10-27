@@ -12,9 +12,12 @@
 //! first word waits is a register write instead. Status reads and data-port accesses drop
 //! a waiting first word.
 //!
-//! Data-port writes complete at once: there is no FIFO, so the status register always
-//! reads it empty. VRAM keeps bytes in the 68000's order; a word written to an odd address
-//! lands with its bytes swapped. CRAM keeps its 9 colour bits as 0x0EEE, VSRAM 11 bits.
+//! Data-port writes go through a four-entry FIFO ([`fifo`]) that drains through the access
+//! slots of each line; the 68000 waits while it is full, a 68K-to-VDP DMA, a fill or a copy
+//! starts once it has drained, and a data-port read waits for it to drain and for a slot.
+//! The status register shows it empty or full. VRAM keeps bytes in the 68000's order; a word
+//! written to an odd address lands with its bytes swapped. CRAM keeps its 9 colour bits as
+//! 0x0EEE, VSRAM 11 bits.
 //!
 //! Sources (behaviour only, no emulator code read): Plutiedev's VDP register reference
 //! (register bits, DMA registers and types), Kabuto's hardware notes (status upper bits,
@@ -25,6 +28,7 @@
 //! outside their bits, and VSRAM above its 40 words reads 0 and ignores writes.
 
 mod dma;
+mod fifo;
 pub mod render;
 
 use anygenesis_shared::Size;
@@ -34,7 +38,10 @@ use crate::{
     hardware::{Hardware, Memory},
     log::AccessKind,
     timing::{ACTIVE_LINES, CPU_DIVIDER, Timing},
-    vdp::render::{Screen, Source},
+    vdp::{
+        fifo::Fifo,
+        render::{Screen, Source},
+    },
 };
 
 /// Bytes of VRAM.
@@ -56,6 +63,8 @@ pub mod status {
     pub const FIXED: u16 = 0x3400;
     /// The write FIFO is empty.
     pub const FIFO_EMPTY: u16 = 0x0200;
+    /// The write FIFO is full: the next data-port write waits.
+    pub const FIFO_FULL: u16 = 0x0100;
     /// A fill or copy DMA is in progress.
     pub const DMA_BUSY: u16 = 0x0002;
 }
@@ -129,8 +138,11 @@ pub struct Vdp {
     busy_until: u64,
     /// The HV counter as frozen by register 0 bit 1.
     latch: Option<u16>,
+    fifo: Fifo,
     /// 68000 cycles the last access froze the CPU for, until the bus takes them.
     stall: u32,
+    /// A register write may have moved the next interrupt, until the scheduler asks.
+    rescheduled: bool,
     /// What the last access did that no rule covers, until the bus takes it.
     fault: Option<AccessKind>,
     counts: Counts,
@@ -151,7 +163,9 @@ impl Default for Vdp {
             fill: false,
             busy_until: 0,
             latch: None,
+            fifo: Fifo::default(),
             stall: 0,
+            rescheduled: false,
             fault: None,
             counts: Counts::default(),
             screen: Screen::default(),
@@ -192,12 +206,18 @@ impl Vdp {
 
     /// The status register.
     pub fn status(&self) -> u16 {
-        let busy = if self.timing.clock() < self.busy_until {
+        let now = self.timing.clock();
+        let busy = if now < self.busy_until {
             status::DMA_BUSY
         } else {
             0
         };
-        status::FIXED | status::FIFO_EMPTY | self.timing.status() | busy
+        let fifo = match self.fifo.len(now) {
+            0 => status::FIFO_EMPTY,
+            fifo::DEPTH.. => status::FIFO_FULL,
+            _ => 0,
+        };
+        status::FIXED | fifo | self.timing.status() | busy
     }
 
     /// The HV counter, frozen while register 0 bit 1 is set.
@@ -261,6 +281,8 @@ impl Vdp {
         };
         *slot = value;
         self.timing.set_register(register, value);
+        // The interrupt enables, the line counter's reload value and the mode move events.
+        self.rescheduled |= matches!(register, 0 | 1 | 10 | 12);
         match register {
             0 if value & 0x02 == 0 => self.latch = None,
             0 => {
@@ -296,6 +318,7 @@ impl Vdp {
                 target,
                 write: true,
             }) => {
+                self.queue_write(target);
                 self.write_target(target, value);
                 if self.fill {
                     self.run_fill(target, value);
@@ -313,6 +336,9 @@ impl Vdp {
                 target,
                 write: false,
             }) => {
+                // Chosen, unverified: the read takes the first slot after the FIFO drained.
+                let ready = dma::end(&self.timing, self.drained(), 1);
+                self.stall_until(ready);
                 let value = self.read_target(target);
                 self.address = self.address.wrapping_add(self.increment());
                 value
@@ -361,6 +387,27 @@ impl Vdp {
         }
     }
 
+    /// Where the FIFO's queued writes have all gone out: now when it is empty.
+    fn drained(&self) -> u64 {
+        self.fifo.drained(self.timing.clock())
+    }
+
+    /// Queues a data-port write to `target`, freezing the 68000 while the FIFO is full.
+    fn queue_write(&mut self, target: Target) {
+        let slots = match target {
+            Target::Vram => 2,
+            Target::Cram | Target::Vsram => 1,
+        };
+        let ready = self.fifo.push(&self.timing, self.timing.clock(), slots);
+        self.stall_until(ready);
+    }
+
+    /// Moves time on by `cycles` 68000 cycles: [`Hardware::advance_to`] for tests and tools
+    /// that drive the VDP alone.
+    pub fn advance(&mut self, cycles: u32) {
+        self.advance_to(self.timing.clock() + u64::from(cycles) * CPU_DIVIDER);
+    }
+
     /// Freezes the 68000 until master clock `end`.
     fn stall_until(&mut self, end: u64) {
         let clocks = end.saturating_sub(self.timing.clock());
@@ -398,8 +445,7 @@ impl Hardware for Vdp {
         }
     }
 
-    fn advance(&mut self, cycles: u32) {
-        let target = self.timing.clock() + u64::from(cycles) * CPU_DIVIDER;
+    fn advance_to(&mut self, target: u64) {
         loop {
             let pixels = self.timing.next_pixels();
             if pixels > target {
@@ -411,8 +457,16 @@ impl Hardware for Vdp {
         self.timing.advance_to(target);
     }
 
-    fn until_event(&self) -> u32 {
-        self.timing.until_event()
+    fn next_interrupt(&self) -> Option<u64> {
+        self.timing.next_interrupt()
+    }
+
+    fn next_frame(&self) -> u64 {
+        self.timing.next_frame()
+    }
+
+    fn take_rescheduled(&mut self) -> bool {
+        std::mem::take(&mut self.rescheduled)
     }
 
     fn frames(&self) -> u64 {
@@ -676,6 +730,93 @@ mod tests {
         assert_eq!(read(&mut vdp, port::HV), hv);
         write(&mut vdp, port::CONTROL, &[0x8000]);
         assert_ne!(read(&mut vdp, port::HV), hv);
+    }
+
+    /// A VDP in H40 with the display on, writing VRAM from 0: 18 slots a line.
+    fn drawing() -> Vdp {
+        let mut vdp = vdp();
+        write(&mut vdp, port::CONTROL, &[0x8C81, 0x8144]);
+        write(&mut vdp, port::CONTROL, &command(0x01, 0));
+        vdp
+    }
+
+    /// 68000 cycles from master clock 0 to `clock`, rounded up.
+    fn cycles_to(clock: u64) -> u32 {
+        clock.div_ceil(CPU_DIVIDER) as u32
+    }
+
+    #[test]
+    fn test_fifo_holds_four_writes_and_stalls_the_fifth_until_the_first_leaves() {
+        let mut vdp = drawing();
+        write(&mut vdp, port::DATA, &[1, 2, 3]);
+        assert_eq!(vdp.take_stall(), 0);
+        assert_eq!(vdp.status() & (status::FIFO_EMPTY | status::FIFO_FULL), 0);
+        write(&mut vdp, port::DATA, &[4]);
+        assert_eq!(vdp.take_stall(), 0);
+        assert_ne!(vdp.status() & status::FIFO_FULL, 0);
+        // A VRAM word takes two slots of 190 master clocks: the first leaves at 380.
+        write(&mut vdp, port::DATA, &[5]);
+        assert_eq!(vdp.take_stall(), cycles_to(380));
+        // Writes reach VRAM when queued.
+        assert_eq!(vdp.vram()[8..10], [0, 5]);
+        // The fifth leaves after ten slots.
+        vdp.advance(cycles_to(10 * 190) - 1);
+        assert_eq!(vdp.status() & status::FIFO_EMPTY, 0);
+        vdp.advance(1);
+        assert_ne!(vdp.status() & status::FIFO_EMPTY, 0);
+    }
+
+    #[test]
+    fn test_fifo_takes_one_slot_per_cram_word_and_drains_fast_when_blanked() {
+        let mut vdp = drawing();
+        write(&mut vdp, port::CONTROL, &command(0x03, 0));
+        write(&mut vdp, port::DATA, &[1, 2, 3, 4, 5]);
+        assert_eq!(vdp.take_stall(), cycles_to(190));
+        // Display off: 205 slots a line, so two VRAM words leave within 34 master clocks.
+        let mut vdp = drawing();
+        write(&mut vdp, port::CONTROL, &[0x8104]);
+        write(&mut vdp, port::CONTROL, &command(0x01, 0));
+        write(&mut vdp, port::DATA, &[1, 2, 3, 4, 5]);
+        assert_eq!(
+            vdp.take_stall(),
+            cycles_to((2 * timing::LINE_CLOCKS).div_ceil(205))
+        );
+    }
+
+    #[test]
+    fn test_dma_transfer_starts_once_the_fifo_drained() {
+        let mut vdp = drawing();
+        write(&mut vdp, port::DATA, &[1, 2]);
+        // Source word 8, one word, to VRAM 0x100.
+        let registers = [0x8154, 0x9301, 0x9400, 0x9508, 0x9600, 0x9700];
+        write(&mut vdp, port::CONTROL, &registers);
+        write(&mut vdp, port::CONTROL, &command(0x21, 0x0100));
+        // Four slots for the queued writes, then two for the transfer.
+        assert_eq!(vdp.take_stall(), cycles_to(6 * 190));
+    }
+
+    #[test]
+    fn test_data_read_waits_for_the_fifo_and_a_slot() {
+        let mut vdp = drawing();
+        write(&mut vdp, port::DATA, &[0x1234]);
+        write(&mut vdp, port::CONTROL, &command(0x00, 0));
+        assert_eq!(read(&mut vdp, port::DATA), 0x1234);
+        assert_eq!(vdp.take_stall(), cycles_to(3 * 190));
+    }
+
+    #[test]
+    fn test_register_writes_that_move_interrupts_reschedule() {
+        let mut vdp = vdp();
+        vdp.take_rescheduled();
+        for (word, moved) in [
+            (0x8F02, false),
+            (0x8A10, true),
+            (0x8014, true),
+            (0x8C81, true),
+        ] {
+            write(&mut vdp, port::CONTROL, &[word]);
+            assert_eq!(vdp.take_rescheduled(), moved, "{word:04X}");
+        }
     }
 
     #[test]

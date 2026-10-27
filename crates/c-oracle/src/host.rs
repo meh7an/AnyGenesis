@@ -24,6 +24,15 @@ pub trait Host {
     fn stop(&mut self, resume: Address) -> u32;
     /// `ag_check`: returns where execution continues.
     fn check(&mut self, state: &mut AgState, pc: Address) -> u32;
+    /// `ag_hybrid`: only reached while the state's count is above 0, which the hosts here
+    /// never leave it at, so the default stops the run.
+    fn hybrid(&mut self, _state: &mut AgState, pc: Address) -> u32 {
+        panic!("ag_hybrid at {:06X} with a positive budget", pc.get())
+    }
+    /// `ag_deliver`: no host here raises interrupts, so execution goes on at `pc`.
+    fn deliver(&mut self, _state: &mut AgState, pc: Address) -> u32 {
+        pc.get()
+    }
     fn reset_devices(&mut self);
     /// Called before each bus extern with the state's cycle count at that moment.
     fn clock(&mut self, _cycles: i32) {}
@@ -100,6 +109,8 @@ const _: signatures::ag_write32 = ag_write32;
 const _: signatures::ag_lookup = ag_lookup;
 const _: signatures::ag_stop = ag_stop;
 const _: signatures::ag_check = ag_check;
+const _: signatures::ag_hybrid = ag_hybrid;
+const _: signatures::ag_deliver = ag_deliver;
 const _: signatures::ag_reset_devices = ag_reset_devices;
 
 /// # Safety
@@ -180,6 +191,22 @@ pub unsafe extern "C" fn ag_stop(state: *mut AgState, resume: u32) -> u32 {
 pub unsafe extern "C" fn ag_check(state: *mut AgState, pc: u32) -> u32 {
     // SAFETY: forwarded from the caller.
     unsafe { with_host(state, |state, host| host.check(state, Address::new(pc))) }
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_hybrid(state: *mut AgState, pc: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { with_host(state, |state, host| host.hybrid(state, Address::new(pc))) }
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_deliver(state: *mut AgState, pc: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { with_host(state, |state, host| host.deliver(state, Address::new(pc))) }
 }
 
 /// # Safety

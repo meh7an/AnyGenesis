@@ -13,6 +13,7 @@ use crate::{
     hardware::{Hardware, Memory, port},
     io::{self, Io, VERSION_HARDWARE},
     log::{Access, AccessKind, Log},
+    timing::CPU_DIVIDER,
     z80::{self, Z80},
 };
 
@@ -41,8 +42,10 @@ pub(crate) struct Devices {
     pub open_bus: u16,
     /// Accesses that reached a device, so idle detection sees polling.
     pub accesses: u64,
-    /// Cycles of the current budget the hardware has already been moved on by.
-    synced: u32,
+    /// The master clock where the current budget started: the scheduler's time.
+    start: u64,
+    /// The master clock the hardware has been moved on to.
+    synced: u64,
     /// Cycles the hardware froze the 68000 for that the scheduler has not charged yet.
     stall: u32,
 }
@@ -58,6 +61,7 @@ impl Devices {
             version,
             open_bus,
             accesses: 0,
+            start: 0,
             synced: 0,
             stall: 0,
         }
@@ -69,20 +73,26 @@ impl Devices {
         i32::try_from(std::mem::take(&mut self.stall)).unwrap_or(i32::MAX)
     }
 
+    /// The master clock `elapsed` 68000 cycles into the current budget.
+    pub fn clock_at(&self, elapsed: u32) -> u64 {
+        self.start + u64::from(elapsed) * CPU_DIVIDER
+    }
+
     /// Brings the hardware's clock up to `elapsed` cycles into the current budget, so a VDP
     /// access sees the time it happens at rather than the time of the last check point.
     pub fn sync(&mut self, elapsed: u32) {
-        if elapsed > self.synced {
-            self.hardware.advance(elapsed - self.synced);
-            self.synced = elapsed;
+        let clock = self.clock_at(elapsed);
+        if clock > self.synced {
+            self.hardware.advance_to(clock);
+            self.synced = clock;
         }
     }
 
     /// Ends the current budget after `used` cycles: the hardware catches up and the next
-    /// budget starts from zero.
+    /// budget starts there.
     pub fn settle(&mut self, used: u32) {
         self.sync(used);
-        self.synced = 0;
+        self.start = self.clock_at(used);
     }
 
     /// Whether the VDP is usable: a console without TMSS never locks it.

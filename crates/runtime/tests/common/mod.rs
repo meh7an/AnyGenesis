@@ -6,7 +6,7 @@
 
 use anygenesis_abi::{AgState, ram_index};
 use anygenesis_rom::Rom;
-use anygenesis_runtime::{Hardware, Memory, ag_check};
+use anygenesis_runtime::{Hardware, Memory, ag_check, timing::CPU_DIVIDER};
 use anygenesis_shared::Size;
 
 pub const SSP: u32 = 0x00FF_FE00;
@@ -97,8 +97,8 @@ impl Hardware for Scripted {
 
     fn write(&mut self, _port: u8, _size: Size, _value: u16, _memory: Memory<'_>) {}
 
-    fn advance(&mut self, cycles: u32) {
-        self.now += u64::from(cycles);
+    fn advance_to(&mut self, clock: u64) {
+        self.now = clock / CPU_DIVIDER;
         while let Some(&(at, level)) = self.events.get(self.next)
             && at <= self.now
         {
@@ -107,10 +107,12 @@ impl Hardware for Scripted {
         }
     }
 
-    fn until_event(&self) -> u32 {
-        self.events
-            .get(self.next)
-            .map_or(1_000, |&(at, _)| (at - self.now) as u32)
+    fn next_interrupt(&self) -> Option<u64> {
+        self.events.get(self.next).map(|&(at, _)| at * CPU_DIVIDER)
+    }
+
+    fn next_frame(&self) -> u64 {
+        u64::MAX
     }
 
     fn frames(&self) -> u64 {

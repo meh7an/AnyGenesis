@@ -23,6 +23,37 @@
                 return ag_next;                                                             \
         }                                                                                   \
     } while (0)
+/* A block-start check point: once the budget may end inside the block (it holds no more
+   than `bound`, the block's most cycles), also the one a check just started, the interpreter
+   runs the block so an interrupt is taken at its instruction boundary, and execution goes
+   on natively at the next row. */
+#define AG_HYBRID_ROW 0x40000000u
+#define AG_HCHECK(s, pc, bound)                                                             \
+    do {                                                                                    \
+        if ((s)->cycles <= (bound)) {                                                       \
+            if ((s)->cycles <= 0) {                                                         \
+                uint32_t ag_next = ag_check((s), (pc));                                     \
+                if (ag_next != (pc))                                                        \
+                    return ag_next;                                                         \
+            }                                                                               \
+            if ((s)->cycles > 0 && (s)->cycles <= (bound)) {                                \
+                uint32_t ag_next = ag_hybrid((s), (pc));                                    \
+                if (ag_next & AG_HYBRID_ROW) {                                              \
+                    ag_next &= AG_ADDRESS_MASK;                                             \
+                    AgFn *ag_fn = ag_lookup((s), ag_next);                                  \
+                    AG_TAIL return ag_fn((s), ag_next);                                     \
+                }                                                                           \
+                return ag_next;                                                             \
+            }                                                                               \
+        }                                                                                   \
+    } while (0)
+/* After a write to SR: an interrupt the new mask lets through is taken before `pc`. */
+#define AG_DELIVER(s, pc)                                                                   \
+    do {                                                                                    \
+        uint32_t ag_next = ag_deliver((s), (pc));                                           \
+        if (ag_next != (pc))                                                                \
+            return ag_next;                                                                 \
+    } while (0)
 
 /* Status register: the system byte lives in s->sr, each flag in its own field. */
 

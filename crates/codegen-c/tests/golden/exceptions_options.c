@@ -57,7 +57,7 @@ L_000200:;
         uint32_t t7 = t5 + 0x4u;
         s->a[7] = t7;
         ag_write_sr(s, t3);
-        return t6 & 0xFFFFFFu;
+        return ag_deliver(s, t6 & 0xFFFFFFu);
     }
 }
 
@@ -120,6 +120,7 @@ L_000302:;
         uint32_t t2 = (s->d[0]) & 0xFFFFu;
         ag_write_sr(s, t2);
     }
+    AG_DELIVER(s, 0x304u);
     AG_CYCLES(s, 0);
     /* 000304  divu.w  d1, d0 */
     {
@@ -256,7 +257,7 @@ uint32_t f_000700(AgState *s, uint32_t pc)
         s->d[0] = 0x1u;
     }
 L_000702:;
-    AG_CHECK(s, 0x702u);
+    AG_HCHECK(s, 0x702u, 10);
     AG_CYCLES(s, 10);
     /* 000702  bra     $702 */
     {
@@ -268,7 +269,7 @@ uint32_t f_000800(AgState *s, uint32_t pc)
 {
     (void)pc;
 L_000800:;
-    AG_CHECK(s, 0x800u);
+    AG_HCHECK(s, 0x800u, 10);
     AG_CYCLES(s, 10);
     /* 000800  bra     $800 */
     {

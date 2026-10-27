@@ -103,6 +103,16 @@ uint32_t ag_stop(AgState *state, uint32_t resume);
  * and returns where execution continues (`pc` unless a handler changed the stacked PC). */
 uint32_t ag_check(AgState *state, uint32_t pc);
 
+/* The slow path of a check point whose block an event falls inside: interprets from the
+ * block start `pc` to the next table row and returns it with `AG_HYBRID_ROW` set, or
+ * returns any other address execution goes to instead. */
+uint32_t ag_hybrid(AgState *state, uint32_t pc);
+
+/* After a write to SR, at the instruction boundary `pc`: delivers the interrupts the new
+ * mask lets through and returns where execution continues (`pc` unless a handler
+ * changed the stacked PC). Never ends the run. */
+uint32_t ag_deliver(AgState *state, uint32_t pc);
+
 /* RESET: asserts the reset line of the external devices. */
 void ag_reset_devices(AgState *state);
 
