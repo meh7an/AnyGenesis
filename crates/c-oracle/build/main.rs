@@ -21,6 +21,7 @@ use std::{
 use anygenesis_analysis::{Analysis, LivenessOptions, analyze};
 use anygenesis_codegen_c::{CheckPoints, EmitOptions};
 use anygenesis_recomp::build;
+use anygenesis_rom::Rom;
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
@@ -31,8 +32,15 @@ fn main() {
 
     let mut items = String::new();
     let synthetic = synthetic::analysis();
+    let image = Rom::from_bytes(synthetic::image()).expect("the synthetic image is a valid ROM");
     let prefix = "syn_";
-    compile_program(&synthetic, prefix, &out.join("synthetic"), "ag_synthetic");
+    compile_program(
+        &synthetic,
+        &image,
+        prefix,
+        &out.join("synthetic"),
+        "ag_synthetic",
+    );
     items.push_str(&table_items(prefix, "synthetic_table"));
     items.push_str(&sonic1(&out));
     items.push_str(&sst::translate_sample(&workspace, &out));
@@ -49,10 +57,12 @@ fn function_options(prefix: &str) -> EmitOptions {
     }
 }
 
-/// Emits `analysis` into `directory` and compiles it into the static library `library`.
-fn compile_program(analysis: &Analysis, prefix: &str, directory: &Path, library: &str) {
+/// Emits `analysis` of `rom` into `directory` and compiles it into the static library
+/// `library`.
+fn compile_program(analysis: &Analysis, rom: &Rom, prefix: &str, directory: &Path, library: &str) {
     let output = build::emit_program(
         analysis,
+        rom,
         LivenessOptions::default(),
         &function_options(prefix),
     );
@@ -93,7 +103,7 @@ fn sonic1(out: &Path) -> String {
         build::load_rom(Path::new(&path)).unwrap_or_else(|error| panic!("ANYGENESIS_ROM: {error}"));
     let config = build::load_config(&config_path).unwrap_or_else(|error| panic!("{error}"));
     let analysis = analyze(&rom, &config).unwrap_or_else(|error| panic!("{error}"));
-    compile_program(&analysis, "", &out.join("sonic1"), "ag_sonic1");
+    compile_program(&analysis, &rom, "", &out.join("sonic1"), "ag_sonic1");
     let table = table_items("", "sonic1_table_rows");
     format!(
         "{table}/// The SHA-1 of the translated Sonic 1 ROM; `None` without `ANYGENESIS_ROM`.\n\

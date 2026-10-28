@@ -3,7 +3,8 @@
 
 use anygenesis_abi::AgFn;
 
-/// One SingleStepTests case translated as a one-instruction function.
+/// One SingleStepTests case translated as a one-instruction function and as the
+/// instruction's stepped function.
 #[derive(Debug, Clone, Copy)]
 pub struct SstCase {
     /// The suite file, as `ABCD.json.bin`.
@@ -11,6 +12,7 @@ pub struct SstCase {
     /// The case's index in the file.
     pub index: usize,
     pub function: AgFn,
+    pub stepped: AgFn,
 }
 
 /// Cases of one file that were not translated, and why.

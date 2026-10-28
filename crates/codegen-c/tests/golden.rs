@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anygenesis_analysis::{Analysis, FlagLiveness, LivenessOptions};
-use anygenesis_codegen_c::{CheckPoints, EmitOptions, LineMap, Output, OutputFile, emit};
+use anygenesis_codegen_c::{
+    CheckPoints, EmitOptions, LineMap, Output, OutputFile, emit, emit_stepped_instruction,
+};
+use anygenesis_shared::Address;
 
 use support::{Image, Optimization, RESET, branch_w, compile, scratch};
 
@@ -78,7 +81,7 @@ fn emit_program(program: (Image, &str), options: &EmitOptions) -> Output {
     let (image, hints) = program;
     let analysis: Analysis = image.analyze(hints);
     let liveness = FlagLiveness::new(&analysis, LivenessOptions::default());
-    emit(&analysis, &liveness, options)
+    emit(&analysis, &liveness, options, &image.bytes)
 }
 
 /// Every instruction of `program` on its own listing line, from line 10.
@@ -132,14 +135,26 @@ fn assert_golden(name: &str, actual: &str) {
 }
 
 /// The program's own files (headers shared by every program excluded), one after another.
+/// Of the stepped files only `ag_step_entry` and `ag_interrupt` are kept: the superset covers
+/// every even address of the 4 KiB image, so the golden file for single stepped
+/// instructions shows their form.
 fn program_text(output: &Output) -> String {
     let mut text = String::new();
     for file in &output.files {
-        if file.name == "ag_state.h" || file.name == "ag_runtime.h" {
-            continue;
-        }
+        let body = match file.name.as_str() {
+            "ag_state.h" | "ag_runtime.h" => continue,
+            "ag_steps.c" => {
+                let start = file
+                    .text
+                    .find("uint32_t ag_step_entry(")
+                    .expect("ag_steps.c holds ag_step_entry");
+                &file.text[start..]
+            }
+            name if name.starts_with("ag_s") => continue,
+            _ => file.text.as_str(),
+        };
         text.push_str(&format!("/* ==== {} ==== */\n", file.name));
-        text.push_str(&file.text);
+        text.push_str(body);
     }
     text
 }
@@ -157,16 +172,66 @@ fn test_golden_calls() {
 }
 
 #[test]
-fn test_golden_calls_with_cycles_check_points_and_lines() {
+fn test_golden_calls_with_cycles_check_points_stepped_code_and_lines() {
     let program = calls();
     let options = EmitOptions {
         cycles: true,
         check_points: CheckPoints::BlockStarts,
-        access_checks: true,
+        stepped: true,
         lines: Some(line_map(&program)),
         ..EmitOptions::default()
     };
-    check("calls_options", &emit_program(program, &options));
+    let output = emit_program(program, &options);
+    let stats = output.stepped.expect("stepped code was asked for");
+    // Every analysed instruction has a stepped function, and every decodable address is
+    // kept or pruned.
+    assert_eq!(stats.kept + stats.pruned, stats.decodable);
+    assert!(stats.kept >= 10, "{stats:?}");
+    assert!(stats.fast > 0, "{stats:?}");
+    check("calls_options", &output);
+}
+
+/// One instruction of each stepped form: the fast path (moveq, dbf, rts), a device access
+/// (move.w d0 to the VDP data port), a call (bsr.w), an SR write (move.w d0,sr), an
+/// exception (trap #0) and STOP.
+#[test]
+fn test_golden_stepped_instructions() {
+    let instructions: [(u32, &[u16]); 8] = [
+        (0x400, &[0x7001]),
+        (0x402, &[0x51C8, 0xFFFC]),
+        (0x406, &[RTS]),
+        (0x408, &[0x33C0, 0x00C0, 0x0000]),
+        (0x40E, &[0x6100, 0x0100]),
+        (0x412, &[0x46C0]),
+        (0x414, &[0x4E40]),
+        (0x416, &[0x4E72, 0x2700]),
+    ];
+    let mut text = String::from("#include \"ag_runtime.h\"\n");
+    for (address, words) in instructions {
+        let mut padded = words.to_vec();
+        padded.resize(anygenesis_m68k::MAX_WORDS, 0);
+        let instruction = anygenesis_m68k::decode(&padded).expect("the words decode");
+        let lifted =
+            anygenesis_ir::lift(&instruction, Address::new(address)).expect("the words lift");
+        text.push('\n');
+        text.push_str(&emit_stepped_instruction(&lifted, 0x1000, ""));
+    }
+    assert_golden("stepped.c", &text);
+    let headers = emit_program(calls(), &EmitOptions::default());
+    let mut files: Vec<OutputFile> = headers
+        .files
+        .into_iter()
+        .filter(|file| file.name.ends_with(".h"))
+        .collect();
+    files.push(OutputFile {
+        name: "stepped.c".to_owned(),
+        text,
+    });
+    let output = Output {
+        files,
+        stepped: None,
+    };
+    compile(&output, &scratch("stepped"), Optimization::Debug);
 }
 
 #[test]
@@ -235,6 +300,7 @@ fn test_compile_check_rejects_warnings() {
             name: "warning.c".to_owned(),
             text: "int unused_variable(void)\n{\n    int x;\n    return 0;\n}\n".to_owned(),
         }],
+        stepped: None,
     };
     compile(&output, &scratch("warning"), Optimization::Debug);
 }

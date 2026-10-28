@@ -105,6 +105,8 @@ impl Log {
         *self.accesses.entry(access).or_default() += 1;
     }
 
+    /// Only the interpreter runs code a lookup missed; without it a miss ends the run.
+    #[cfg(feature = "interpreter")]
     pub(crate) fn miss(&mut self, address: u32) -> &mut Miss {
         self.misses.entry(address).or_default()
     }

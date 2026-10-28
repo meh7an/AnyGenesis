@@ -1,5 +1,5 @@
-//! Running translated code: the top-level loop, the dispatcher with its interpreter fallback,
-//! the scheduler that keeps time and delivers interrupts, the run limits and the
+//! Running translated code: the top-level loop, the dispatcher with its stepped-code
+//! fallback, the scheduler that keeps time and delivers interrupts, the run limits and the
 //! native-depth guard.
 //!
 //! Every translated function returns the address execution continues at, and every caller
@@ -7,10 +7,11 @@
 //! all of its own control:
 //!
 //! - A return no native frame expects cascades to [`Runtime::run`], which continues at the
-//!   returned address through `ag_table`.
-//! - The interpreter entry hands control back by returning the first table address it
-//!   reaches, so a caller expecting that address continues natively and the top level
-//!   resumes anything else.
+//!   returned address through `ag_table`, else the stepped function there.
+//! - Stepped code (one native function per instruction, see the codegen crate) hands control
+//!   to the translated function at the first table row it reaches. An address with neither
+//!   ends the run with [`Exit::NoNativeCode`]; with the `interpreter` feature the IR
+//!   interpreter runs it instead, up to the first table row, as a dispatcher miss.
 //! - An interrupt handler is called natively from a check point with its frame pushed, and
 //!   returns the stacked PC through RTE. The check point continues when that is its own
 //!   address and returns anything else, so a handler that rewrote the stacked PC goes
@@ -27,36 +28,41 @@
 //! ([`crate::refresh`]) is charged per budget on the cycles executed, and a budget ends
 //! where those and their refresh first reach the event.
 //!
-//! Interrupts are taken at instruction boundaries (the M0.2 hybrid model). Each block-start
-//! check point knows the most cycles its block can take: when the budget may end inside it,
-//! `ag_hybrid` runs the block through the interpreter, which calls the scheduler at the
-//! boundary where the budget runs out, and execution goes on natively at the next table
-//! row. A write to SR (MOVE, ANDI, ORI, EORI to SR, RTE) calls `ag_deliver`, which takes an
-//! interrupt the new mask lets through before the next instruction; an interrupt waiting
-//! behind the mask therefore leaves the budget alone. Only a device stall inside a native
-//! block, or an access that makes an interrupt due there, can carry an event past an
-//! instruction boundary: the interrupt is then taken at the next check point and counted
-//! as late ([`Runtime::late_interrupts`]).
+//! Interrupts are taken at instruction boundaries (the M0.2 hybrid model). Each check point
+//! knows the most cycles the rest of its block can take, at block starts and wherever a
+//! call, an exception handler or STOP came back inside the block: when the budget may end
+//! before the block does, the block goes on as stepped code, which calls the scheduler at
+//! the boundary where the budget runs out, and hands back at the next table row. After an
+//! instruction that may reach a device, a stall or an interrupt its access made due sends
+//! the rest of the block to stepped code the same way. A write to SR (MOVE, ANDI, ORI, EORI
+//! to SR, RTE) calls `ag_deliver`, which takes an interrupt the new mask lets through before
+//! the next instruction; an interrupt waiting behind the mask therefore leaves the budget
+//! alone. A native check point that finds the budget spent by the cycles run (not cut short
+//! to take an interrupt there) took it past its boundary: it is counted as late
+//! ([`Runtime::late_interrupts`]), which no translated program should show.
 //!
 //! An instruction acts on the interrupt level it latched partway through
 //! (`Lifted::latch`): an interrupt that becomes pending after that point waits for the end of
-//! the next instruction, which the interpreter runs as a one-instruction budget. One already
-//! pending when SR unmasks it is taken at once. Taking an interrupt costs 49-58 cycles, its
-//! acknowledge waiting for E (see [`ACKNOWLEDGE_LEAST`]).
+//! the next instruction, which stepped code (or the interpreter) runs as a one-instruction
+//! budget. One already pending when SR unmasks it is taken at once. Taking an interrupt
+//! costs 49-58 cycles, its acknowledge waiting for E (see [`ACKNOWLEDGE_LEAST`]); the
+//! program's `ag_interrupt` pushes its frame.
 
-use std::{
-    any::Any,
-    collections::{HashMap, HashSet},
-    fmt, ptr, slice,
-};
+#[cfg(feature = "interpreter")]
+use std::collections::{HashMap, HashSet};
+use std::{any::Any, fmt, ptr, slice};
 
-use anygenesis_abi::{AgEntry, AgFn, AgState, RAM_SIZE, Region};
+#[cfg(feature = "interpreter")]
+use anygenesis_abi::Region;
+use anygenesis_abi::{AgEntry, AgFn, AgInterrupt, AgState, RAM_SIZE};
+#[cfg(feature = "interpreter")]
 use anygenesis_ir::{
     Flag, Lifted,
     interp::{Cpu, Interpreter, Step, Transfer},
     interrupt_entry, lift,
 };
 use anygenesis_rom::Rom;
+#[cfg(feature = "interpreter")]
 use anygenesis_shared::Address;
 
 use crate::{
@@ -72,9 +78,14 @@ use crate::{
 /// Set in a return value that must reach the top level; the low 24 bits hold a pc.
 pub const UNWIND: u32 = 0x8000_0000;
 
-/// Set in `ag_hybrid`'s result when it is a table row to go on at natively
-/// (`AG_HYBRID_ROW` in the generated C).
-const HYBRID_ROW: u32 = 0x4000_0000;
+/// `latch` from a check point whose slow path follows no instruction's latch rule
+/// (`AG_NO_LATCH` in the generated C).
+const NO_LATCH: u32 = 0xFFFF;
+
+/// `ag_step_end` kinds (`AG_STEP_GO`, `AG_STEP_CALL` in the generated C; any other is
+/// `AG_STEP_STOP`).
+pub(crate) const STEP_GO: u32 = 0;
+const STEP_CALL: u32 = 1;
 
 /// A thread stack with room for the native-depth guard's default limits.
 pub const RUN_STACK: usize = 64 << 20;
@@ -149,6 +160,9 @@ pub enum Exit {
     /// The frames [`Runtime::run_frames`] asked for have ended; the vertical interrupt that
     /// ended the last one is delivered when the run continues.
     Frames { pc: u32 },
+    /// Execution reached `pc`, which has no native code (code in RAM, or an address the
+    /// superset dropped), in a runtime without the interpreter. The run cannot continue.
+    NoNativeCode { pc: u32 },
 }
 
 impl Exit {
@@ -158,7 +172,8 @@ impl Exit {
             Self::Idle { pc }
             | Self::Stopped { resume: pc }
             | Self::CycleCap { pc }
-            | Self::Frames { pc } => pc,
+            | Self::Frames { pc }
+            | Self::NoNativeCode { pc } => pc,
         }
     }
 }
@@ -170,6 +185,7 @@ impl fmt::Display for Exit {
             Self::Stopped { resume } => write!(f, "STOP for good, resuming at ${resume:06X}"),
             Self::CycleCap { pc } => write!(f, "cycle cap at ${pc:06X}"),
             Self::Frames { pc } => write!(f, "frame limit at ${pc:06X}"),
+            Self::NoNativeCode { pc } => write!(f, "no native code at ${pc:06X}"),
         }
     }
 }
@@ -240,9 +256,17 @@ impl Snapshot {
 pub(crate) struct Context {
     pub devices: Devices,
     table: &'static [AgEntry],
+    /// The program's stepped function of each even ROM address, index address / 2.
+    steps: &'static [Option<AgFn>],
+    /// The program's checked entry into its stepped functions, `ag_step_entry`.
+    step_entry: Option<AgFn>,
+    /// The program's interrupt entry; without it the interpreter runs the IR's.
+    interrupt_entry: Option<AgInterrupt>,
     options: Options,
+    #[cfg(feature = "interpreter")]
     interpreter: Interpreter,
     /// Lifted instructions in ROM by address; code in RAM is decoded every time it runs.
+    #[cfg(feature = "interpreter")]
     lifts: HashMap<u32, Lifted>,
     /// The native stack position of the top-level loop.
     stack_base: usize,
@@ -265,29 +289,40 @@ pub(crate) struct Context {
     interrupts: [u64; 8],
     /// Interrupts taken at a native check point after an instruction boundary had passed.
     late: u64,
-    /// Blocks `ag_hybrid` ran through the interpreter.
-    hybrids: u64,
+    /// The budget was cut short so that the next check point takes an interrupt due there,
+    /// rather than spent by the cycles run.
+    cut: bool,
+    /// Check points whose slow path ran the rest of their block as stepped code.
+    slow_paths: u64,
+    /// A stepped instruction begun with `ag_step_begin`, or the interrupt entry, is running:
+    /// its accesses all see its start, and its end takes their stalls.
+    stepping: bool,
+    /// What the latch rule needs of the stepped instruction running.
+    step: NativeAccess,
     /// The interrupt due at the next check arrived after the instruction before it latched
     /// the interrupt level, so the instruction after it takes it.
     latched_late: bool,
     /// The next budget lasts one instruction, at whose end the interrupt is taken.
     one_more: bool,
-    /// The translated instruction whose device access came last, for `ag_resume`.
+    /// The translated instruction whose device access came last, for `ag_step_enter`.
     access: NativeAccess,
     /// The last run ended at a limit inside a check, before its interrupts and next budget:
-    /// the next run starts with that check, native (`true`) or the interpreter's.
+    /// the next run starts with that check, native (`true`) or stepped code's.
     recheck: Option<bool>,
     /// Addresses between table rows where execution stopped and may go on from the top
     /// level: where an interrupt was taken (its handler's RTE returns there) or a run
-    /// ended. They resume through the interpreter without counting a miss.
+    /// ended. Without stepped code there, they resume through the interpreter without
+    /// counting a miss.
+    #[cfg(feature = "interpreter")]
     between: HashSet<u32>,
     idle: Option<Snapshot>,
     hook: Option<InterruptHook>,
 }
 
-/// What the interpreter's latch rule needs of a translated instruction that reached a
-/// device, noted at its first access: every access of an instruction sees its start, so a
-/// later one of the same instruction comes at that start plus the stalls since.
+/// What the interpreter's latch rule needs of an instruction: for a translated one that
+/// reached a device, noted at its first access (every access of an instruction sees its
+/// start, so a later one of the same instruction comes at that start plus the stalls
+/// since); for a stepped one, at its start.
 #[derive(Debug, Clone, Copy, Default)]
 struct NativeAccess {
     /// The master clock at the instruction's start.
@@ -434,6 +469,7 @@ impl Context {
         let left = state.cycles.max(0);
         self.budget -= left;
         state.cycles -= left;
+        self.cut = true;
     }
 
     /// Before a bus extern: notes the instruction making it, unless it is the one the last
@@ -441,12 +477,7 @@ impl Context {
     pub fn before_access(&mut self, state: &AgState) {
         let now = self.devices.clock_at(self.clock(state));
         if now != self.access.at {
-            self.access = NativeAccess {
-                began: now,
-                event: self.devices.hardware.next_interrupt(),
-                waiting: self.due(mask(state.sr)).is_some(),
-                at: now,
-            };
+            self.access = self.note(state, now);
         }
     }
 
@@ -538,9 +569,11 @@ impl Context {
     /// refresh it will cause; none while an interrupt is due, which the next check point
     /// then takes, or one instruction when that is the one to take it.
     fn refill(&mut self, state: &mut AgState) {
+        self.cut = false;
         self.budget = if std::mem::take(&mut self.one_more) {
             1
         } else if self.due(mask(state.sr)).is_some() {
+            self.cut = true;
             0
         } else {
             let left = self.options.max_cycles.saturating_sub(self.cycles);
@@ -580,23 +613,38 @@ impl Context {
 
     /// Notes that execution stopped at `pc`, which may lie between table rows.
     fn stopped_between(&mut self, pc: u32) {
+        #[cfg(feature = "interpreter")]
         if self.row(pc).is_none() {
             self.between.insert(pc);
         }
+        #[cfg(not(feature = "interpreter"))]
+        let _ = pc;
     }
 
-    /// Takes the interrupt at `level` before the instruction at `pc`: acknowledges it,
-    /// pushes its frame, starts a budget with the exception's own cycles already used, and
-    /// returns the handler's address.
-    ///
-    /// # Safety
-    /// As for [`Context::bus`].
-    unsafe fn enter_interrupt(&mut self, state: &mut AgState, level: u8, pc: u32) -> u32 {
+    /// Starts taking the interrupt at `level` before the instruction at `pc`: acknowledges
+    /// and counts it. Its entry sequence comes next, then [`Context::entered_interrupt`].
+    fn begin_interrupt(&mut self, level: u8, pc: u32) {
         self.latched_late = false;
         self.one_more = false;
         self.stopped_between(pc);
         self.devices.hardware.acknowledge(level);
         self.interrupts[usize::from(level)] += 1;
+    }
+
+    /// After the entry sequence: starts a budget with the exception's own cycles already
+    /// used.
+    fn entered_interrupt(&mut self, state: &mut AgState) {
+        self.refill(state);
+        state.cycles -= self.interrupt_cycles();
+    }
+
+    /// Runs the IR's interrupt entry sequence for `level` before `pc` through the
+    /// interpreter, for runtimes given no `ag_interrupt`, and returns the handler's address.
+    ///
+    /// # Safety
+    /// As for [`Context::bus`].
+    #[cfg(feature = "interpreter")]
+    unsafe fn interpret_interrupt_entry(&mut self, state: &mut AgState, level: u8, pc: u32) -> u32 {
         let mut cpu = load_cpu(state, pc);
         let entry = interrupt_entry(level, Address::new(pc));
         // SAFETY: forwarded from the caller.
@@ -615,8 +663,6 @@ impl Context {
         };
         let outcome = interpreter.execute(&entry, &mut cpu, &mut bus);
         store_cpu(&cpu, state);
-        self.refill(state);
-        state.cycles -= self.interrupt_cycles();
         match outcome.transfer {
             Some(Transfer::Jump(handler)) => handler.get(),
             // The entry sequence always ends in a jump through the vector table.
@@ -649,34 +695,104 @@ impl Context {
         self.hook = Some(hook);
     }
 
-    /// `ag_lookup`: the translated function for `address`, else the interpreter.
+    /// `ag_lookup`: the translated function for `address`, else its stepped function, else
+    /// [`no_native_code`].
     pub fn lookup(&mut self, address: u32) -> AgFn {
         if self.too_deep(address) {
             return unwind;
         }
-        self.row(address).unwrap_or_else(|| {
-            self.devices.log.miss(address).lookups += 1;
-            interpret
+        match self.row(address) {
+            Some(function) => function,
+            None => self.step_lookup(address),
+        }
+    }
+
+    /// `ag_step_lookup`: the stepped function for `address`, else [`no_native_code`].
+    pub fn step_lookup(&mut self, address: u32) -> AgFn {
+        self.stepped(address).unwrap_or_else(|| {
+            #[cfg(feature = "interpreter")]
+            {
+                self.devices.log.miss(address).lookups += 1;
+            }
+            no_native_code()
         })
+    }
+
+    /// The program's checked entry into stepped code (`ag_step_entry`), if it has a stepped
+    /// function at `address`.
+    fn stepped(&self, address: u32) -> Option<AgFn> {
+        if !address.is_multiple_of(2) {
+            return None;
+        }
+        let steps = self.steps.get((address / 2) as usize).copied().flatten();
+        steps.and(self.step_entry)
     }
 
     /// The top level continuing at `address` after a return reached it, or where the last
     /// run ended.
     fn resume(&mut self, address: u32) -> AgFn {
-        if let Some(function) = self.row(address) {
-            function
-        } else if self.between.contains(&address) {
-            interpret_block
-        } else {
-            self.devices.log.miss(address).resumes += 1;
-            interpret
+        if let Some(function) = self.row(address).or_else(|| self.stepped(address)) {
+            return function;
         }
+        #[cfg(feature = "interpreter")]
+        if self.between.contains(&address) {
+            return interpret_block;
+        }
+        #[cfg(feature = "interpreter")]
+        {
+            self.devices.log.miss(address).resumes += 1;
+        }
+        no_native_code()
+    }
+
+    /// Whether a stepped instruction or the interrupt entry is running, whose accesses
+    /// leave stalls and rescheduling to its end.
+    pub fn stepping(&self) -> bool {
+        self.stepping
+    }
+
+    /// `ag_step_begin`: notes the start of a stepped instruction, as the interpreter notes
+    /// each instruction's.
+    pub fn step_begin(&mut self, state: &AgState) {
+        let began = self.devices.clock_at(self.clock(state));
+        self.step = self.note(state, began);
+        self.stepping = true;
+    }
+
+    /// What the latch rule needs of an instruction that began at master clock `began`.
+    fn note(&self, state: &AgState, began: u64) -> NativeAccess {
+        NativeAccess {
+            began,
+            event: self.devices.hardware.next_interrupt(),
+            waiting: self.due(mask(state.sr)).is_some(),
+            at: began,
+        }
+    }
+
+    /// `ag_step_enter`: a check point's slow path, before stepped code runs the rest of its
+    /// block. Gives back the `ahead` cycles charged for instructions not yet run, then
+    /// applies the latch rule to the translated instruction before (`latch`), if any.
+    pub fn step_enter(&mut self, state: &mut AgState, ahead: u32, latch: u32) {
+        self.slow_paths += 1;
+        // A segment's charge is at most a block's cycles, so it fits.
+        state.cycles += ahead as i32;
+        if latch != NO_LATCH {
+            self.latch_native(state, latch);
+        }
+    }
+
+    /// The time into the current budget the hardware would see with `cycles` left.
+    fn clock_with(&self, cycles: i32) -> u32 {
+        let used = i64::from(self.budget) - i64::from(cycles);
+        let elapsed = u32::try_from(used.max(0)).unwrap_or(u32::MAX);
+        elapsed + self.refresh.pending(elapsed.saturating_sub(self.waited))
     }
 
     /// Runs one instruction at `cpu.pc`, lifted from the cache when it lies in ROM.
     ///
     /// # Safety
     /// As for [`Context::bus`].
+    #[cfg(feature = "interpreter")]
     unsafe fn step(&mut self, state: &mut AgState, cpu: &mut Cpu) -> Step {
         // SAFETY: forwarded from the caller.
         let rom = unsafe { rom(state) };
@@ -721,7 +837,7 @@ unsafe fn parts<'a>(state: *mut AgState) -> (&'a mut AgState, &'a mut Context) {
 }
 
 /// `ag_check`: the scheduler at a native check point, where an interrupt it takes is late
-/// (see the module docs).
+/// unless the budget was cut short for it (see the module docs).
 ///
 /// # Safety
 /// As for [`check`].
@@ -749,6 +865,8 @@ unsafe fn check(state: *mut AgState, pc: u32) -> u32 {
 unsafe fn schedule(state: *mut AgState, pc: u32, native: bool) -> u32 {
     // SAFETY: every borrow from `parts` ends before the next native call.
     unsafe {
+        // Native code ran its budget out itself: an instruction boundary may have passed.
+        let late = native && !parts(state).1.cut;
         loop {
             let (st, ctx) = parts(state);
             ctx.charge(st);
@@ -768,7 +886,7 @@ unsafe fn schedule(state: *mut AgState, pc: u32, native: bool) -> u32 {
                 ctx.one_more = true;
                 break;
             }
-            if native {
+            if late {
                 ctx.late += 1;
             }
             let next = interrupt(state, level, pc);
@@ -814,48 +932,82 @@ pub(crate) unsafe fn deliver(state: *mut AgState, pc: u32) -> u32 {
     }
 }
 
-/// `ag_hybrid`: the budget may end inside the block starting at `pc`, so the interpreter
-/// runs it, up to the next table row. Returns that row with [`HYBRID_ROW`] set, or where
-/// execution goes instead (a return, a rewritten stacked PC, an unwind).
+/// `ag_step_check`: the scheduler at the stepped instruction boundary `pc`, as the
+/// interpreter calls it.
 ///
 /// # Safety
 /// As for [`check`].
-pub(crate) unsafe fn hybrid(state: *mut AgState, pc: u32) -> u32 {
+pub(crate) unsafe fn step_check(state: *mut AgState, pc: u32) -> u32 {
     // SAFETY: forwarded from the caller.
-    unsafe {
-        parts(state).1.hybrids += 1;
-        match run_interpreter(state, pc, false) {
-            Ending::Row(row) => row | HYBRID_ROW,
-            Ending::Leave(next) => next,
-        }
-    }
+    unsafe { check(state, pc) }
 }
 
-/// `ag_resume`: an access of the translated instruction before `pc` left the budget short
-/// of the rest of its block, so after giving back the `ahead` cycles charged for the
-/// instructions not yet run and applying the latch rule to that instruction (latch point
-/// `latch`), the interpreter runs from `pc` to the next table row. Returns as [`hybrid`].
+/// `ag_step_end` and `ag_step_late`: what the interpreter does after an instruction, for the
+/// stepped instruction that just ran, going on at `next`; `latch` is its latch point.
+/// `charged` holds the cycles it charged when it took the fast path (no `ag_step_begin`: it
+/// reached no device and wrote no SR), so its start is worked out from them. By `kind`:
+/// delivery at `next` of an interrupt due, then the scheduler there if the budget ran out,
+/// as the interpreter does before its next instruction (`AG_STEP_GO`); a check soon (a
+/// call, whose target takes it); or nothing (STOP, which waits for one). Returns where
+/// execution continues.
 ///
 /// # Safety
 /// As for [`check`].
-pub(crate) unsafe fn resume_after_access(
+pub(crate) unsafe fn step_end(
     state: *mut AgState,
-    pc: u32,
-    ahead: u32,
+    next: u32,
     latch: u32,
+    kind: u32,
+    charged: Option<u32>,
 ) -> u32 {
-    // SAFETY: forwarded from the caller; the borrows from `parts` end before the
-    // interpreter runs.
+    // SAFETY: every borrow from `parts` ends before the next native call.
     unsafe {
         let (st, ctx) = parts(state);
-        ctx.hybrids += 1;
-        // A segment's charge is at most a block's cycles, so it fits.
-        st.cycles += ahead as i32;
-        ctx.latch_native(st, latch);
-        match run_interpreter(state, pc, false) {
-            Ending::Row(row) => row | HYBRID_ROW,
-            Ending::Leave(next) => next,
+        ctx.stepping = false;
+        if let Some(charged) = charged {
+            // An instruction charges far below i32::MAX.
+            let began = ctx
+                .devices
+                .clock_at(ctx.clock_with(st.cycles + charged as i32));
+            ctx.step = ctx.note(st, began);
         }
+        ctx.charge_stall(st);
+        let step = ctx.step;
+        let latched = step.began + u64::from(latch) * CPU_DIVIDER;
+        let ended = ctx.devices.clock_at(ctx.clock(st));
+        if !step.waiting
+            && step
+                .event
+                .is_some_and(|event| (latched + 1..=ended).contains(&event))
+        {
+            ctx.latched_late = true;
+        }
+        if ctx.devices.hardware.take_rescheduled() {
+            ctx.reschedule(st);
+        }
+        // One that came after the latch waits for the next instruction's end.
+        let due = !ctx.latched_late && ctx.due(mask(st.sr)).is_some();
+        match kind {
+            STEP_CALL if due => {
+                ctx.check_soon(st);
+                return next;
+            }
+            STEP_GO if due => {
+                let after = deliver(state, next);
+                if after != next {
+                    return after;
+                }
+            }
+            STEP_GO => {}
+            // A call's target checks; STOP waits for the interrupt in `ag_stop`.
+            _ => return next,
+        }
+        // As the interpreter does at the next boundary, so the next stepped function needs
+        // no check of its own.
+        if parts(state).0.cycles <= 0 {
+            return check(state, next);
+        }
+        next
     }
 }
 
@@ -902,18 +1054,60 @@ pub(crate) unsafe fn stop(state: *mut AgState, resume: u32) -> u32 {
 /// # Safety
 /// As for [`check`].
 unsafe fn interrupt(state: *mut AgState, level: u8, pc: u32) -> u32 {
-    // SAFETY: the borrows end before the handler runs, which derives its own.
+    // SAFETY: the borrows end before the entry and the handler run, which derive their own.
     unsafe {
+        let (_, ctx) = parts(state);
+        ctx.begin_interrupt(level, pc);
+        let handler = match ctx.interrupt_entry {
+            Some(entry) => {
+                ctx.stepping = true;
+                let handler = entry(state, level.into(), pc);
+                parts(state).1.stepping = false;
+                handler
+            }
+            #[cfg(feature = "interpreter")]
+            None => {
+                let (st, ctx) = parts(state);
+                ctx.interpret_interrupt_entry(st, level, pc)
+            }
+            #[cfg(not(feature = "interpreter"))]
+            None => panic!("a runtime without the interpreter needs the program's ag_interrupt"),
+        };
         let (st, ctx) = parts(state);
-        let handler = ctx.enter_interrupt(st, level, pc);
+        ctx.entered_interrupt(st);
         ctx.run_hook(st, level, handler);
         let function = ctx.lookup(handler);
         function(state, handler)
     }
 }
 
+/// The entry `ag_lookup` hands out for an address with no native code: the interpreter in a
+/// runtime that has it, else `end_without_native_code`.
+fn no_native_code() -> AgFn {
+    #[cfg(feature = "interpreter")]
+    {
+        interpret
+    }
+    #[cfg(not(feature = "interpreter"))]
+    {
+        end_without_native_code
+    }
+}
+
+/// Ends the run at `pc`, which has no native code ([`Exit::NoNativeCode`]).
+///
+/// # Safety
+/// Called by translated code or the top level, with the state of a running
+/// [`Runtime::run`].
+#[cfg(not(feature = "interpreter"))]
+unsafe extern "C" fn end_without_native_code(state: *mut AgState, pc: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { parts(state).1.end(Exit::NoNativeCode { pc }) }
+}
+
 /// Returns the lift of the instruction at `pc` when it lies wholly in ROM, lifting it on
 /// first use. Undecodable words are left to [`Interpreter::step`], which raises the exception.
+#[cfg(feature = "interpreter")]
 fn cached<'a>(lifts: &'a mut HashMap<u32, Lifted>, rom: &[u8], pc: u32) -> Option<&'a Lifted> {
     use std::collections::hash_map::Entry;
 
@@ -955,6 +1149,7 @@ extern "C" fn unwind(_state: *mut AgState, pc: u32) -> u32 {
     UNWIND | pc
 }
 
+#[cfg(feature = "interpreter")]
 fn load_cpu(state: &AgState, pc: u32) -> Cpu {
     let flags = [
         (state.x, Flag::X),
@@ -976,6 +1171,7 @@ fn load_cpu(state: &AgState, pc: u32) -> Cpu {
     cpu
 }
 
+#[cfg(feature = "interpreter")]
 fn store_cpu(cpu: &Cpu, state: &mut AgState) {
     state.d = cpu.d;
     state.a = cpu.a;
@@ -1000,6 +1196,7 @@ fn store_cpu(cpu: &Cpu, state: &mut AgState) {
 /// # Safety
 /// Called by translated code or the top level, with the state of a running
 /// [`Runtime::run`].
+#[cfg(feature = "interpreter")]
 unsafe extern "C" fn interpret(state: *mut AgState, start: u32) -> u32 {
     // SAFETY: forwarded from the caller.
     match unsafe { run_interpreter(state, start, true) } {
@@ -1007,11 +1204,13 @@ unsafe extern "C" fn interpret(state: *mut AgState, start: u32) -> u32 {
     }
 }
 
-/// The entry the top level goes on through where the last run ended between table rows:
-/// the rest of that block, run as `ag_hybrid` runs it.
+/// The entry the top level goes on through where the last run ended between table rows
+/// with no stepped code there: the rest of that block, run up to the next table row
+/// without counting a miss.
 ///
 /// # Safety
 /// As for [`interpret`].
+#[cfg(feature = "interpreter")]
 unsafe extern "C" fn interpret_block(state: *mut AgState, start: u32) -> u32 {
     // SAFETY: forwarded from the caller.
     match unsafe { run_interpreter(state, start, false) } {
@@ -1020,6 +1219,7 @@ unsafe extern "C" fn interpret_block(state: *mut AgState, start: u32) -> u32 {
 }
 
 /// How the interpreter handed control back.
+#[cfg(feature = "interpreter")]
 enum Ending {
     /// The next instruction has a table row.
     Row(u32),
@@ -1028,11 +1228,12 @@ enum Ending {
 }
 
 /// Runs instructions from `start` until the next one has an `ag_table` row (see
-/// [`interpret`]). `miss` counts them as a dispatcher miss; the hybrid path runs translated
-/// blocks and counts none.
+/// [`interpret`]). `miss` counts them as a dispatcher miss; resuming between rows counts
+/// none.
 ///
 /// # Safety
 /// As for [`interpret`].
+#[cfg(feature = "interpreter")]
 unsafe fn run_interpreter(state: *mut AgState, start: u32, miss: bool) -> Ending {
     // SAFETY: the state of a running run points at its context, and neither is borrowed
     // while this function runs; borrows made here end before every nested native call,
@@ -1164,11 +1365,16 @@ impl Runtime {
         let mut context = Box::new(Context {
             devices: Devices::new(hardware, options.version, options.open_bus),
             table,
+            steps: &[],
+            step_entry: None,
+            interrupt_entry: None,
             budget: 0,
             waited: 0,
             refresh: Refresh::default(),
             options,
+            #[cfg(feature = "interpreter")]
             interpreter: Interpreter::default(),
+            #[cfg(feature = "interpreter")]
             lifts: HashMap::new(),
             stack_base: 0,
             exit: None,
@@ -1177,11 +1383,15 @@ impl Runtime {
             frame_limit: None,
             interrupts: [0; 8],
             late: 0,
-            hybrids: 0,
+            cut: false,
+            slow_paths: 0,
+            stepping: false,
+            step: NativeAccess::default(),
             latched_late: false,
             one_more: false,
             access: NativeAccess::default(),
             recheck: None,
+            #[cfg(feature = "interpreter")]
             between: HashSet::new(),
             idle: None,
             hook: None,
@@ -1192,6 +1402,22 @@ impl Runtime {
             state,
             context,
         }
+    }
+
+    /// Attaches the program's stepped code: `steps` holds the stepped function of each even
+    /// ROM address (index address / 2, `None` where it has none), `entry` its
+    /// `ag_step_entry`, which the dispatcher hands out for them, and `interrupt` its
+    /// `ag_interrupt`. A runtime without the interpreter needs them.
+    pub fn with_stepped(
+        mut self,
+        steps: &'static [Option<AgFn>],
+        entry: AgFn,
+        interrupt: AgInterrupt,
+    ) -> Self {
+        self.context.steps = steps;
+        self.context.step_entry = Some(entry);
+        self.context.interrupt_entry = Some(interrupt);
+        self
     }
 
     /// Runs from `state().pc` (or the STOP the last run ended in) until the run ends.
@@ -1279,15 +1505,17 @@ impl Runtime {
             .unwrap_or(0)
     }
 
-    /// Interrupts taken at a native check point after the instruction boundary they were due
-    /// at had passed: an event a device stall carried past, or one an access made due.
+    /// Interrupts taken at a native check point that found the budget spent by the cycles
+    /// run, so the instruction boundary they were due at may have passed (see the module
+    /// docs). A translated program with stepped code shows none.
     pub fn late_interrupts(&self) -> u64 {
         self.context.late
     }
 
-    /// Blocks run through the interpreter because the budget could end inside them.
-    pub fn hybrid_blocks(&self) -> u64 {
-        self.context.hybrids
+    /// Check points whose slow path ran the rest of their block as stepped code, because the
+    /// budget could end inside it.
+    pub fn slow_paths(&self) -> u64 {
+        self.context.slow_paths
     }
 
     /// Whether the CPU is waiting in a STOP.

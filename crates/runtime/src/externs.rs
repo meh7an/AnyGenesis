@@ -1,9 +1,9 @@
 //! The `ag_*` functions translated code calls, exported under their C names.
 //!
 //! `AgState::runtime` points at the [`Context`] of the run in progress, set by
-//! [`Runtime::run`](crate::Runtime::run). `ag_check`, `ag_hybrid`, `ag_resume`,
-//! `ag_deliver` and `ag_stop` may run interrupt handlers, so they take the raw state rather than a borrow of
-//! it.
+//! [`Runtime::run`](crate::Runtime::run). `ag_check`, `ag_step_check`, `ag_step_end`,
+//! `ag_step_late`, `ag_deliver` and `ag_stop` may run interrupt handlers, so they take the
+//! raw state rather than a borrow of it.
 
 use anygenesis_abi::{AgFn, AgState, signatures};
 use anygenesis_shared::{Address, Bus};
@@ -23,8 +23,12 @@ const _: signatures::ag_write32 = ag_write32;
 const _: signatures::ag_lookup = ag_lookup;
 const _: signatures::ag_stop = ag_stop;
 const _: signatures::ag_check = ag_check;
-const _: signatures::ag_hybrid = ag_hybrid;
-const _: signatures::ag_resume = ag_resume;
+const _: signatures::ag_step_enter = ag_step_enter;
+const _: signatures::ag_step_check = ag_step_check;
+const _: signatures::ag_step_begin = ag_step_begin;
+const _: signatures::ag_step_end = ag_step_end;
+const _: signatures::ag_step_late = ag_step_late;
+const _: signatures::ag_step_lookup = ag_step_lookup;
 const _: signatures::ag_deliver = ag_deliver;
 const _: signatures::ag_reset_devices = ag_reset_devices;
 
@@ -58,6 +62,11 @@ unsafe fn with_bus<T>(
     // SAFETY: forwarded from the caller; the runtime attached the ROM the state points at.
     unsafe {
         with_context(state, |state, context| {
+            // A stepped instruction's accesses all see its start, as the interpreter's do;
+            // its end takes their stalls and rescheduling.
+            if context.stepping() {
+                return body(&mut context.bus(state));
+            }
             context.before_access(state);
             let value = body(&mut context.bus(state));
             context.after_access(state, address);
@@ -161,17 +170,58 @@ pub unsafe extern "C" fn ag_check(state: *mut AgState, pc: u32) -> u32 {
 /// # Safety
 /// As for [`ag_read8`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ag_hybrid(state: *mut AgState, pc: u32) -> u32 {
+pub unsafe extern "C" fn ag_step_enter(state: *mut AgState, ahead: u32, latch: u32) {
     // SAFETY: forwarded from the caller.
-    unsafe { machine::hybrid(state, pc) }
+    unsafe {
+        with_context(state, |state, context| {
+            context.step_enter(state, ahead, latch);
+        });
+    }
 }
 
 /// # Safety
 /// As for [`ag_read8`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ag_resume(state: *mut AgState, pc: u32, ahead: u32, latch: u32) -> u32 {
+pub unsafe extern "C" fn ag_step_check(state: *mut AgState, pc: u32) -> u32 {
     // SAFETY: forwarded from the caller.
-    unsafe { machine::resume_after_access(state, pc, ahead, latch) }
+    unsafe { machine::step_check(state, pc) }
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_begin(state: *mut AgState) {
+    // SAFETY: forwarded from the caller.
+    unsafe { with_context(state, |state, context| context.step_begin(state)) }
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_end(state: *mut AgState, next: u32, latch: u32, kind: u32) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { machine::step_end(state, next, latch, kind, None) }
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_late(
+    state: *mut AgState,
+    next: u32,
+    latch: u32,
+    charged: u32,
+) -> u32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { machine::step_end(state, next, latch, machine::STEP_GO, Some(charged)) }
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_lookup(state: *mut AgState, address: u32) -> AgFn {
+    // SAFETY: forwarded from the caller.
+    unsafe { with_context(state, |_, context| context.step_lookup(address)) }
 }
 
 /// # Safety

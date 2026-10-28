@@ -201,6 +201,11 @@ c_struct! {
 /// its resume points), it returns the address execution continues at.
 pub type AgFn = unsafe extern "C" fn(state: *mut AgState, pc: u32) -> u32;
 
+/// A translated program's interrupt entry, `ag_interrupt`: takes the autovectored interrupt
+/// at `level` (1-7) before the instruction at `pc` (the frame pushed, the mask raised) and
+/// returns its handler's address.
+pub type AgInterrupt = unsafe extern "C" fn(state: *mut AgState, level: u32, pc: u32) -> u32;
+
 /// Returns the C typedef of [`AgFn`].
 pub fn function_typedef() -> String {
     let params = [<*mut AgState>::declare("state"), u32::declare("pc")];
@@ -287,8 +292,9 @@ c_externs! {
     fn ag_write16(state: *mut AgState, address: u32, value: u32);
     /// Writes a long outside the inline fast path, as two words, high word first.
     fn ag_write32(state: *mut AgState, address: u32, value: u32);
-    /// Returns the function that runs `address`: a translated function, or an interpreter
-    /// entry for addresses no function covers. Never null.
+    /// Returns the function that runs `address`: a translated function, else its stepped
+    /// function, else one that ends the run (or, in runtimes with the interpreter, an
+    /// interpreter entry). Never null.
     fn ag_lookup(state: *mut AgState, address: u32) -> AgFn;
     /// STOP: waits for an interrupt, runs it and returns where execution continues
     /// (`resume` unless the handler changed the stacked PC).
@@ -296,16 +302,26 @@ c_externs! {
     /// The check-point hook, called when `cycles` ran out at `pc`: delivers due interrupts
     /// and returns where execution continues (`pc` unless a handler changed the stacked PC).
     fn ag_check(state: *mut AgState, pc: u32) -> u32;
-    /// The slow path of a check point whose block an event falls inside: interprets from the
-    /// block start `pc` to the next table row and returns it with `AG_HYBRID_ROW` set, or
-    /// returns any other address execution goes to instead.
-    fn ag_hybrid(state: *mut AgState, pc: u32) -> u32;
-    /// The slow path of a check after an instruction that may reach a device, once its
-    /// access left the budget short of the rest of the block: gives back the `ahead` cycles
-    /// charged for instructions not yet run, applies the latch rule to the instruction with
-    /// its `latch` point, interprets from `pc` to the next table row and returns it with
-    /// `AG_HYBRID_ROW` set, or returns any other address execution goes to instead.
-    fn ag_resume(state: *mut AgState, pc: u32, ahead: u32, latch: u32) -> u32;
+    /// The slow path of a check point, before stepped code runs the rest of its block: gives
+    /// back the `ahead` cycles charged for instructions not yet run and, unless `latch` is
+    /// `AG_NO_LATCH`, applies the latch rule to the instruction before with its `latch`
+    /// point.
+    fn ag_step_enter(state: *mut AgState, ahead: u32, latch: u32);
+    /// The scheduler at the stepped instruction boundary `pc` where the budget ran out, as
+    /// the interpreter calls it: returns where execution continues.
+    fn ag_step_check(state: *mut AgState, pc: u32) -> u32;
+    /// Notes the start of a stepped instruction that may reach a device, write SR, take an
+    /// exception or reset; its accesses see that start until `ag_step_end`.
+    fn ag_step_begin(state: *mut AgState);
+    /// Ends a stepped instruction begun with `ag_step_begin` as the interpreter ends one:
+    /// stalls, the latch rule with its `latch` point, rescheduling, then by `kind` delivery
+    /// at `next`, a check soon or nothing. Returns where execution continues.
+    fn ag_step_end(state: *mut AgState, next: u32, latch: u32, kind: u32) -> u32;
+    /// Ends a stepped instruction without `ag_step_begin` once the budget ran out; it
+    /// charged `charged` cycles. As `ag_step_end` with `AG_STEP_GO`.
+    fn ag_step_late(state: *mut AgState, next: u32, latch: u32, charged: u32) -> u32;
+    /// Returns the stepped function for `address`, else as `ag_lookup`. Never null.
+    fn ag_step_lookup(state: *mut AgState, address: u32) -> AgFn;
     /// After a write to SR, at the instruction boundary `pc`: delivers the interrupts the new
     /// mask lets through and returns where execution continues (`pc` unless a handler
     /// changed the stacked PC). Never ends the run.

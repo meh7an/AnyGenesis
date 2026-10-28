@@ -13,7 +13,7 @@ anygenesis-abi = { version = "0.1.0", path = "../abi" }
 anygenesis-framediff = { version = "0.1.0", path = "../framediff" }
 anygenesis-frontend = { version = "0.1.0", path = "../frontend" }
 anygenesis-rom = { version = "0.1.0", path = "../rom" }
-anygenesis-runtime = { version = "0.1.0", path = "../runtime" }
+anygenesis-runtime = { version = "0.1.0", path = "../runtime", default-features = false }
 anyhow = "1.0.104"
 
 [build-dependencies]

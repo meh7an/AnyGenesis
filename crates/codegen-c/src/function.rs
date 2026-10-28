@@ -72,6 +72,9 @@ struct Emitter<'a> {
     slots: Vec<Slot<'a>>,
     owned: BTreeMap<Address, usize>,
     check_points: BTreeSet<Address>,
+    /// Where execution goes on after code no block bound covers: the return points of
+    /// calls, and where exception handlers and STOP come back to.
+    continuations: BTreeSet<Address>,
     labels: BTreeSet<Address>,
     resume: BTreeSet<Address>,
     parts: Vec<Part>,
@@ -106,12 +109,17 @@ impl<'a> Emitter<'a> {
             .map(|(index, slot)| (slot.lifted.address, index))
             .collect();
         let check_points = check_points(context, function);
+        let continuations = slots
+            .iter()
+            .flat_map(|slot| continuations(&slot.lifted))
+            .collect();
         Self {
             context,
             function,
             slots,
             owned,
             check_points,
+            continuations,
             labels: BTreeSet::new(),
             resume: BTreeSet::new(),
             parts: Vec::new(),
@@ -147,6 +155,7 @@ impl<'a> Emitter<'a> {
         let block = slot.block;
         let block_start = address == block.start;
         self.parts.push(Part::Anchor(address));
+        let stepped = self.stepped();
         if block_start && self.check_points.contains(&address) {
             // The entry needs no resume label: a call with the entry address starts there.
             if address != self.function.entry {
@@ -154,12 +163,18 @@ impl<'a> Emitter<'a> {
                 self.labels.insert(address);
             }
             let pc = constant(address.get());
-            if self.context.options.cycles {
+            if stepped {
                 let bound = self.block_bound(index);
                 self.line(4, format!("AG_HCHECK(s, {pc}, {bound});"));
             } else {
                 self.line(4, format!("AG_CHECK(s, {pc});"));
             }
+        } else if stepped && self.continuations.contains(&address) {
+            // What ran since the block's check point is unbounded, so the rest of the block
+            // is checked again (M2.5: native blocks take no interrupt late).
+            let pc = constant(address.get());
+            let bound = self.block_bound(index);
+            self.line(4, format!("AG_HCHECK(s, {pc}, {bound});"));
         }
         if self.context.options.cycles && self.starts_segment(index) {
             let cost = self.segment_cost(index);
@@ -235,13 +250,15 @@ impl<'a> Emitter<'a> {
             let after = constant(self.slots[index].lifted.next().get());
             self.line(4, format!("AG_DELIVER(s, {after});"));
         }
-        if charging
-            && self.context.options.access_checks
-            && body.falls_through()
-            && may_reach_bus(&body, self.context.analysis.rom_size)
-        {
-            let line = self.access_check(index);
-            self.line(4, line);
+        if stepped && body.falls_through() {
+            // After an access, the instruction's latch rule; after an SR write alone, an
+            // interrupt delivered there has been taken already.
+            let latch = may_reach_bus(&body, self.context.analysis.rom_size)
+                .then_some(self.slots[index].lifted.latch);
+            if latch.is_some() || body.writes_sr() {
+                let line = self.access_check(index, latch);
+                self.line(4, line);
+            }
         }
         if address == block.last && body.falls_through() {
             let lines = self.continue_at(block.end, next);
@@ -284,8 +301,9 @@ impl<'a> Emitter<'a> {
     }
 
     /// `AG_ACHECK` after the instruction at `index`: the cycles its segment charged for the
-    /// instructions after it, and the most the rest of its block takes.
-    fn access_check(&self, index: usize) -> String {
+    /// instructions after it, the most the rest of its block takes, and the latch point the
+    /// latch rule applies to it with, if any.
+    fn access_check(&self, index: usize, latch: Option<u16>) -> String {
         let lifted = &self.slots[index].lifted;
         let next = index + 1;
         let same_block = self
@@ -303,7 +321,12 @@ impl<'a> Emitter<'a> {
             0
         };
         let pc = constant(lifted.next().get());
-        format!("AG_ACHECK(s, {pc}, {ahead}, {rest}, {});", lifted.latch)
+        let latch = latch.map_or_else(|| "AG_NO_LATCH".to_owned(), |latch| latch.to_string());
+        format!("AG_ACHECK(s, {pc}, {ahead}, {rest}, {latch});")
+    }
+
+    fn stepped(&self) -> bool {
+        self.context.options.cycles && self.context.options.stepped
     }
 
     /// Cycles of the instructions from `index` up to the next one that can leave early, as
@@ -649,10 +672,25 @@ impl<'a> Emitter<'a> {
     }
 }
 
-/// Whether control can leave the function body at this instruction.
+/// The addresses `lifted` comes back to after running code it cannot bound: a call's return
+/// address, the pc an exception's frame holds, STOP's resume.
+fn continuations(lifted: &Lifted) -> impl Iterator<Item = Address> + '_ {
+    lifted.body.ops.iter().filter_map(|op| match *op {
+        Op::Branch { control, .. } | Op::Exit(control) => match control {
+            Control::Call { return_address, .. } | Control::CallIndirect { return_address, .. } => {
+                Some(return_address)
+            }
+            Control::Exception { pc, .. } => Some(pc),
+            Control::Stop { resume } => Some(resume),
+            Control::Jump(_) | Control::JumpIndirect(_) | Control::Return { .. } => None,
+        },
+        _ => None,
+    })
+}
+
 /// The static cycles of `lifted` when no branch leaves it: through its `Exit`, or falling
 /// through.
-fn static_cost(lifted: &Lifted) -> u16 {
+pub(crate) fn static_cost(lifted: &Lifted) -> u16 {
     match lifted.body.ops.last() {
         Some(Op::Exit(control)) => lifted.cycles.leaving(control),
         _ => lifted.cycles.not_taken,
@@ -664,7 +702,7 @@ const NOTHING_AHEAD: &str = "0";
 
 /// [`Printer::ahead`] where an instruction leaves: its `taken` cycles were charged by now,
 /// with the data-dependent values in `charged` (C expressions) on top.
-fn leaving_ahead(charging: bool, taken: u16, charged: &[String]) -> String {
+pub(crate) fn leaving_ahead(charging: bool, taken: u16, charged: &[String]) -> String {
     if !charging {
         return NOTHING_AHEAD.to_owned();
     }

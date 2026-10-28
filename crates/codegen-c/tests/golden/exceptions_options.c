@@ -257,7 +257,7 @@ uint32_t f_000700(AgState *s, uint32_t pc)
         s->d[0] = 0x1u;
     }
 L_000702:;
-    AG_HCHECK(s, 0x702u, 10);
+    AG_CHECK(s, 0x702u);
     AG_CYCLES(s, 10);
     /* 000702  bra     $702 */
     {
@@ -269,7 +269,7 @@ uint32_t f_000800(AgState *s, uint32_t pc)
 {
     (void)pc;
 L_000800:;
-    AG_HCHECK(s, 0x800u, 10);
+    AG_CHECK(s, 0x800u);
     AG_CYCLES(s, 10);
     /* 000800  bra     $800 */
     {

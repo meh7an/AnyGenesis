@@ -3,8 +3,8 @@ use anygenesis_shared::Size;
 use crate::{
     eval,
     op::{
-        BinaryOp, Body, Control, ConvertOp, Expr, Flag, FlagOp, Op, Reg, ShiftOp, UnaryOp, Value,
-        Width, result_width,
+        BinaryOp, Body, Control, ConvertOp, Expr, Flag, FlagOp, Op, Reg, ShiftOp, Temp, UnaryOp,
+        Value, Width, result_width,
     },
 };
 
@@ -117,6 +117,14 @@ impl Builder {
             }
             _ => None,
         }
+    }
+
+    /// A new temporary no op assigns: a value the body's user supplies before it runs.
+    pub(crate) fn input(&mut self, width: Width) -> Temp {
+        // As in `emit`: far below u16::MAX.
+        let temp = Temp(self.body.temps.len() as u16);
+        self.body.temps.push(width);
+        temp
     }
 
     pub(crate) fn constant(width: Width, value: u32) -> Value {

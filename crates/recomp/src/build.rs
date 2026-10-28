@@ -135,14 +135,14 @@ pub fn load_rom(path: &Path) -> Result<Rom, BuildError> {
 }
 
 /// The options a game executable is built with: cycle accounting, a check point at the start
-/// of every block and an access check after every instruction that may reach a device, the
-/// hooks the runtime's scheduler needs. Interrupts then arrive at the instruction boundary
-/// the interpreter takes them at.
+/// of every block, and stepped code for every kept ROM address, which the check points'
+/// slow paths run (native everywhere). Interrupts then arrive at the instruction boundary
+/// the interpreter takes them at, and no address in ROM lacks native code.
 pub fn game_options() -> EmitOptions {
     EmitOptions {
         cycles: true,
         check_points: CheckPoints::BlockStarts,
-        access_checks: true,
+        stepped: true,
         ..EmitOptions::default()
     }
 }
@@ -155,14 +155,16 @@ pub fn game_liveness() -> LivenessOptions {
     }
 }
 
-/// Emits C for every function of `analysis`, with the flags `liveness` proves dead pruned.
+/// Emits C for every function of `analysis`, with the flags `liveness` proves dead pruned;
+/// `rom` is the image `analysis` came from.
 pub fn emit_program(
     analysis: &Analysis,
+    rom: &Rom,
     liveness: LivenessOptions,
     options: &EmitOptions,
 ) -> Output {
     let liveness = FlagLiveness::new(analysis, liveness);
-    emit(analysis, &liveness, options)
+    emit(analysis, &liveness, options, rom.bytes())
 }
 
 /// Analyses `rom` as `config` describes it and translates it.
@@ -176,7 +178,7 @@ pub fn translate(
     options: &EmitOptions,
 ) -> Result<Translation, BuildError> {
     let analysis = analyze(rom, config)?;
-    let output = emit_program(&analysis, liveness, options);
+    let output = emit_program(&analysis, rom, liveness, options);
     Ok(Translation { analysis, output })
 }
 
@@ -226,6 +228,48 @@ pub fn compile(library: &str, include: &Path, sources: &[PathBuf]) -> Result<(),
         .files(sources)
         .try_compile(library)
         .map_err(|source| compile_error(library, source))
+}
+
+/// Compiles a game's `sources` with headers from `include` into the static library `library`,
+/// as [`compile`] does, but the stepped files (`ag_sNNN.c`), most of the C and run only on
+/// slow paths, at the optimisation level `stepped` (cc's names: "0"-"3", "s", "z") when it
+/// is given; the rest at the profile's level.
+///
+/// # Errors
+/// As [`compile`].
+pub fn compile_game(
+    library: &str,
+    include: &Path,
+    sources: &[PathBuf],
+    stepped: Option<&str>,
+) -> Result<(), BuildError> {
+    let Some(level) = stepped else {
+        return compile(library, include, sources);
+    };
+    let target = env::var("TARGET").unwrap_or_default();
+    let (steps, rest): (Vec<&PathBuf>, Vec<&PathBuf>) =
+        sources.iter().partition(|path| is_stepped_file(path));
+    let objects = clang_build(cc::Build::new(), &target, library)?
+        .include(include)
+        .files(steps)
+        .opt_level_str(level)
+        .try_compile_intermediates()
+        .map_err(|source| compile_error(library, source))?;
+    clang_build(cc::Build::new(), &target, library)?
+        .include(include)
+        .files(rest)
+        .objects(objects)
+        .try_compile(library)
+        .map_err(|source| compile_error(library, source))
+}
+
+/// Whether `path` is a stepped file the emitter wrote (`ag_s000.c`, ...; not `ag_steps.c`).
+fn is_stepped_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("ag_s"))
+        .and_then(|rest| rest.strip_suffix(".c"))
+        .is_some_and(|number| number.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Configures `build` for translated C on `target`: clang, C11, warnings as errors.
@@ -284,6 +328,17 @@ mod tests {
             .file(&source)
             .try_compile(name)
             .map_err(|source| compile_error(name, source))
+    }
+
+    #[test]
+    fn test_only_numbered_stepped_files_count_as_stepped() {
+        let stepped = |name: &str| is_stepped_file(Path::new("c").join(name).as_path());
+        assert!(stepped("ag_s000.c"));
+        assert!(stepped("ag_s219.c"));
+        assert!(!stepped("ag_steps.c"));
+        assert!(!stepped("ag_000.c"));
+        assert!(!stepped("ag_table.c"));
+        assert!(!stepped("ag_s000.h"));
     }
 
     #[test]

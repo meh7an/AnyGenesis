@@ -4,9 +4,15 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["interpreter"]
+# The IR interpreter as the fallback for addresses with no native code; games leave it out
+# (Architecture Decision 6), so there such a fetch ends the run.
+interpreter = ["anygenesis-ir/interpreter"]
+
 [dependencies]
 anygenesis-abi = { version = "0.1.0", path = "../abi" }
-anygenesis-ir = { version = "0.1.0", path = "../ir" }
+anygenesis-ir = { version = "0.1.0", path = "../ir", default-features = false }
 anygenesis-m68k = { version = "0.1.0", path = "../m68k" }
 anygenesis-rom = { version = "0.1.0", path = "../rom" }
 anygenesis-shared = { version = "0.1.0", path = "../shared" }

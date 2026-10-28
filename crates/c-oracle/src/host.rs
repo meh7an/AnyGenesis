@@ -24,10 +24,13 @@ pub trait Host {
     fn stop(&mut self, resume: Address) -> u32;
     /// `ag_check`: returns where execution continues.
     fn check(&mut self, state: &mut AgState, pc: Address) -> u32;
-    /// `ag_hybrid`: only reached while the state's count is above 0, which the hosts here
-    /// never leave it at, so the default stops the run.
-    fn hybrid(&mut self, _state: &mut AgState, pc: Address) -> u32 {
-        panic!("ag_hybrid at {:06X} with a positive budget", pc.get())
+    /// `ag_step_check`, at a stepped instruction boundary: as [`Host::check`].
+    fn step_check(&mut self, state: &mut AgState, pc: Address) -> u32 {
+        self.check(state, pc)
+    }
+    /// `ag_step_lookup`: no host here has a stepped table, so as [`Host::lookup`].
+    fn step_lookup(&mut self, address: Address) -> AgFn {
+        self.lookup(address)
     }
     /// `ag_deliver`: no host here raises interrupts, so execution goes on at `pc`.
     fn deliver(&mut self, _state: &mut AgState, pc: Address) -> u32 {
@@ -109,7 +112,12 @@ const _: signatures::ag_write32 = ag_write32;
 const _: signatures::ag_lookup = ag_lookup;
 const _: signatures::ag_stop = ag_stop;
 const _: signatures::ag_check = ag_check;
-const _: signatures::ag_hybrid = ag_hybrid;
+const _: signatures::ag_step_enter = ag_step_enter;
+const _: signatures::ag_step_check = ag_step_check;
+const _: signatures::ag_step_begin = ag_step_begin;
+const _: signatures::ag_step_end = ag_step_end;
+const _: signatures::ag_step_late = ag_step_late;
+const _: signatures::ag_step_lookup = ag_step_lookup;
 const _: signatures::ag_deliver = ag_deliver;
 const _: signatures::ag_reset_devices = ag_reset_devices;
 
@@ -193,12 +201,70 @@ pub unsafe extern "C" fn ag_check(state: *mut AgState, pc: u32) -> u32 {
     unsafe { with_host(state, |state, host| host.check(state, Address::new(pc))) }
 }
 
+/// The slow path of a check point, only reached while the state's count is above 0, which
+/// the hosts here never leave it at.
+///
 /// # Safety
 /// As for [`ag_read8`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ag_hybrid(state: *mut AgState, pc: u32) -> u32 {
+pub unsafe extern "C" fn ag_step_enter(_state: *mut AgState, _ahead: u32, _latch: u32) {
+    panic!("ag_step_enter with a positive budget");
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_check(state: *mut AgState, pc: u32) -> u32 {
     // SAFETY: forwarded from the caller.
-    unsafe { with_host(state, |state, host| host.hybrid(state, Address::new(pc))) }
+    unsafe {
+        with_host(state, |state, host| {
+            host.step_check(state, Address::new(pc))
+        })
+    }
+}
+
+/// A stepped instruction's start: the hosts here keep no time, so nothing to note.
+///
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_begin(_state: *mut AgState) {}
+
+/// A stepped instruction's end: no host here stalls or raises interrupts, so execution goes
+/// on at `next`.
+///
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_end(
+    _state: *mut AgState,
+    next: u32,
+    _latch: u32,
+    _kind: u32,
+) -> u32 {
+    next
+}
+
+/// As [`ag_step_end`].
+///
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_late(
+    _state: *mut AgState,
+    next: u32,
+    _latch: u32,
+    _charged: u32,
+) -> u32 {
+    next
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_step_lookup(state: *mut AgState, address: u32) -> AgFn {
+    // SAFETY: forwarded from the caller.
+    unsafe { with_host(state, |_, host| host.step_lookup(Address::new(address))) }
 }
 
 /// # Safety

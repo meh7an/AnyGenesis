@@ -244,17 +244,26 @@ impl Printer<'_> {
     }
 }
 
-/// Returns, for each temporary of `body`, whether any op reads it.
+/// Returns, for each temporary of `body`, whether a printed op reads it: any op but a `Let`,
+/// or the `Let` of a temporary that is read in turn or of a load (printed for its access
+/// even when its value is dead). A temporary is assigned once, before it is read, so one
+/// pass from the end finds them all.
 pub fn used_temps(body: &Body) -> Vec<bool> {
     let mut used = vec![false; body.temps.len()];
-    let mut mark = |value: Value| {
-        if let Value::Temp(temp) = value
-            && let Some(slot) = used.get_mut(temp.index())
+    for op in body.ops.iter().rev() {
+        if let Op::Let { dst, expr } = *op
+            && !matches!(expr, Expr::Load { .. })
+            && !used.get(dst.index()).copied().unwrap_or(true)
         {
-            *slot = true;
+            continue;
         }
-    };
-    for op in &body.ops {
+        let mut mark = |value: Value| {
+            if let Value::Temp(temp) = value
+                && let Some(slot) = used.get_mut(temp.index())
+            {
+                *slot = true;
+            }
+        };
         match *op {
             Op::Let { expr, .. } => match expr {
                 Expr::ReadReg { .. } | Expr::ReadFlag(_) | Expr::ReadSr | Expr::Supervisor => {}

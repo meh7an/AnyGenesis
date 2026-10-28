@@ -1,6 +1,11 @@
 //! Recompiles the game `GAME` names from the ROM `ANYGENESIS_ROM` names: translated C into
 //! OUT_DIR, compiled with clang and linked into the binary, plus `game.rs` (included by
 //! src/game.rs) describing it. Without `GAME` the binary builds with no game in it.
+//!
+//! `ANYGENESIS_HINTS=off` builds the game with none of its config's hints (functions, jump
+//! tables, data regions, indirect targets, unreached code), discovery from the vectors only,
+//! so a test can show that native coverage changes speed only. The input goes when M2.6
+//! retires the hints.
 
 use std::{
     env,
@@ -15,12 +20,17 @@ use anygenesis_recomp::build::{self, Report, Translation};
 
 const GAME_VAR: &str = "GAME";
 const ROM_VAR: &str = "ANYGENESIS_ROM";
+const HINTS_VAR: &str = "ANYGENESIS_HINTS";
 const LIBRARY: &str = "ag_game";
+/// The optimisation level of the stepped files, `None` for the profile's. /O1 (clang-cl)
+/// cut Sonic 1's exe by 6% and its build by 14% for about 2% of speed (M2.5, Mehran's pick).
+const STEPPED_OPTIMIZATION: Option<&str> = Some("1");
 
 fn main() -> ExitCode {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed={GAME_VAR}");
     println!("cargo::rerun-if-env-changed={ROM_VAR}");
+    println!("cargo::rerun-if-env-changed={HINTS_VAR}");
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -56,7 +66,14 @@ fn recompile(game: &OsString, out: &Path) -> Result<String, String> {
     })?;
     let rom_path = PathBuf::from(rom_path);
     println!("cargo::rerun-if-changed={}", rom_path.display());
-    let config = build::load_config(&config_path).map_err(|error| error.to_string())?;
+    let mut config = build::load_config(&config_path).map_err(|error| error.to_string())?;
+    if !hints()? {
+        config.functions.clear();
+        config.jump_tables.clear();
+        config.data_regions.clear();
+        config.indirect.clear();
+        config.unreached.clear();
+    }
     let rom = build::load_rom(&rom_path).map_err(|error| format!("{ROM_VAR}: {error}"))?;
     let translation = build::translate(
         &rom,
@@ -68,8 +85,19 @@ fn recompile(game: &OsString, out: &Path) -> Result<String, String> {
     let directory = out.join("c");
     let sources =
         build::write_output(&translation.output, &directory).map_err(|error| error.to_string())?;
-    build::compile(LIBRARY, &directory, &sources).map_err(|error| error.to_string())?;
+    build::compile_game(LIBRARY, &directory, &sources, STEPPED_OPTIMIZATION)
+        .map_err(|error| error.to_string())?;
     Ok(game_items(game, &translation, config.report.as_ref()))
+}
+
+/// Whether the config's hints apply: `ANYGENESIS_HINTS` unset or `on`, not `off`.
+fn hints() -> Result<bool, String> {
+    match env::var_os(HINTS_VAR) {
+        None => Ok(true),
+        Some(value) if value == "on" => Ok(true),
+        Some(value) if value == "off" => Ok(false),
+        Some(value) => Err(format!("{HINTS_VAR}={value:?}: expected on or off")),
+    }
 }
 
 /// The `ReportConfig` expression for `report`.
@@ -113,18 +141,30 @@ fn game_items(game: &str, translation: &Translation, report: Option<&Report>) ->
     format!(
         "unsafe extern \"C\" {{\n    \
          static ag_table: anygenesis_abi::AgEntry;\n    \
-         static ag_table_size: u32;\n}}\n\n\
+         static ag_table_size: u32;\n    \
+         static ag_steps: Option<anygenesis_abi::AgFn>;\n    \
+         static ag_steps_size: u32;\n    \
+         fn ag_step_entry(state: *mut anygenesis_abi::AgState, pc: u32) -> u32;\n    \
+         fn ag_interrupt(state: *mut anygenesis_abi::AgState, level: u32, pc: u32) -> u32;\n\
+         }}\n\n\
          /// The game compiled into this binary.\n\
          pub fn compiled() -> Option<CompiledGame> {{\n    \
          // SAFETY: the build script linked the program, whose table holds `ag_table_size`\n    \
-         // rows from `ag_table` on and never changes.\n    \
-         let table = unsafe {{\n        \
-         std::slice::from_raw_parts(&raw const ag_table, ag_table_size as usize)\n    }};\n    \
+         // rows from `ag_table` on, and whose stepped table `ag_steps_size` entries from\n    \
+         // `ag_steps` on; neither ever changes.\n    \
+         let (table, steps) = unsafe {{\n        \
+         (\n            \
+         std::slice::from_raw_parts(&raw const ag_table, ag_table_size as usize),\n            \
+         std::slice::from_raw_parts(&raw const ag_steps, ag_steps_size as usize),\n        \
+         )\n    }};\n    \
          Some(CompiledGame {{\n        \
          name: {game:?},\n        \
          sha1: {sha1:?},\n        \
          functions: {functions},\n        \
          table,\n        \
+         steps,\n        \
+         step_entry: ag_step_entry,\n        \
+         interrupt: ag_interrupt,\n        \
          vector_handlers: &[{handlers}],\n        \
          function_entries: &[{entries}],\n        \
          report: {report},\n    }})\n}}\n",

@@ -1,6 +1,8 @@
-//! The translated SingleStepTests sample: each case's one-instruction function runs from the
-//! case's initial state, and D0-D7, A0-A6, USP, SSP, SR, PC (24 bits) and RAM must match the
-//! expected state, as in M2.2, and the cycles the code charged the suite's count (M1.1).
+//! The translated SingleStepTests sample: each case's one-instruction function and its
+//! stepped function (M2.5) run from the case's initial state, and D0-D7, A0-A6, USP, SSP,
+//! SR, PC (24 bits) and RAM must match the expected state, as in M2.2, and the cycles the
+//! code charged the suite's count (M1.1). The interpreter passes the whole suite (the ir
+//! crate's test), so stepped code equals it on every case here.
 //!
 //! Needs `cargo xtask fetch-sst` before the crate is built (the build script translates the
 //! sample). Run with `cargo test -p anygenesis-c-oracle --test sst_c -- --ignored
@@ -91,16 +93,18 @@ fn test_sst_sample_through_translated_c_passes() {
         let mut report = FileReport::default();
         for case in cases {
             let test = &suite[case.index];
-            let fields = run_case(test, case.function);
-            report.translated += 1;
-            if fields.is_empty() {
-                report.passed += 1;
-            } else if report.sample_failures.len() < SAMPLE_FAILURES {
-                let text = format!("{} ({})", test.name, fields.join(", "));
-                report.sample_failures.push(text);
-            }
-            for field in fields {
-                *report.mismatches.entry(field).or_default() += 1;
+            for (form, function) in [("function", case.function), ("stepped", case.stepped)] {
+                let fields = run_case(test, function);
+                report.translated += 1;
+                if fields.is_empty() {
+                    report.passed += 1;
+                } else if report.sample_failures.len() < SAMPLE_FAILURES {
+                    let text = format!("{} {form} ({})", test.name, fields.join(", "));
+                    report.sample_failures.push(text);
+                }
+                for field in fields {
+                    *report.mismatches.entry(field).or_default() += 1;
+                }
             }
         }
         reports.push((file, report));
@@ -266,7 +270,8 @@ fn render(sample: usize, reports: &[(&str, FileReport)]) -> String {
             .push(format!("{} {}", exclusion.reason, exclusion.count));
     }
     let mut out = format!(
-        "Sample: up to {sample} cases per file, distinct opcode words first.\n\n\
+        "Sample: up to {sample} cases per file, distinct opcode words first, each run as its \
+         function and as its stepped function.\n\n\
          | File | Translated | Pass | Pass % | Left out | Top mismatches |\n\
          |------|-----------:|-----:|-------:|----------|----------------|\n"
     );

@@ -1,6 +1,6 @@
 //! The game the build script translated and linked into this binary, if any.
 
-use anygenesis_abi::AgEntry;
+use anygenesis_abi::{AgEntry, AgFn, AgInterrupt};
 use anyhow::{Result, bail};
 
 /// A translated game linked into the binary.
@@ -14,6 +14,12 @@ pub struct CompiledGame {
     pub functions: usize,
     /// Every function entry and resume point with the function that runs it.
     pub table: &'static [AgEntry],
+    /// The stepped function of every even ROM address, index address / 2.
+    pub steps: &'static [Option<AgFn>],
+    /// The checked entry into the stepped functions, `ag_step_entry`.
+    pub step_entry: AgFn,
+    /// The program's interrupt entry, `ag_interrupt`.
+    pub interrupt: AgInterrupt,
     /// Entries of the functions reset and the exception vectors start, ascending.
     pub vector_handlers: &'static [u32],
     /// Entries of every analysed function, ascending.

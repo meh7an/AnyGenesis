@@ -36,7 +36,7 @@ fn test_sonic1_emits_and_compiles() {
         ),
     ];
     for (name, options) in variants {
-        let output = emit(&analysis, &liveness, &options);
+        let output = emit(&analysis, &liveness, &options, rom.bytes());
         let lines: usize = output
             .files
             .iter()

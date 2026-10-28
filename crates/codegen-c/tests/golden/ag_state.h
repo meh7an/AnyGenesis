@@ -91,8 +91,9 @@ void ag_write16(AgState *state, uint32_t address, uint32_t value);
 /* Writes a long outside the inline fast path, as two words, high word first. */
 void ag_write32(AgState *state, uint32_t address, uint32_t value);
 
-/* Returns the function that runs `address`: a translated function, or an interpreter
- * entry for addresses no function covers. Never null. */
+/* Returns the function that runs `address`: a translated function, else its stepped
+ * function, else one that ends the run (or, in runtimes with the interpreter, an
+ * interpreter entry). Never null. */
 AgFn *ag_lookup(AgState *state, uint32_t address);
 
 /* STOP: waits for an interrupt, runs it and returns where execution continues
@@ -103,17 +104,31 @@ uint32_t ag_stop(AgState *state, uint32_t resume);
  * and returns where execution continues (`pc` unless a handler changed the stacked PC). */
 uint32_t ag_check(AgState *state, uint32_t pc);
 
-/* The slow path of a check point whose block an event falls inside: interprets from the
- * block start `pc` to the next table row and returns it with `AG_HYBRID_ROW` set, or
- * returns any other address execution goes to instead. */
-uint32_t ag_hybrid(AgState *state, uint32_t pc);
+/* The slow path of a check point, before stepped code runs the rest of its block: gives
+ * back the `ahead` cycles charged for instructions not yet run and, unless `latch` is
+ * `AG_NO_LATCH`, applies the latch rule to the instruction before with its `latch`
+ * point. */
+void ag_step_enter(AgState *state, uint32_t ahead, uint32_t latch);
 
-/* The slow path of a check after an instruction that may reach a device, once its
- * access left the budget short of the rest of the block: gives back the `ahead` cycles
- * charged for instructions not yet run, applies the latch rule to the instruction with
- * its `latch` point, interprets from `pc` to the next table row and returns it with
- * `AG_HYBRID_ROW` set, or returns any other address execution goes to instead. */
-uint32_t ag_resume(AgState *state, uint32_t pc, uint32_t ahead, uint32_t latch);
+/* The scheduler at the stepped instruction boundary `pc` where the budget ran out, as
+ * the interpreter calls it: returns where execution continues. */
+uint32_t ag_step_check(AgState *state, uint32_t pc);
+
+/* Notes the start of a stepped instruction that may reach a device, write SR, take an
+ * exception or reset; its accesses see that start until `ag_step_end`. */
+void ag_step_begin(AgState *state);
+
+/* Ends a stepped instruction begun with `ag_step_begin` as the interpreter ends one:
+ * stalls, the latch rule with its `latch` point, rescheduling, then by `kind` delivery
+ * at `next`, a check soon or nothing. Returns where execution continues. */
+uint32_t ag_step_end(AgState *state, uint32_t next, uint32_t latch, uint32_t kind);
+
+/* Ends a stepped instruction without `ag_step_begin` once the budget ran out; it
+ * charged `charged` cycles. As `ag_step_end` with `AG_STEP_GO`. */
+uint32_t ag_step_late(AgState *state, uint32_t next, uint32_t latch, uint32_t charged);
+
+/* Returns the stepped function for `address`, else as `ag_lookup`. Never null. */
+AgFn *ag_step_lookup(AgState *state, uint32_t address);
 
 /* After a write to SR, at the instruction boundary `pc`: delivers the interrupts the new
  * mask lets through and returns where execution continues (`pc` unless a handler

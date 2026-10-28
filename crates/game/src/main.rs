@@ -129,6 +129,9 @@ fn main() -> Result<()> {
         let path = dump(game.name, *frame, picture, Path::new(DUMP_FOLDER))?;
         println!("frame {frame} saved to {}", path.display());
     }
+    if let Exit::NoNativeCode { pc } = report.exit {
+        bail!("the game ran into ${pc:06X}, which has no native code");
+    }
     Ok(())
 }
 
@@ -427,8 +430,8 @@ struct Report {
     hblanks: u64,
     /// Interrupts taken late, at a native check point (see `Runtime::late_interrupts`).
     late: u64,
-    /// Blocks the hybrid path ran through the interpreter.
-    hybrids: u64,
+    /// Check points whose slow path ran the rest of their block as stepped code.
+    slow_paths: u64,
     /// The status register's system byte at the end.
     sr: u16,
     misses: Vec<(u32, Miss)>,
@@ -481,7 +484,7 @@ impl Report {
             vblanks: runtime.interrupts(6),
             hblanks: runtime.interrupts(4),
             late: runtime.late_interrupts(),
-            hybrids: runtime.hybrid_blocks(),
+            slow_paths: runtime.slow_paths(),
             sr: state.sr,
             misses: runtime
                 .log()
@@ -520,8 +523,8 @@ impl Report {
             self.vblanks, self.hblanks, self.sr
         );
         println!(
-            "interrupt delivery: {} late, {} blocks interpreted on the hybrid path",
-            self.late, self.hybrids
+            "interrupt delivery: {} late, {} slow paths run as stepped code",
+            self.late, self.slow_paths
         );
         println!(
             "TMSS {}, Z80 RAM {} bytes set, native stack unwinds {}",
@@ -718,7 +721,16 @@ fn start(rom: Rom, game: CompiledGame, reference: bool) -> Runtime {
         },
         ..defaults
     };
-    Runtime::new(rom, game.table, Box::<Vdp>::default(), options)
+    native(rom, game, options)
+}
+
+/// The runtime for `game` at reset on the VDP with `options`, its stepped code attached.
+fn native(rom: Rom, game: CompiledGame, options: Options) -> Runtime {
+    Runtime::new(rom, game.table, Box::<Vdp>::default(), options).with_stepped(
+        game.steps,
+        game.step_entry,
+        game.interrupt,
+    )
 }
 
 /// Runs until `frames` frames have ended, stopping at each frame in `dumps` (ascending, none
@@ -840,6 +852,7 @@ mod tests {
             report.exit
         );
         assert_eq!(report.frames, DEFAULT_FRAMES);
+        assert_eq!(report.late, 0);
         assert!(report.misses.is_empty(), "{:?}", report.misses);
         assert!(report.accesses.is_empty(), "{:?}", report.accesses);
         assert_eq!(report.unwinds, 0);
@@ -899,7 +912,7 @@ mod tests {
     }
 
     /// Runs `frames` frames from reset with budgets of at most `slice` cycles, on a thread
-    /// with room for the native stack. Also returns the late interrupts and hybrid blocks.
+    /// with room for the native stack. Also returns the late interrupts and slow paths.
     fn outcome(game: CompiledGame, rom: Rom, frames: u64, slice: i32) -> (Outcome, u64, u64) {
         let worker = thread::Builder::new()
             .name("68000".into())
@@ -909,7 +922,7 @@ mod tests {
                     slice,
                     ..Options::default()
                 };
-                let mut runtime = Runtime::new(rom, game.table, Box::<Vdp>::default(), options);
+                let mut runtime = native(rom, game, options);
                 let exit = runtime.run_frames(frames);
                 let state = runtime.state();
                 let vdp = runtime.hardware::<Vdp>().expect("the hardware is the VDP");
@@ -924,26 +937,39 @@ mod tests {
                     sr: state.sr,
                     hashes,
                 };
-                (outcome, runtime.late_interrupts(), runtime.hybrid_blocks())
+                (outcome, runtime.late_interrupts(), runtime.slow_paths())
             })
             .expect("the 68000 thread starts");
         worker.join().expect("the run finishes")
     }
 
-    /// The hybrid path against translated code: with one-cycle budgets every budget ends
-    /// inside its block, so every block runs through the interpreter, and the machine must
-    /// end as it does with native blocks. Only an interrupt native code took late could tell
-    /// them apart.
+    /// Stepped code against translated blocks: with one-cycle budgets every budget ends
+    /// inside its block, so every block runs as stepped code, and the machine must end as it
+    /// does with native blocks. Only an interrupt native code took late could tell them
+    /// apart.
     #[test]
     #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
-    fn test_sonic1_interpreted_blocks_end_where_native_ones_do() {
+    fn test_sonic1_stepped_blocks_end_where_native_ones_do() {
         let (game, rom) = sonic1();
         let slice = Options::default().slice;
-        let (native, late, hybrids) = outcome(game, rom.clone(), DEFAULT_FRAMES, slice);
-        let (interpreted, _, every) = outcome(game, rom, DEFAULT_FRAMES, 1);
-        println!("native: {late} late, {hybrids} hybrid blocks; one-cycle budgets: {every}");
-        assert_eq!(late, 0);
-        assert_eq!(native, interpreted);
+        let (native, late, slow_paths) = outcome(game, rom.clone(), DEFAULT_FRAMES, slice);
+        let (stepped, stepped_late, every) = outcome(game, rom, DEFAULT_FRAMES, 1);
+        println!(
+            "native: {late} late, {slow_paths} slow paths; one-cycle budgets: {stepped_late} \
+             late, {every} slow paths"
+        );
+        assert_eq!((late, stepped_late), (0, 0));
+        assert_eq!(native, stepped);
+    }
+
+    /// A game binary holds no interpreter (Architecture Decision 6): the game crate leaves
+    /// the runtime's `interpreter` feature out. Building the whole workspace turns it on for
+    /// every member, so this holds only for the crate built alone, as `cargo test -p
+    /// anygenesis-game` builds it.
+    #[test]
+    #[ignore = "holds only for the game crate built alone (cargo test -p anygenesis-game)"]
+    fn test_game_has_no_interpreter() {
+        assert!(!anygenesis_runtime::has_interpreter());
     }
 
     /// Start held for ten vertical interrupts on the idle title screen (stop 298 ends frame
@@ -971,6 +997,7 @@ mod tests {
             report.exit
         );
         assert_eq!(report.frames, START_FRAMES);
+        assert_eq!(report.late, 0);
         assert_eq!(report.unwinds, 0);
         assert_eq!(
             report.watched(),
@@ -1073,6 +1100,7 @@ mod tests {
         let replayed =
             run_from_reset(game, rom, PLAY_FRAMES, &[], trace, true).expect("the replay finishes");
         replayed.print();
+        assert_eq!((played.late, replayed.late), (0, 0));
         assert_eq!(summary(&replayed), summary(&played));
         let stops =
             anygenesis_framediff::diff(&mut Folder(replay), &mut Folder(live), &Masks::default())

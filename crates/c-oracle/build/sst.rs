@@ -1,6 +1,7 @@
 //! The SingleStepTests sample: each chosen case becomes a one-instruction function at its
-//! own address, emitted through the normal emitter from a one-function analysis. Every exit
-//! leaves the function, so it goes to the dispatcher or returns, and every flag stays live.
+//! own address, emitted through the normal emitter from a one-function analysis, and the
+//! instruction's stepped function. Every exit leaves the function, so it goes to the
+//! dispatcher or returns, and every flag stays live.
 //!
 //! Per file the sample takes up to [`SAMPLE`] cases, distinct opcode words first, in file
 //! order. Left out and counted: address-error cases (as in M2.2), opcodes that do not
@@ -19,7 +20,7 @@ use std::{
 use anygenesis_analysis::{
     Analysis, Block, FlagLiveness, Function, LivenessOptions, Origin, Terminator,
 };
-use anygenesis_codegen_c::{EmitOptions, Output, emit};
+use anygenesis_codegen_c::{EmitOptions, Output, emit, emit_stepped_instruction, step_name};
 use anygenesis_ir::{Control, Lifted, Op, lift};
 use anygenesis_m68k::{Instruction, MAX_WORDS, decode};
 use anygenesis_oracle::sst::{self, TestCase, Transaction, TransactionKind};
@@ -96,8 +97,18 @@ pub fn translate_sample(workspace: &Path, out: &Path) -> String {
             }
             let chunk = chunks.last_mut().expect("a chunk was just opened");
             chunk.push_str(&inline(&output));
-            let name = format!("{prefix}f_{:06X}", prepared.address.get());
-            cases.push((file.clone(), prepared.index, name));
+            let lifted =
+                lift(&prepared.instruction, prepared.address).expect("prepared cases lift");
+            // No ROM, as for the function.
+            chunk.push_str(&emit_stepped_instruction(&lifted, 0, &prefix));
+            let address = prepared.address.get();
+            let name = format!("{prefix}f_{address:06X}");
+            cases.push((
+                file.clone(),
+                prepared.index,
+                name,
+                step_name(&prefix, address),
+            ));
         }
     }
     let sources: Vec<PathBuf> = chunks
@@ -231,7 +242,7 @@ fn translate(prepared: &Prepared, prefix: &str) -> Output {
         symbol_prefix: prefix.to_owned(),
         ..EmitOptions::default()
     };
-    emit(&analysis, &liveness, &options)
+    emit(&analysis, &liveness, &options, &[])
 }
 
 /// An analysis holding one function of one instruction.
@@ -288,7 +299,7 @@ fn inline(output: &Output) -> String {
 /// The Rust items naming the sample.
 fn items(
     sample: Option<usize>,
-    cases: &[(String, usize, String)],
+    cases: &[(String, usize, String, String)],
     exclusions: &[(String, &str, usize)],
 ) -> String {
     let mut text = String::from(
@@ -297,7 +308,10 @@ fn items(
     let _ = writeln!(text, "pub const SST_SAMPLE: Option<usize> = {sample:?};\n");
     if !cases.is_empty() {
         text.push_str("unsafe extern \"C\" {\n");
-        for (_, _, name) in cases {
+        for name in cases
+            .iter()
+            .flat_map(|(_, _, function, stepped)| [function, stepped])
+        {
             let _ = writeln!(
                 text,
                 "    fn {name}(state: *mut anygenesis_abi::AgState, pc: u32) -> u32;"
@@ -308,10 +322,11 @@ fn items(
     text.push_str(
         "/// The translated cases, in suite order.\npub static SST_CASES: &[SstCase] = &[\n",
     );
-    for (file, index, name) in cases {
+    for (file, index, function, stepped) in cases {
         let _ = writeln!(
             text,
-            "    SstCase {{ file: {file:?}, index: {index}, function: {name} }},"
+            "    SstCase {{ file: {file:?}, index: {index}, function: {function}, \
+             stepped: {stepped} }},"
         );
     }
     text.push_str("];\n\n/// The cases left out.\npub static SST_EXCLUDED: &[SstExclusion] = &[\n");

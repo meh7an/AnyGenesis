@@ -23,11 +23,26 @@
                 return ag_next;                                                             \
         }                                                                                   \
     } while (0)
-/* A block-start check point: once the budget may end inside the block (it holds no more
-   than `bound`, the block's most cycles), also the one a check just started, the interpreter
-   runs the block so an interrupt is taken at its instruction boundary, and execution goes
-   on natively at the next row. */
-#define AG_HYBRID_ROW 0x40000000u
+/* Stepped native code: every kept ROM address has a stepped function in `AG_STEPS` that runs
+   that one instruction with the boundary protocol of the interpreter (the latch rule,
+   delivery after it, then the scheduler at the next boundary where the budget ran out) and
+   goes on at the next. A stepped function at a table row hands over to the translated
+   function there, except the first one a slow path enters, which `AG_STEP_FIRST` in `pc`
+   marks. Stepped functions assume the scheduler ran where the budget ran out; entries from
+   anywhere else go through `AG_STEP_ENTRY`, which runs it first. */
+#define AG_STEP_FIRST 0x20000000u
+/* `latch` for `ag_step_enter` when no instruction's latch rule applies. */
+#define AG_NO_LATCH 0xFFFFu
+/* `kind` for `ag_step_end`: delivery at the next instruction, a check soon (a call, whose
+   target takes it), or nothing (STOP, which waits for it). */
+#define AG_STEP_GO 0u
+#define AG_STEP_CALL 1u
+#define AG_STEP_STOP 2u
+/* A check point with `bound` cycles at most from it to its block's end: at a block start,
+   or where code it cannot bound (a call, an exception handler, STOP) came back inside the
+   block. Once the budget may end before the block does, also the one a check just started,
+   the block goes on as stepped code, so an interrupt is taken at its instruction boundary,
+   and the stepped code hands back at the next row. */
 #define AG_HCHECK(s, pc, bound)                                                             \
     do {                                                                                    \
         if ((s)->cycles <= (bound)) {                                                       \
@@ -37,33 +52,56 @@
                     return ag_next;                                                         \
             }                                                                               \
             if ((s)->cycles > 0 && (s)->cycles <= (bound)) {                                \
-                uint32_t ag_next = ag_hybrid((s), (pc));                                    \
-                if (ag_next & AG_HYBRID_ROW) {                                              \
-                    ag_next &= AG_ADDRESS_MASK;                                             \
-                    AgFn *ag_fn = ag_lookup((s), ag_next);                                  \
-                    AG_TAIL return ag_fn((s), ag_next);                                     \
-                }                                                                           \
-                return ag_next;                                                             \
+                ag_step_enter((s), 0u, AG_NO_LATCH);                                        \
+                AG_TAIL return AG_STEPS[(pc) >> 1]((s), (pc) | AG_STEP_FIRST);              \
             }                                                                               \
         }                                                                                   \
     } while (0)
-/* After an instruction that may reach a device: a stall or an interrupt its access made due
-   can leave the budget, with the `ahead` cycles charged for instructions not yet run, at no
-   more than `rest`, the rest of the block's most cycles. The interpreter then runs the rest
-   from `pc`, so an interrupt is taken at its instruction boundary (one that came after the
-   instruction's `latch` point a boundary later), and execution goes on natively at the next
-   row. */
+/* After an instruction that may reach a device, or one that wrote SR: a stall, an interrupt
+   its access made due or one delivered after the SR write can leave the budget, with the
+   `ahead` cycles charged for instructions not yet run, at no more than `rest`, the rest of
+   the block's most cycles. The rest then goes on as stepped code from `pc` (the latch rule
+   of the instruction with its `latch` point first, unless it is `AG_NO_LATCH`). */
 #define AG_ACHECK(s, pc, ahead, rest, latch)                                                \
     do {                                                                                    \
         if ((s)->cycles + (ahead) <= (rest)) {                                              \
-            uint32_t ag_next = ag_resume((s), (pc), (ahead), (latch));                      \
-            if (ag_next & AG_HYBRID_ROW) {                                                  \
-                ag_next &= AG_ADDRESS_MASK;                                                 \
-                AgFn *ag_fn = ag_lookup((s), ag_next);                                      \
-                AG_TAIL return ag_fn((s), ag_next);                                         \
-            }                                                                               \
-            return ag_next;                                                                 \
+            ag_step_enter((s), (ahead), (latch));                                           \
+            AG_TAIL return AG_STEP_ENTRY((s), (pc) | AG_STEP_FIRST);                        \
         }                                                                                   \
+    } while (0)
+/* The scheduler at the stepped instruction boundary `pc` where the budget ran out, as the
+   interpreter calls it: where a call or STOP came back inside stepped code. */
+#define AG_STEP_CHECK(s, pc)                                                                \
+    do {                                                                                    \
+        if ((s)->cycles <= 0) {                                                             \
+            uint32_t ag_next = ag_step_check((s), (pc));                                    \
+            if (ag_next != (pc))                                                            \
+                return ag_next;                                                             \
+        }                                                                                   \
+    } while (0)
+/* The end of a fast-path stepped instruction going on at `next`, whose start left `ag_c0`
+   cycles: the runtime only once the budget ran out. */
+#define AG_STEP_FAST_END(s, next, latch)                                                    \
+    do {                                                                                    \
+        if ((s)->cycles <= 0) {                                                             \
+            uint32_t ag_next =                                                              \
+                ag_step_late((s), (next), (latch), (uint32_t)(ag_c0 - (s)->cycles));        \
+            if (ag_next != (next))                                                          \
+                return ag_next;                                                             \
+        }                                                                                   \
+    } while (0)
+/* The end of a stepped instruction begun with `ag_step_begin`, going on at `next`. */
+#define AG_STEP_END(s, next, latch)                                                         \
+    do {                                                                                    \
+        uint32_t ag_next = ag_step_end((s), (next), (latch), AG_STEP_GO);                   \
+        if (ag_next != (next))                                                              \
+            return ag_next;                                                                 \
+    } while (0)
+/* On at `target`, known only when the instruction runs, through the dispatcher. */
+#define AG_STEP_JUMP(s, target)                                                             \
+    do {                                                                                    \
+        AgFn *ag_fn = ag_step_lookup((s), (target));                                        \
+        AG_TAIL return ag_fn((s), (target));                                                \
     } while (0)
 /* After a write to SR: an interrupt the new mask lets through is taken before `pc`. */
 #define AG_DELIVER(s, pc)                                                                   \

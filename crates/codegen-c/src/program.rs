@@ -1,4 +1,5 @@
-//! The whole program: headers, function files cut at a line budget, and the address table.
+//! The whole program: headers, function files cut at a line budget, the address table, and
+//! the stepped files when they are asked for.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +11,7 @@ use crate::{
     EmitOptions, Output, OutputFile,
     function::{emit_function, function_name, prototype},
     printer::constant,
+    stepped,
 };
 
 const RUNTIME_HEADER: &str = include_str!("ag_runtime.h");
@@ -55,7 +57,12 @@ impl Context<'_> {
     }
 }
 
-pub fn emit(analysis: &Analysis, liveness: &FlagLiveness<'_>, options: &EmitOptions) -> Output {
+pub fn emit(
+    analysis: &Analysis,
+    liveness: &FlagLiveness<'_>,
+    options: &EmitOptions,
+    image: &[u8],
+) -> Output {
     let context = Context {
         analysis,
         liveness,
@@ -111,7 +118,21 @@ pub fn emit(analysis: &Analysis, liveness: &FlagLiveness<'_>, options: &EmitOpti
         name: "ag_table.c".to_owned(),
         text: table_file(&options.symbol_prefix, &table),
     });
-    Output { files }
+    let stepped = options.stepped.then(|| {
+        let stepped = stepped::emit(image, analysis, &table, options);
+        for (index, text) in stepped.chunks.into_iter().enumerate() {
+            files.push(OutputFile {
+                name: format!("ag_s{index:03}.c"),
+                text,
+            });
+        }
+        files.push(OutputFile {
+            name: "ag_steps.c".to_owned(),
+            text: stepped.table,
+        });
+        stepped.stats
+    });
+    Output { files, stepped }
 }
 
 /// Maps each exception vector to the translated function analysed from it.
@@ -152,9 +173,23 @@ fn functions_header(context: &Context<'_>) -> String {
     }
     text.push_str("\n/* Every function entry and resume point, by address. */\n");
     text.push_str(&format!("extern const AgEntry {prefix}ag_table[];\n"));
-    text.push_str(&format!(
-        "extern const uint32_t {prefix}ag_table_size;\n\n#endif\n"
-    ));
+    text.push_str(&format!("extern const uint32_t {prefix}ag_table_size;\n\n"));
+    if context.options.stepped {
+        text.push_str(
+            "/* The stepped function of every even ROM address, index address / 2; null where \
+             the superset kept none. */\n",
+        );
+        text.push_str(&format!("#define AG_STEPS {prefix}ag_steps\n"));
+        text.push_str(&format!("extern AgFn *const {prefix}ag_steps[];\n"));
+        text.push_str(&format!("extern const uint32_t {prefix}ag_steps_size;\n"));
+        let entry = stepped::entry_name(prefix);
+        text.push_str(
+            "/* Stepped code entered from anywhere but the stepped function before. */\n",
+        );
+        text.push_str(&format!("#define AG_STEP_ENTRY {entry}\nAgFn {entry};\n"));
+        text.push_str(&format!("{};\n\n", stepped::interrupt_prototype(prefix)));
+    }
+    text.push_str("#endif\n");
     text
 }
 
