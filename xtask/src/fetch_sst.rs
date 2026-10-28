@@ -1,4 +1,4 @@
-//! Fetches the SingleStepTests/m68000 vectors into the gitignored testdata/ directory.
+//! Fetches pinned SingleStepTests suites into the gitignored testdata/ directory.
 
 use std::{
     ffi::OsStr,
@@ -10,28 +10,63 @@ use anyhow::{Context, Result, bail};
 
 use crate::workspace_root;
 
-const REPOSITORY: &str = "https://github.com/SingleStepTests/m68000.git";
+/// One SingleStepTests repository, pinned to a commit.
+struct Suite {
+    /// The name `cargo xtask fetch-sst <name>` takes.
+    name: &'static str,
+    repository: &'static str,
+    /// Move it on purpose and re-run the suite's reports.
+    commit: &'static str,
+    destination: &'static str,
+}
 
-/// Upstream `main` as of 2024-08-01. Move it on purpose and re-run the Musashi report.
-const COMMIT: &str = "64b253116a3de04aaac4346c43680960dc9b67e5";
+/// The first suite is the one fetched when no name is given.
+const SUITES: &[Suite] = &[
+    Suite {
+        name: "m68000",
+        repository: "https://github.com/SingleStepTests/m68000.git",
+        // Upstream `main` as of 2024-08-01.
+        commit: "64b253116a3de04aaac4346c43680960dc9b67e5",
+        destination: "testdata/m68000",
+    },
+    Suite {
+        name: "z80",
+        repository: "https://github.com/SingleStepTests/z80.git",
+        // Upstream `main` as of 2026-04-10.
+        commit: "ebe1875d48f374bcfd4b505d8eb8ee751568b5f7",
+        destination: "testdata/z80",
+    },
+];
 
-const DESTINATION: &str = "testdata/m68000";
-
-/// Checks out the pinned commit into testdata/m68000 with a shallow fetch, and is a no-op
-/// when it is already there.
+/// Checks out the named suite's pinned commit (m68000 when `name` is `None`) into testdata/
+/// with a shallow fetch, and is a no-op when it is already there.
 ///
 /// # Errors
-/// Returns an error if git fails, or if the destination exists but is not a git checkout.
-pub(crate) fn run() -> Result<ExitCode> {
-    let destination = workspace_root()?.join(DESTINATION);
+/// Returns an error if the name is unknown, if git fails, or if the destination exists but
+/// is not a git checkout.
+pub(crate) fn run(name: Option<&str>) -> Result<ExitCode> {
+    let suite = match name {
+        None => &SUITES[0],
+        Some(name) => match SUITES.iter().find(|suite| suite.name == name) {
+            Some(suite) => suite,
+            None => bail!("unknown suite `{name}`; known: m68000, z80"),
+        },
+    };
+    let Suite {
+        name,
+        repository,
+        commit,
+        destination: relative,
+    } = suite;
+    let destination = workspace_root()?.join(relative);
     if destination.join(".git").is_dir() {
         // An interrupted earlier fetch leaves a checkout without HEAD; fetch again.
-        if head(&destination).is_ok_and(|head| head == COMMIT) {
-            println!("{DESTINATION} is already at {COMMIT}");
+        if head(&destination).is_ok_and(|head| head == *commit) {
+            println!("{relative} is already at {commit}");
             return Ok(ExitCode::SUCCESS);
         }
     } else if destination.exists() {
-        bail!("{DESTINATION} exists but is not a git checkout; remove it and retry");
+        bail!("{relative} exists but is not a git checkout; remove it and retry");
     } else {
         git(
             None,
@@ -47,7 +82,7 @@ pub(crate) fn run() -> Result<ExitCode> {
 
     git(
         Some(&destination),
-        ["fetch", "--depth", "1", REPOSITORY, COMMIT],
+        ["fetch", "--depth", "1", repository, commit],
     )?;
     git(
         Some(&destination),
@@ -62,10 +97,10 @@ pub(crate) fn run() -> Result<ExitCode> {
     )?;
 
     let fetched = head(&destination)?;
-    if fetched != COMMIT {
-        bail!("{DESTINATION} is at {fetched} after the fetch, expected {COMMIT}");
+    if fetched != *commit {
+        bail!("{relative} is at {fetched} after the fetch, expected {commit}");
     }
-    println!("fetched SingleStepTests/m68000 {COMMIT} into {DESTINATION}");
+    println!("fetched SingleStepTests/{name} {commit} into {relative}");
     Ok(ExitCode::SUCCESS)
 }
 

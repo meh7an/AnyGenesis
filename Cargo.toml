@@ -18,5 +18,6 @@ members = [
     "crates/rom",
     "crates/runtime",
     "crates/shared",
+    "crates/z80",
     "xtask",
 ]
