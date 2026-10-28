@@ -5,7 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-anygenesis-gamecfg = { version = "0.1.0", path = "../gamecfg" }
 anygenesis-ir = { version = "0.1.0", path = "../ir" }
 anygenesis-m68k = { version = "0.1.0", path = "../m68k" }
 anygenesis-rom = { version = "0.1.0", path = "../rom" }

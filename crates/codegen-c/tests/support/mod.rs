@@ -9,10 +9,10 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use anygenesis_analysis::{Analysis, analyze};
+use anygenesis_analysis::{Analysis, EntryKind, FunctionHint, Hints, JumpTable, analyze_with};
 use anygenesis_codegen_c::Output;
-use anygenesis_gamecfg::GameConfig;
 use anygenesis_rom::Rom;
+use anygenesis_shared::Address;
 
 const ROM_SIZE: usize = 0x1000;
 /// Every exception vector points at an `rte` here.
@@ -46,12 +46,29 @@ impl Image {
         self
     }
 
-    /// Analyses the image with `hints` appended to its config.
-    pub fn analyze(&self, hints: &str) -> Analysis {
+    /// Analyses the image from its vectors and `hints`.
+    pub fn analyze(&self, hints: &Hints) -> Analysis {
         let rom = Rom::from_bytes(self.bytes.clone()).expect("synthetic image loads");
-        let text = format!("sha1 = \"{}\"\n{hints}", rom.sha1());
-        let config = GameConfig::parse(&text).expect("valid config");
-        analyze(&rom, &config).expect("SHA-1 matches")
+        analyze_with(&rom, hints)
+    }
+}
+
+/// A function hint at `address`.
+pub fn function(address: u32, noreturn: bool) -> FunctionHint {
+    FunctionHint {
+        address: Address::new(address),
+        noreturn,
+    }
+}
+
+/// A table of `count` entries at `address`, read at `site` when one is given.
+pub fn table(address: u32, count: u32, kind: EntryKind, site: Option<u32>) -> JumpTable {
+    JumpTable {
+        address: Address::new(address),
+        count,
+        kind,
+        site: site.map(Address::new),
+        target: None,
     }
 }
 

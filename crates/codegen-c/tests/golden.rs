@@ -6,13 +6,13 @@ mod support;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anygenesis_analysis::{Analysis, FlagLiveness, LivenessOptions};
+use anygenesis_analysis::{Analysis, EntryKind, FlagLiveness, Hints, LivenessOptions};
 use anygenesis_codegen_c::{
     CheckPoints, EmitOptions, LineMap, Output, OutputFile, emit, emit_stepped_instruction,
 };
 use anygenesis_shared::Address;
 
-use support::{Image, Optimization, RESET, branch_w, compile, scratch};
+use support::{Image, Optimization, RESET, branch_w, compile, function, scratch, table};
 
 const RTS: u16 = 0x4E75;
 
@@ -23,7 +23,7 @@ const N: u32 = 0x700;
 
 /// reset: bsr.w f; jsr g; tst.w d0; beq.s skip; addq.w #1,d2; skip: bra.w h (a tail jump:
 /// h is a hinted function). f: a dbf loop. g: memory accesses of every region. h: rts.
-fn calls() -> (Image, &'static str) {
+fn calls() -> (Image, Hints) {
     let mut reset = branch_w(0x6100, RESET, F).to_vec();
     reset.extend([0x4EB9, 0x0000, G as u16, 0x4A40, 0x6702, 0x5242]);
     reset.extend(branch_w(0x6000, 0x310, H));
@@ -32,7 +32,11 @@ fn calls() -> (Image, &'static str) {
         .words(F, &[0x7003, 0x5242, 0x51C8, 0xFFFC, RTS])
         .words(G, &memory_accesses())
         .words(H, &[RTS]);
-    (image, "[[function]]\naddress = 0x600\n")
+    let hints = Hints {
+        functions: vec![function(H, false)],
+        ..Hints::default()
+    };
+    (image, hints)
 }
 
 /// move.w d0,($8000).w (work RAM at a constant address); move.w ($0400).w,d1 (ROM at a
@@ -46,7 +50,7 @@ fn memory_accesses() -> Vec<u16> {
 
 /// reset: a word-offset jump table into `jsr (a1)` (a long table of two functions) and
 /// `jmp (a0)` (unresolved).
-fn tables() -> (Image, &'static str) {
+fn tables() -> (Image, Hints) {
     let image = Image::new()
         .words(
             RESET,
@@ -57,36 +61,43 @@ fn tables() -> (Image, &'static str) {
         .words(0x400, &[0x0000, 0x0410, 0x0000, 0x0420])
         .words(0x410, &[RTS])
         .words(0x420, &[0x7000, RTS]);
-    let hints = "[[jump_table]]\naddress = 0x308\ncount = 2\nkind = \"word_offset\"\n\
-                 [[jump_table]]\naddress = 0x400\ncount = 2\nkind = \"long\"\nsite = 0x30C\n";
+    let hints = Hints {
+        jump_tables: vec![
+            table(0x308, 2, EntryKind::WordOffset, None),
+            table(0x400, 2, EntryKind::Long, Some(0x30C)),
+        ],
+        ..Hints::default()
+    };
     (image, hints)
 }
 
 /// reset: trap #0; move.w d0,sr (privileged); divu.w d1,d0 (divide by zero); stop #$2700;
 /// reset; move.w sr,d2; bsr.w n, hinted as never returning: moveq #1,d0 and `bra.s *`. A
 /// hinted function at 0x800 is only `bra.s *`, touching no state.
-fn exceptions() -> (Image, &'static str) {
+fn exceptions() -> (Image, Hints) {
     let mut reset = vec![0x4E40, 0x46C0, 0x80C1, 0x4E72, 0x2700, 0x4E70, 0x40C2];
     reset.extend(branch_w(0x6100, 0x30E, N));
     let image = Image::new()
         .words(RESET, &reset)
         .words(N, &[0x7001, 0x60FE])
         .words(0x800, &[0x60FE]);
-    let hints = "[[function]]\naddress = 0x700\nnoreturn = true\n\
-                 [[function]]\naddress = 0x800\n";
+    let hints = Hints {
+        functions: vec![function(N, true), function(0x800, false)],
+        ..Hints::default()
+    };
     (image, hints)
 }
 
-fn emit_program(program: (Image, &str), options: &EmitOptions) -> Output {
+fn emit_program(program: (Image, Hints), options: &EmitOptions) -> Output {
     let (image, hints) = program;
-    let analysis: Analysis = image.analyze(hints);
+    let analysis: Analysis = image.analyze(&hints);
     let liveness = FlagLiveness::new(&analysis, LivenessOptions::default());
     emit(&analysis, &liveness, options, &image.bytes)
 }
 
 /// Every instruction of `program` on its own listing line, from line 10.
-fn line_map(program: &(Image, &str)) -> LineMap {
-    let analysis = program.0.analyze(program.1);
+fn line_map(program: &(Image, Hints)) -> LineMap {
+    let analysis = program.0.analyze(&program.1);
     let lines: BTreeMap<_, _> = analysis
         .instructions
         .keys()

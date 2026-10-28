@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anygenesis_gamecfg::{EntryKind, GameConfig, JumpTable, TargetKind};
 use anygenesis_m68k::{
     Ea, IndexRegister, Instruction, MAX_WORDS, Mnemonic, Operand, Register, decode_at,
 };
@@ -8,8 +7,8 @@ use anygenesis_rom::vector_name;
 use anygenesis_shared::{Address, Size, read_u16_be};
 
 use crate::{
-    Call, CallKind, Diagnostic, Edge, EdgeKind, Origin, ResolvedTable, Source, Suggestion,
-    Terminator, UnresolvedSite, tables,
+    Call, CallKind, Diagnostic, Edge, EdgeKind, EntryKind, Hints, JumpTable, Origin, ResolvedTable,
+    Source, Suggestion, TargetKind, Terminator, UnresolvedSite, tables,
 };
 
 /// Genesis work RAM and its mirrors, 0xE00000-0xFFFFFF.
@@ -45,7 +44,7 @@ pub(crate) struct Entry {
 pub(crate) struct Discovery<'a> {
     bytes: &'a [u8],
     vectors: &'a [u32; 64],
-    config: &'a GameConfig,
+    hints: &'a Hints,
     pub instructions: BTreeMap<Address, Instruction>,
     pub effects: BTreeMap<Address, Effect>,
     /// Addresses where a block must start.
@@ -58,11 +57,11 @@ pub(crate) struct Discovery<'a> {
 }
 
 impl<'a> Discovery<'a> {
-    pub fn new(bytes: &'a [u8], vectors: &'a [u32; 64], config: &'a GameConfig) -> Self {
+    pub fn new(bytes: &'a [u8], vectors: &'a [u32; 64], hints: &'a Hints) -> Self {
         Self {
             bytes,
             vectors,
-            config,
+            hints,
             instructions: BTreeMap::new(),
             effects: BTreeMap::new(),
             leaders: BTreeSet::new(),
@@ -76,22 +75,16 @@ impl<'a> Discovery<'a> {
 
     /// Descends from every root until nothing new is reached.
     pub fn run(&mut self) {
-        let config = self.config;
+        let hints = self.hints;
         self.add_vector_roots();
-        for hint in &config.functions {
-            let line = hint.location.line;
-            self.add_entry(
-                hint.address,
-                Some(Origin::Hint { line }),
-                None,
-                Source::Config { line },
-            );
+        for hint in &hints.functions {
+            self.add_entry(hint.address, Some(Origin::Hint), None, Source::Hint);
         }
         self.drain();
         // Tables no reached site claimed are roots of their own; their code can reach sites
         // that claim further tables, so repeat until none is left.
         loop {
-            let unclaimed: Vec<&JumpTable> = config
+            let unclaimed: Vec<&JumpTable> = hints
                 .jump_tables
                 .iter()
                 .filter(|table| !self.tables.iter().any(|used| used.address == table.address))
@@ -182,11 +175,10 @@ impl<'a> Discovery<'a> {
                 self.end_invalid(Some(address));
                 return;
             }
-            if let Some(region) = self.config.data_region(next) {
-                let region_line = region.location.line;
+            if let Some(region) = self.hints.data_region(next) {
                 self.diagnose(Diagnostic::FallsIntoData {
                     address,
-                    region_line,
+                    region: region.start,
                 });
                 self.end_invalid(Some(address));
                 return;
@@ -299,7 +291,7 @@ impl<'a> Discovery<'a> {
             targets: vec![target],
         });
         let noreturn = self
-            .config
+            .hints
             .function(target)
             .is_some_and(|hint| hint.noreturn);
         if noreturn {
@@ -319,23 +311,22 @@ impl<'a> Discovery<'a> {
             } => Some((site.wrapping_add(2).offset(i32::from(displacement)), index)),
             _ => None,
         };
-        let config = self.config;
-        let targets = if let Some(hint) = config.indirect(site) {
-            let line = hint.location.line;
+        let hints = self.hints;
+        let targets = if let Some(hint) = hints.indirect(site) {
             for &target in &hint.targets {
                 if is_call {
                     let origin = Origin::Indirect { site };
-                    self.add_entry(target, Some(origin), Some(site), Source::Config { line });
+                    self.add_entry(target, Some(origin), Some(site), Source::Hint);
                 } else {
-                    self.add_jump(Source::Config { line }, target);
+                    self.add_jump(Source::Hint, target);
                 }
             }
             Some((hint.targets.clone(), EdgeKind::Hinted))
-        } else if let Some(table) = config
+        } else if let Some(table) = hints
             .jump_tables
             .iter()
             .find(|table| table.site == Some(site))
-            .or_else(|| pc_table.and_then(|(address, _)| config.jump_table(address)))
+            .or_else(|| pc_table.and_then(|(address, _)| hints.jump_table(address)))
         {
             let targets = self.resolve_table(table, Some(site), is_call);
             Some((
@@ -424,8 +415,7 @@ impl<'a> Discovery<'a> {
             (false, Some(_), None) => TargetKind::Block,
             (false, None, None) => TargetKind::Function,
         };
-        let line = table.location.line;
-        let source = Source::Config { line };
+        let source = Source::Hint;
         let mut targets = Vec::new();
         for index in 0..table.count {
             let Some(target) = tables::entry_target(self.bytes, table.address, table.kind, index)
@@ -460,7 +450,6 @@ impl<'a> Discovery<'a> {
             site,
             target: target_kind,
             targets: targets.clone(),
-            line,
         });
         targets
     }
@@ -505,11 +494,11 @@ impl<'a> Discovery<'a> {
             Diagnostic::RamTarget { source, target }
         } else if target.get() >= self.rom_end() {
             Diagnostic::OutOfRomTarget { source, target }
-        } else if let Some(region) = self.config.data_region(target) {
+        } else if let Some(region) = self.hints.data_region(target) {
             Diagnostic::DataTarget {
                 source,
                 target,
-                region_line: region.location.line,
+                region: region.start,
             }
         } else {
             return true;

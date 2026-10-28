@@ -1,8 +1,8 @@
 //! Genesis ROM image loading and identification.
 //!
 //! Only raw `.bin` images load. Interleaved `.smd` dumps are detected and refused, and any
-//! well-formed image parses, while [`Rom::identify`] accepts only the ROMs in
-//! [`KNOWN_ROMS`].
+//! well-formed image parses; an image is identified by its SHA-1, never checked against a
+//! list.
 
 mod header;
 mod identify;
@@ -14,7 +14,7 @@ use std::{fmt, fs, io, path::Path};
 use anygenesis_shared::{BoundsError, read_u16_be};
 
 pub use header::{Header, Regions};
-pub use identify::{KNOWN_ROMS, KnownRom, Sha1Digest};
+pub use identify::Sha1Digest;
 pub use vectors::{VectorTable, vector_name};
 
 use crate::header::{HEADER_END, HEADER_START};
@@ -115,12 +115,14 @@ impl Rom {
         &self.warnings
     }
 
-    /// Identifies the image as one of the supported ROMs.
-    ///
-    /// # Errors
-    /// Returns [`RomError::UnknownRom`] when the SHA-1 matches no entry of [`KNOWN_ROMS`].
-    pub fn identify(&self) -> Result<KnownRom, RomError> {
-        identify::find_known(self.sha1).ok_or(RomError::UnknownRom { sha1: self.sha1 })
+    /// Returns the name to show for the game: the header's overseas title with runs of
+    /// spaces collapsed, else its domestic title, else the start of the SHA-1.
+    pub fn title(&self) -> String {
+        [&self.header.overseas_title, &self.header.domestic_title]
+            .into_iter()
+            .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
+            .find(|title| !title.is_empty())
+            .unwrap_or_else(|| format!("SHA-1 {}", &self.sha1.to_string()[..8]))
     }
 }
 
@@ -150,11 +152,6 @@ pub enum RomError {
     TooLarge { size: usize },
     #[error("the image ends inside its header: {0}")]
     Truncated(#[from] BoundsError),
-    #[error(
-        "unknown ROM with SHA-1 {sha1}; AnyGenesis supports only {}",
-        identify::supported_list()
-    )]
-    UnknownRom { sha1: Sha1Digest },
 }
 
 /// A problem that does not stop a ROM image from loading.
@@ -394,13 +391,33 @@ mod tests {
     }
 
     #[test]
-    fn test_identify_synthetic_rom_unknown_names_supported() {
-        let rom = load(synthetic_rom());
-        let error = rom.identify().expect_err("synthetic image is unknown");
-        assert!(matches!(error, RomError::UnknownRom { sha1 } if sha1 == rom.sha1()));
-        let message = error.to_string();
-        assert!(message.contains(&rom.sha1().to_string()));
-        assert!(message.contains(KNOWN_ROMS[0].sha1));
+    fn test_title_overseas_title_wins() {
+        assert_eq!(load(synthetic_rom()).title(), "ANYGENESIS OVERSEAS");
+    }
+
+    #[test]
+    fn test_title_runs_of_spaces_collapse() {
+        let mut bytes = synthetic_rom();
+        bytes[0x150..0x180].fill(b' ');
+        put_text(&mut bytes, 0x150, "SONIC THE");
+        put_text(&mut bytes, 0x168, "HEDGEHOG");
+        assert_eq!(load(bytes).title(), "SONIC THE HEDGEHOG");
+    }
+
+    #[test]
+    fn test_title_blank_overseas_falls_back_to_domestic() {
+        let mut bytes = synthetic_rom();
+        bytes[0x150..0x180].fill(b' ');
+        assert_eq!(load(bytes).title(), "ANYGENESIS DOMESTIC");
+    }
+
+    #[test]
+    fn test_title_blank_titles_fall_back_to_sha1() {
+        let mut bytes = synthetic_rom();
+        bytes[0x120..0x180].fill(b' ');
+        let rom = load(bytes);
+        let expected = format!("SHA-1 {}", &rom.sha1().to_string()[..8]);
+        assert_eq!(rom.title(), expected);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! that reach them (`programs.rs` in OUT_DIR, included by src/programs.rs):
 //! - the synthetic program (src/synthetic.rs), always;
 //! - a SingleStepTests sample, when testdata/ holds the suite (`cargo xtask fetch-sst`);
-//! - Sonic 1, when `ANYGENESIS_ROM` names the ROM.
+//! - the ROM `ANYGENESIS_ROM` names, when it is set.
 //!
 //! Function programs are emitted with cycle accounting and a check point at every block
 //! start: the hook is how the tests cap runs that never end.
@@ -42,7 +42,7 @@ fn main() {
         "ag_synthetic",
     );
     items.push_str(&table_items(prefix, "synthetic_table"));
-    items.push_str(&sonic1(&out));
+    items.push_str(&rom(&out));
     items.push_str(&sst::translate_sample(&workspace, &out));
     fs::write(out.join("programs.rs"), items).expect("programs.rs written");
 }
@@ -85,32 +85,29 @@ fn table_items(prefix: &str, name: &str) -> String {
     )
 }
 
-/// Translates Sonic 1 when `ANYGENESIS_ROM` is set.
-fn sonic1(out: &Path) -> String {
+/// Translates the ROM `ANYGENESIS_ROM` names, analysed from its vectors as game builds do,
+/// when it is set.
+fn rom(out: &Path) -> String {
     println!("cargo::rerun-if-env-changed=ANYGENESIS_ROM");
-    let config_path = build::config_path("sonic1").unwrap_or_else(|error| panic!("{error}"));
-    println!("cargo::rerun-if-changed={}", config_path.display());
     let Some(path) = env::var_os("ANYGENESIS_ROM") else {
-        return "/// The SHA-1 of the translated Sonic 1 ROM; `None` without `ANYGENESIS_ROM`.\n\
-                pub const SONIC1_SHA1: Option<&str> = None;\n\n\
-                /// Sonic 1's address table, when translated.\n\
-                pub fn sonic1_table() -> Option<&'static [anygenesis_abi::AgEntry]> {\n    \
+        return "/// The SHA-1 of the translated ROM; `None` without `ANYGENESIS_ROM`.\n\
+                pub const ROM_SHA1: Option<&str> = None;\n\n\
+                /// The translated ROM's address table, when there is one.\n\
+                pub fn rom_table() -> Option<&'static [anygenesis_abi::AgEntry]> {\n    \
                 None\n}\n\n"
             .to_owned();
     };
     println!("cargo::rerun-if-changed={}", Path::new(&path).display());
     let rom =
         build::load_rom(Path::new(&path)).unwrap_or_else(|error| panic!("ANYGENESIS_ROM: {error}"));
-    let config = build::load_config(&config_path).unwrap_or_else(|error| panic!("{error}"));
-    let analysis = analyze(&rom, &config).unwrap_or_else(|error| panic!("{error}"));
-    compile_program(&analysis, &rom, "", &out.join("sonic1"), "ag_sonic1");
-    let table = table_items("", "sonic1_table_rows");
+    compile_program(&analyze(&rom), &rom, "", &out.join("rom"), "ag_rom");
+    let table = table_items("", "rom_table_rows");
     format!(
-        "{table}/// The SHA-1 of the translated Sonic 1 ROM; `None` without `ANYGENESIS_ROM`.\n\
-         pub const SONIC1_SHA1: Option<&str> = Some(\"{}\");\n\n\
-         /// Sonic 1's address table, when translated.\n\
-         pub fn sonic1_table() -> Option<&'static [anygenesis_abi::AgEntry]> {{\n    \
-         Some(sonic1_table_rows())\n}}\n\n",
+        "{table}/// The SHA-1 of the translated ROM; `None` without `ANYGENESIS_ROM`.\n\
+         pub const ROM_SHA1: Option<&str> = Some(\"{}\");\n\n\
+         /// The translated ROM's address table, when there is one.\n\
+         pub fn rom_table() -> Option<&'static [anygenesis_abi::AgEntry]> {{\n    \
+         Some(rom_table_rows())\n}}\n\n",
         rom.sha1()
     )
 }

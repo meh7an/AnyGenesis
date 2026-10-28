@@ -67,7 +67,7 @@ const DUMP_FOLDER: &str = "dumps";
 
 fn main() -> Result<()> {
     let Some(game) = game::compiled() else {
-        bail!("built without a game: set GAME and {ROM_VAR}, then rebuild");
+        bail!("built without a game: set {ROM_VAR} to the ROM, then rebuild");
     };
     let arguments = Arguments::parse()?;
     let rom = load_rom(&game, &arguments.rom)?;
@@ -126,7 +126,7 @@ fn main() -> Result<()> {
         );
     }
     for (frame, picture) in &report.pictures {
-        let path = dump(game.name, *frame, picture, Path::new(DUMP_FOLDER))?;
+        let path = dump(*frame, picture, Path::new(DUMP_FOLDER))?;
         println!("frame {frame} saved to {}", path.display());
     }
     if let Exit::NoNativeCode { pc } = report.exit {
@@ -316,14 +316,13 @@ impl Trace {
     }
 }
 
-/// The report of a run of `game` that ended with `exit`, with `pictures` kept on the way,
-/// after ending its recording.
+/// The report of a run that ended with `exit`, with `pictures` kept on the way, after ending
+/// its recording.
 ///
 /// # Errors
 /// The first failure at a stop, or ending the recording.
 fn conclude(
     runtime: &Runtime,
-    game: &CompiledGame,
     exit: Exit,
     pictures: Vec<(u64, Frame)>,
     failure: &Failure,
@@ -338,7 +337,7 @@ fn conclude(
             .finish(runtime.interrupts(VBLANK_LEVEL), runtime.frames())
             .context("ending the recording")?;
     }
-    Ok(Report::new(runtime, game, exit, pictures))
+    Ok(Report::new(runtime, exit, pictures))
 }
 
 /// Saves the state at stop `index` in the frame diff's layout, with a note of where the
@@ -393,10 +392,10 @@ fn word(state: &AgState, address: u32) -> u16 {
     ])
 }
 
-/// Saves `picture`, frame `frame` of `game`, as a BMP file in `folder`; returns its path.
-fn dump(game: &str, frame: u64, picture: &Frame, folder: &Path) -> Result<PathBuf> {
+/// Saves `picture`, frame `frame`, as a BMP file in `folder`; returns its path.
+fn dump(frame: u64, picture: &Frame, folder: &Path) -> Result<PathBuf> {
     fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
-    let path = folder.join(format!("{game}-{frame:05}.bmp"));
+    let path = folder.join(format!("frame-{frame:05}.bmp"));
     fs::write(&path, picture.to_bmp()).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
@@ -440,10 +439,12 @@ struct Report {
     tmss_unlocked: bool,
     /// Z80 RAM bytes that are not zero.
     z80_bytes: usize,
-    /// The work RAM byte the report shows, when the game's config names one.
-    watched: Option<u32>,
     vdp: Vdp,
     /// Work RAM at the end.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the game's checks read work RAM")
+    )]
     ram: Box<[u8; RAM_SIZE]>,
     /// The frames asked for, by number, as drawn when they ended.
     pictures: Vec<(u64, Frame)>,
@@ -465,14 +466,9 @@ fn big_endian(words: &[u16]) -> Vec<u8> {
 }
 
 impl Report {
-    /// What `runtime` holds after a run of `game` that ended with `exit`, with `pictures`
-    /// kept on the way.
-    fn new(
-        runtime: &Runtime,
-        game: &CompiledGame,
-        exit: Exit,
-        pictures: Vec<(u64, Frame)>,
-    ) -> Self {
+    /// What `runtime` holds after a run that ended with `exit`, with `pictures` kept on the
+    /// way.
+    fn new(runtime: &Runtime, exit: Exit, pictures: Vec<(u64, Frame)>) -> Self {
         let vectors = runtime.rom().vectors();
         let state = runtime.state();
         Self {
@@ -496,17 +492,10 @@ impl Report {
             unwinds: runtime.log().unwinds(),
             tmss_unlocked: runtime.tmss_unlocked(),
             z80_bytes: runtime.z80_ram().iter().filter(|&&byte| byte != 0).count(),
-            watched: game.report.map(|report| report.watched),
             vdp: runtime.hardware::<Vdp>().cloned().unwrap_or_default(),
             ram: Box::new(state.ram),
             pictures,
         }
-    }
-
-    /// The work RAM byte the report shows, with its address.
-    fn watched(&self) -> Option<(u32, u8)> {
-        self.watched
-            .map(|address| (address, self.ram[ram_index(address)]))
     }
 
     fn print(&self) {
@@ -515,11 +504,8 @@ impl Report {
             "run ended: {} after {} cycles, {} frames",
             self.exit, self.cycles, self.frames
         );
-        let watched = self.watched().map_or_else(String::new, |(address, value)| {
-            format!(", RAM ${address:06X} = ${value:02X}")
-        });
         println!(
-            "interrupts taken: {} VBlank (level 6), {} HBlank (level 4); SR ${:04X}{watched}",
+            "interrupts taken: {} VBlank (level 6), {} HBlank (level 4); SR ${:04X}",
             self.vblanks, self.hblanks, self.sr
         );
         println!(
@@ -602,7 +588,7 @@ fn run_from_reset(
             };
             let (exit, pictures) = run_frames(&mut runtime, frames, &dumps);
             let recording = recording.as_ref();
-            conclude(&runtime, &game, exit, pictures, &failure, recording)
+            conclude(&runtime, exit, pictures, &failure, recording)
         })
         .context("starting the 68000 thread")?;
     worker
@@ -650,7 +636,7 @@ fn run_in_window(
         },
         move |runtime, exit, (failure, recording)| {
             let recording = recording.as_ref();
-            conclude(runtime, &game, exit, Vec::new(), &failure, recording)
+            conclude(runtime, exit, Vec::new(), &failure, recording)
         },
     )?
 }
@@ -758,7 +744,17 @@ mod tests {
     use anygenesis_runtime::vdp::CRAM_MASK;
 
     use super::*;
-    use crate::game::ReportConfig;
+
+    /// Sega Retro, "Sonic the Hedgehog (Mega Drive)/Technical information", Revision 00.
+    const SONIC1_REV00_SHA1: &str = "6ddb7de1e17e7f6cdb88927bd906352030daa194";
+    /// The game mode byte in work RAM, and its values on the title screen and in a level.
+    const GAME_MODE: u32 = 0xFF_F600;
+    const TITLE_MODE: u8 = 0x04;
+    const LEVEL_MODE: u8 = 0x0C;
+    /// The copy of CRAM in work RAM that the vertical interrupt copies to CRAM.
+    const PALETTE_COPY: u32 = 0xFF_FB00;
+    /// The ROM table of 19 `0x8RVV` words that sets VDP registers 0-18 at boot.
+    const VDP_SETUP: u32 = 0x00_129E;
 
     /// The VDP's memories and registers after 600 frames, as Mehran signed them off
     /// (M3.3, VRAM again at v0.2 M1.1); they change whenever DMA, timing or the translated
@@ -798,40 +794,30 @@ mod tests {
         registers
     }
 
-    /// The translated game and the ROM it came from.
+    /// The translated game, which must be Sonic 1 REV00, and the ROM it came from.
     fn sonic1() -> (CompiledGame, Rom) {
-        let game = game::compiled().expect("the game crate was built with GAME set");
+        let game = game::compiled().expect("the game crate was built with ANYGENESIS_ROM set");
+        assert_eq!(
+            game.sha1, SONIC1_REV00_SHA1,
+            "these tests need a build of Sonic 1 REV00"
+        );
         let path = env::var_os(ROM_VAR).expect("ANYGENESIS_ROM is set");
         let rom = load_rom(&game, Path::new(&path)).expect("the ROM matches the build");
         (game, rom)
     }
 
-    /// The config's `[report]`, which the checks read.
-    fn report_config(game: &CompiledGame) -> ReportConfig {
-        game.report
-            .expect("games/sonic1.toml has a [report] section")
-    }
-
-    /// The watched byte's value `name` from `[report.values]`.
-    fn value(config: &ReportConfig, name: &str) -> u8 {
-        config
-            .values
-            .iter()
-            .find(|&&(key, _)| key == name)
-            .map(|&(_, value)| value)
-            .unwrap_or_else(|| panic!("[report.values] has no {name}"))
+    /// The game mode byte at the end of the run `report` describes.
+    fn game_mode(report: &Report) -> u8 {
+        report.ram[ram_index(GAME_MODE)]
     }
 
     /// Sonic 1 from reset for ten seconds of frames on the VDP, with interrupts and DMA,
     /// saving the SEGA and title screen pictures to `dumps/` at the workspace root.
     #[test]
-    #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
+    #[ignore = "needs a build with ANYGENESIS_ROM set to Sonic 1 REV00"]
     fn test_sonic1_runs_600_frames_without_misses() {
         let (game, rom) = sonic1();
-        let config = report_config(&game);
-        let palette_copy = config.palette.expect("[report] has palette");
-        let setup = config.vdp_setup.expect("[report] has vdp_setup");
-        let registers = title_registers(&rom, setup);
+        let registers = title_registers(&rom, VDP_SETUP);
         let dumps = PICTURES.map(|(frame, _)| frame);
         // An empty input still sets the hook at every vertical interrupt, which must change
         // nothing below.
@@ -843,7 +829,7 @@ mod tests {
             .expect("the run finishes");
         let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dumps");
         for (frame, picture) in &report.pictures {
-            dump(game.name, *frame, picture, &folder).expect("the picture is saved");
+            dump(*frame, picture, &folder).expect("the picture is saved");
         }
         report.print();
         assert!(
@@ -859,16 +845,13 @@ mod tests {
         assert!(report.vblanks > 0);
         assert!(report.tmss_unlocked);
         assert!(report.z80_bytes > 0);
-        assert_eq!(
-            report.watched(),
-            Some((config.watched, value(&config, "title")))
-        );
+        assert_eq!(game_mode(&report), TITLE_MODE);
 
         // The title screen has faded in, so the last VBlank's DMA left CRAM equal to the
         // palette buffer.
         let palette: Vec<u16> = (0..64)
             .map(|index| {
-                let at = ram_index(palette_copy) + 2 * index;
+                let at = ram_index(PALETTE_COPY) + 2 * index;
                 u16::from_be_bytes([report.ram[at], report.ram[at + 1]]) & CRAM_MASK
             })
             .collect();
@@ -948,7 +931,7 @@ mod tests {
     /// does with native blocks. Only an interrupt native code took late could tell them
     /// apart.
     #[test]
-    #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
+    #[ignore = "needs a build with ANYGENESIS_ROM set to Sonic 1 REV00"]
     fn test_sonic1_stepped_blocks_end_where_native_ones_do() {
         let (game, rom) = sonic1();
         let slice = Options::default().slice;
@@ -980,10 +963,9 @@ mod tests {
 
     /// Pressing Start on the title screen leaves it for the first level.
     #[test]
-    #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
+    #[ignore = "needs a build with ANYGENESIS_ROM set to Sonic 1 REV00"]
     fn test_sonic1_title_screen_accepts_start() {
         let (game, rom) = sonic1();
-        let config = report_config(&game);
         let trace = Trace {
             pad: PadSource::Replay(Input::parse(START_PRESS).expect("the input is valid")),
             ..Trace::default()
@@ -999,10 +981,7 @@ mod tests {
         assert_eq!(report.frames, START_FRAMES);
         assert_eq!(report.late, 0);
         assert_eq!(report.unwinds, 0);
-        assert_eq!(
-            report.watched(),
-            Some((config.watched, value(&config, "level")))
-        );
+        assert_eq!(game_mode(&report), LEVEL_MODE);
     }
 
     /// Frames the recorded play lasts.
@@ -1046,7 +1025,7 @@ mod tests {
                     }
                 };
                 let recording = recording.as_ref();
-                conclude(&runtime, &game, exit, Vec::new(), &failure, recording)
+                conclude(&runtime, exit, Vec::new(), &failure, recording)
             })
             .expect("the 68000 thread starts");
         worker
@@ -1070,10 +1049,9 @@ mod tests {
     /// A play recorded frame by frame from a live pad replays from the recording, in one
     /// headless run as the command line does, to the same machine at every stop.
     #[test]
-    #[ignore = "needs a GAME=sonic1 build and ANYGENESIS_ROM"]
+    #[ignore = "needs a build with ANYGENESIS_ROM set to Sonic 1 REV00"]
     fn test_sonic1_recorded_play_replays_to_the_same_machine() {
         let (game, rom) = sonic1();
-        let config = report_config(&game);
         let folder =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dumps/sonic1-recording-test");
         // Stops of an earlier, longer run would outlast this one's.
@@ -1106,9 +1084,6 @@ mod tests {
             anygenesis_framediff::diff(&mut Folder(replay), &mut Folder(live), &Masks::default())
                 .expect("the stops read back");
         assert!(stops.passed(), "{stops}");
-        assert_eq!(
-            replayed.watched(),
-            Some((config.watched, value(&config, "level")))
-        );
+        assert_eq!(game_mode(&replayed), LEVEL_MODE);
     }
 }

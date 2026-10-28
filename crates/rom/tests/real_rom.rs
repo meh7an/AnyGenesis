@@ -2,13 +2,21 @@
 //! manual check. Run with
 //! `cargo test -p anygenesis-rom --test real_rom -- --ignored --nocapture`.
 
-use anygenesis_rom::{KNOWN_ROMS, Rom, VectorTable, vector_name};
+use anygenesis_rom::{Rom, VectorTable, vector_name};
+
+/// Sega Retro, "Sonic the Hedgehog (Mega Drive)/Technical information", Revision 00.
+const SONIC1_REV00_SHA1: &str = "6ddb7de1e17e7f6cdb88927bd906352030daa194";
 
 #[test]
 #[ignore = "needs ANYGENESIS_ROM pointing at the Sonic 1 REV00 .bin"]
 fn test_load_real_rom_sonic1_rev00_identified() {
     let path = std::env::var_os("ANYGENESIS_ROM").expect("ANYGENESIS_ROM is not set");
     let rom = Rom::load(&path).expect("ANYGENESIS_ROM loads");
+    assert_eq!(
+        rom.sha1().to_string(),
+        SONIC1_REV00_SHA1,
+        "this test needs Sonic 1 REV00"
+    );
     let header = rom.header();
 
     println!("file            {}", path.to_string_lossy());
@@ -48,8 +56,5 @@ fn test_load_real_rom_sonic1_rev00_identified() {
 
     assert_eq!(rom.vectors().entries().len(), VectorTable::LEN);
     assert_eq!(rom.warnings(), []);
-    match rom.identify() {
-        Ok(known) => assert_eq!(known, KNOWN_ROMS[0]),
-        Err(error) => panic!("{error}"),
-    }
+    assert_eq!(rom.title(), "SONIC THE HEDGEHOG");
 }

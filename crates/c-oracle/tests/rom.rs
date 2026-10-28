@@ -1,9 +1,10 @@
-//! Every translated Sonic 1 function against the interpreter, with Musashi in lockstep: from
-//! each function entry with 8 random states and from each resume point with 2.
+//! Every translated function of a real ROM, analysed from its vectors as game builds do,
+//! against the interpreter, with Musashi in lockstep: from each function entry with 8 random
+//! states and from each resume point with 2.
 //!
 //! Needs `ANYGENESIS_ROM` set when the crate is built (the build script translates the ROM)
-//! and when the test runs. Run with `cargo test -p anygenesis-c-oracle --test sonic1 --
-//! --ignored --nocapture`; the report lands in target/tmp/sonic1-c-report.md.
+//! and when the test runs. Run with `cargo test -p anygenesis-c-oracle --test rom --
+//! --ignored --nocapture`; the report lands in target/tmp/rom-c-report.md.
 
 use std::{collections::BTreeMap, fmt::Write as _, fs, path::Path};
 
@@ -14,7 +15,6 @@ use anygenesis_c_oracle::{
     programs,
     reference::Stop,
 };
-use anygenesis_gamecfg::GameConfig;
 use anygenesis_rom::Rom;
 use anygenesis_shared::Address;
 
@@ -34,7 +34,7 @@ struct FunctionRuns {
 
 #[test]
 #[ignore = "needs ANYGENESIS_ROM when building and running"]
-fn test_sonic1_functions_match_the_reference_cores() {
+fn test_rom_functions_match_the_reference_cores() {
     std::thread::Builder::new()
         .stack_size(STACK)
         .spawn(run)
@@ -46,19 +46,16 @@ fn test_sonic1_functions_match_the_reference_cores() {
 fn run() {
     let path = std::env::var_os("ANYGENESIS_ROM").expect("ANYGENESIS_ROM names the ROM");
     let rom = Rom::load(&path).unwrap_or_else(|error| panic!("{error}"));
-    let translated = programs::SONIC1_SHA1
+    let translated = programs::ROM_SHA1
         .expect("ANYGENESIS_ROM was not set when the crate was built: rebuild with it");
     assert_eq!(
         translated,
         rom.sha1().to_string(),
         "the ROM differs from the one the crate was built with"
     );
-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/sonic1.toml");
-    let text = fs::read_to_string(&config_path).expect("reading games/sonic1.toml");
-    let config = GameConfig::parse(&text).unwrap_or_else(|error| panic!("{error}"));
-    let analysis = analyze(&rom, &config).unwrap_or_else(|error| panic!("{error}"));
+    let analysis = analyze(&rom);
     let liveness = FlagLiveness::new(&analysis, LivenessOptions::default());
-    let rows = programs::sonic1_table().expect("Sonic 1 was translated");
+    let rows = programs::rom_table().expect("the ROM was translated");
     let table = Table::new(rows, &analysis);
     let mut differential = Differential::new(&analysis, &liveness, rom.bytes(), &table);
     let mut lockstep = Lockstep::new();
@@ -116,7 +113,8 @@ fn run() {
     let mut report = String::new();
     let _ = writeln!(
         report,
-        "Sonic 1: {} functions, {} table rows, {} translated functions run.\n",
+        "ROM SHA-1 {}: {} functions, {} table rows, {} translated functions run.\n",
+        rom.sha1(),
         analysis.functions.len(),
         table.owners.len(),
         functions.len()
@@ -140,7 +138,7 @@ fn run() {
             let _ = writeln!(report, "- {failure}");
         }
     }
-    let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sonic1-c-report.md");
+    let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rom-c-report.md");
     fs::write(&output, &report).expect("writing the report");
     println!("{report}\nreport written to {}", output.display());
     assert_eq!(failed, 0, "{failed} runs failed; see {}", output.display());

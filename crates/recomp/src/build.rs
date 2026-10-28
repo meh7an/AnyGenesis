@@ -1,46 +1,25 @@
-//! The recompile pipeline build scripts and the CLI share: a game's config and ROM in,
-//! translated C out, and that C compiled with clang into a static library.
+//! The recompile pipeline build scripts and the CLI share: a ROM in, translated C out, and
+//! that C compiled with clang into a static library. Nothing but the ROM decides what is
+//! built: any image the loader accepts translates.
 //!
 //! Generated code needs clang (clang-cl on MSVC targets): cross-function jumps rely on
 //! `musttail` for guaranteed tail calls.
 
 use std::{
-    env, fs, io,
+    env, io,
     path::{Path, PathBuf},
 };
 
-use anygenesis_analysis::{
-    Analysis, AnalysisError, FlagLiveness, LivenessOptions, Origin, analyze,
-};
+use anygenesis_analysis::{Analysis, FlagLiveness, LivenessOptions, Origin, analyze};
 use anygenesis_codegen_c::{CheckPoints, EmitOptions, Output, emit};
-use anygenesis_gamecfg::{ConfigError, GameConfig};
 use anygenesis_rom::{Rom, RomError};
-
-/// The config section build scripts pass on to the game binary's report.
-pub use anygenesis_gamecfg::Report;
-
-/// Game configs ship in the workspace's games/ folder; the path is fixed at build time.
-pub const GAMES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../games");
 
 /// Why the pipeline stopped.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BuildError {
-    #[error("game name {name:?} must be letters, digits and underscores")]
-    BadGameName { name: String },
-    #[error("unknown game {name:?}: games/ holds {}", list(available))]
-    UnknownGame {
-        name: String,
-        available: Vec<String>,
-    },
-    #[error("reading {}: {source}", path.display())]
-    Read { path: PathBuf, source: io::Error },
-    #[error("in {}:\n{source}", path.display())]
-    Config { path: PathBuf, source: ConfigError },
     #[error("loading the ROM {}: {source}", path.display())]
     Rom { path: PathBuf, source: RomError },
-    #[error(transparent)]
-    Analysis(#[from] AnalysisError),
     #[error("writing {}: {source}", path.display())]
     Write { path: PathBuf, source: io::Error },
     #[error("translated C needs clang or clang-cl, found {}", path.display())]
@@ -49,78 +28,11 @@ pub enum BuildError {
     Compile { library: String, source: cc::Error },
 }
 
-fn list(names: &[String]) -> String {
-    if names.is_empty() {
-        "no configs".to_owned()
-    } else {
-        names.join(", ")
-    }
-}
-
 /// An analysed game and its translation.
 #[derive(Debug)]
 pub struct Translation {
     pub analysis: Analysis,
     pub output: Output,
-}
-
-/// Returns the path of the config for the game `name` in [`GAMES_DIR`].
-///
-/// # Errors
-/// Returns [`BuildError::BadGameName`] for a name that could leave games/, and
-/// [`BuildError::UnknownGame`] when no config has that name.
-pub fn config_path(name: &str) -> Result<PathBuf, BuildError> {
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err(BuildError::BadGameName {
-            name: name.to_owned(),
-        });
-    }
-    let path = Path::new(GAMES_DIR).join(format!("{name}.toml"));
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(BuildError::UnknownGame {
-            name: name.to_owned(),
-            available: available_games(),
-        })
-    }
-}
-
-/// The game names games/ holds, sorted.
-fn available_games() -> Vec<String> {
-    let Ok(entries) = fs::read_dir(GAMES_DIR) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.extension()? != "toml" {
-                return None;
-            }
-            Some(path.file_stem()?.to_str()?.to_owned())
-        })
-        .collect();
-    names.sort();
-    names
-}
-
-/// Reads and validates the config at `path`.
-///
-/// # Errors
-/// Returns [`BuildError::Read`] or [`BuildError::Config`].
-pub fn load_config(path: &Path) -> Result<GameConfig, BuildError> {
-    let text = fs::read_to_string(path).map_err(|source| BuildError::Read {
-        path: path.to_owned(),
-        source,
-    })?;
-    GameConfig::parse(&text).map_err(|source| BuildError::Config {
-        path: path.to_owned(),
-        source,
-    })
 }
 
 /// Loads the ROM image at `path`.
@@ -167,19 +79,11 @@ pub fn emit_program(
     emit(analysis, &liveness, options, rom.bytes())
 }
 
-/// Analyses `rom` as `config` describes it and translates it.
-///
-/// # Errors
-/// Returns [`BuildError::Analysis`] when `config` belongs to another ROM image.
-pub fn translate(
-    rom: &Rom,
-    config: &GameConfig,
-    liveness: LivenessOptions,
-    options: &EmitOptions,
-) -> Result<Translation, BuildError> {
-    let analysis = analyze(rom, config)?;
+/// Analyses `rom` from its vectors and translates it.
+pub fn translate(rom: &Rom, liveness: LivenessOptions, options: &EmitOptions) -> Translation {
+    let analysis = analyze(rom);
     let output = emit_program(&analysis, rom, liveness, options);
-    Ok(Translation { analysis, output })
+    Translation { analysis, output }
 }
 
 /// Returns the entries of the functions reset and the exception vectors start, ascending.
@@ -302,6 +206,8 @@ fn compile_error(library: &str, source: cc::Error) -> BuildError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     const TARGET: &str = if cfg!(windows) {

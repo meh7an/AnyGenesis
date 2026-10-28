@@ -1,5 +1,7 @@
 //! Validates decoding and discovery of Sonic 1 against the listing of a local s1disasm build
-//! (REV00). Run with
+//! (REV00), analysed from its vectors alone as game builds do: every listed instruction must
+//! decode as the listing has it and nothing found may be data, while coverage is reported,
+//! not asserted (stepped code covers what discovery misses). Run with
 //! `cargo test -p anygenesis-recomp --test sonic1_validation -- --ignored --nocapture`
 //! with `ANYGENESIS_ROM` and `ANYGENESIS_S1_LISTING` set. The report quotes listing mnemonics,
 //! so it goes to `target/tmp/s1-validation-report.md` and never into the repo.
@@ -11,8 +13,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anygenesis_analysis::{Analysis, Suggestion, analyze};
-use anygenesis_gamecfg::{EntryKind, GameConfig};
+use anygenesis_analysis::{Analysis, EntryKind, Suggestion, analyze};
 use anygenesis_m68k::{Dialect, Ea, FormatOptions, Instruction, Labels, Mnemonic, Operand};
 use anygenesis_rom::Rom;
 use anygenesis_shared::{Address, Size};
@@ -22,6 +23,9 @@ use listing::{Coverage, ListedInstruction, Listing};
 /// Table sizes read from the listing stop here; no Sonic 1 table comes close.
 const MAX_TABLE_ENTRIES: u32 = 1024;
 
+/// Sega Retro, "Sonic the Hedgehog (Mega Drive)/Technical information", Revision 00.
+const SONIC1_REV00_SHA1: &str = "6ddb7de1e17e7f6cdb88927bd906352030daa194";
+
 #[test]
 #[ignore = "needs ANYGENESIS_ROM and ANYGENESIS_S1_LISTING from a local s1disasm REV00 build"]
 fn test_sonic1_discovery_matches_s1disasm_listing() {
@@ -29,23 +33,19 @@ fn test_sonic1_discovery_matches_s1disasm_listing() {
     let listing_path =
         std::env::var_os("ANYGENESIS_S1_LISTING").expect("ANYGENESIS_S1_LISTING is not set");
     let rom = Rom::load(&rom_path).expect("ANYGENESIS_ROM loads");
-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/sonic1.toml");
-    let text = std::fs::read_to_string(&config_path).expect("games/sonic1.toml is readable");
-    let config = match GameConfig::parse(&text) {
-        Ok(config) => config,
-        Err(error) => panic!("games/sonic1.toml:\n{error}"),
-    };
-    let analysis = match analyze(&rom, &config) {
-        Ok(analysis) => analysis,
-        Err(error) => panic!("{error}"),
-    };
+    assert_eq!(
+        rom.sha1().to_string(),
+        SONIC1_REV00_SHA1,
+        "this test needs Sonic 1 REV00"
+    );
+    let analysis = analyze(&rom);
     let listing_text = std::fs::read(&listing_path).expect("ANYGENESIS_S1_LISTING is readable");
     let listing = match listing::parse(&listing_text) {
         Ok(listing) => listing,
         Err(error) => panic!("listing: {error}"),
     };
 
-    let validation = Validation::run(rom.bytes(), &config, &analysis, &listing);
+    let validation = Validation::run(rom.bytes(), &analysis, &listing);
     let report_path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("s1-validation-report.md");
     std::fs::write(&report_path, validation.report(&analysis, &listing)).expect("report written");
     println!("report                  {}", report_path.display());
@@ -57,20 +57,6 @@ fn test_sonic1_discovery_matches_s1disasm_listing() {
     assert!(
         validation.precision_failures.is_empty(),
         "data decoded as code"
-    );
-    assert!(
-        validation.stale.is_empty(),
-        "unreached regions the analysis reaches"
-    );
-    let unexplained: usize = validation
-        .gaps
-        .iter()
-        .filter(|gap| gap.reason.is_none())
-        .map(|gap| gap.count)
-        .sum();
-    assert_eq!(
-        unexplained, 0,
-        "listing instructions neither reached nor explained"
     );
 }
 
@@ -94,8 +80,6 @@ struct Gap {
     start: u32,
     end: u32,
     count: usize,
-    /// The `[[unreached]]` reason covering every instruction of the run.
-    reason: Option<&'static str>,
     labelled: bool,
     /// Decoded instructions whose operand or branch names the start.
     code_refs: Vec<u32>,
@@ -111,13 +95,11 @@ struct Validation {
     explain: Vec<Find>,
     reached: usize,
     gaps: Vec<Gap>,
-    /// `(region start, instruction)` for decoded instructions inside `[[unreached]]` regions.
-    stale: Vec<(u32, u32)>,
     unresolved: Vec<String>,
 }
 
 impl Validation {
-    fn run(rom: &[u8], config: &GameConfig, analysis: &Analysis, listing: &Listing) -> Self {
+    fn run(rom: &[u8], analysis: &Analysis, listing: &Listing) -> Self {
         let rom_size = rom.len() as u32;
         let in_rom: Vec<(u32, &ListedInstruction)> = listing
             .instructions
@@ -155,17 +137,6 @@ impl Validation {
             }
         }
 
-        let stale = config
-            .unreached
-            .iter()
-            .flat_map(|region| {
-                analysis
-                    .instructions
-                    .range(region.start..region.end)
-                    .map(move |(address, _)| (region.start.get(), address.get()))
-            })
-            .collect();
-
         let reached = in_rom
             .iter()
             .filter(|(address, _)| analysis.instructions.contains_key(&Address::new(*address)))
@@ -173,11 +144,10 @@ impl Validation {
         let references = References::new(rom, analysis);
         let gaps = gaps(&in_rom, analysis)
             .into_iter()
-            .map(|(start, end, count, members)| Gap {
+            .map(|(start, end, count)| Gap {
                 start,
                 end,
                 count,
-                reason: common_reason(config, &members),
                 labelled: listing.labels.contains(&start),
                 code_refs: references.code.get(&start).cloned().unwrap_or_default(),
                 pointer_refs: references.pointers.get(&start).cloned().unwrap_or_default(),
@@ -192,19 +162,12 @@ impl Validation {
             explain,
             reached,
             gaps,
-            stale,
-            unresolved: unresolved_hints(analysis, listing),
+            unresolved: unresolved_sites(analysis, listing),
         }
     }
 
     fn summary(&self) -> Vec<(&'static str, String)> {
         let unreached: usize = self.gaps.iter().map(|gap| gap.count).sum();
-        let explained: usize = self
-            .gaps
-            .iter()
-            .filter(|gap| gap.reason.is_some())
-            .map(|gap| gap.count)
-            .sum();
         vec![
             ("listing instructions", self.listed.to_string()),
             ("decoder mismatches", self.mismatches.len().to_string()),
@@ -223,10 +186,7 @@ impl Validation {
                 ),
             ),
             ("unreached", unreached.to_string()),
-            ("explained unreached", explained.to_string()),
-            ("unexplained unreached", (unreached - explained).to_string()),
             ("gap runs", self.gaps.len().to_string()),
-            ("stale unreached", self.stale.len().to_string()),
             ("unresolved sites", self.unresolved.len().to_string()),
         ]
     }
@@ -256,19 +216,18 @@ impl Validation {
         write_finds(&mut out, &self.explain);
 
         out.push_str("\n## Unresolved sites\n\n");
-        for hint in &self.unresolved {
-            let _ = writeln!(out, "{hint}");
-        }
-
-        out.push_str("\n## Stale unreached regions\n\n");
-        for (region, address) in &self.stale {
-            let _ = writeln!(out, "- region {region:06X} holds decoded {address:06X}");
+        for site in &self.unresolved {
+            let _ = writeln!(out, "{site}");
         }
 
         out.push_str("\n## Coverage gaps\n\n");
-        out.push_str("| Start | End | Instructions | Label | Code refs | Pointers | Reason |\n");
-        out.push_str("|-------|-----|-------------:|-------|-----------|----------|--------|\n");
+        out.push_str(
+            "Referenced starts are likely reached through pointers; the rest look dead.\n\n",
+        );
+        out.push_str("| Start | End | Instructions | Label | Code refs | Pointers | Looks |\n");
+        out.push_str("|-------|-----|-------------:|-------|-----------|----------|-------|\n");
         for gap in &self.gaps {
+            let referenced = !gap.code_refs.is_empty() || !gap.pointer_refs.is_empty();
             let _ = writeln!(
                 out,
                 "| {:06X} | {:06X} | {} | {} | {} | {} | {} |",
@@ -278,27 +237,9 @@ impl Validation {
                 if gap.labelled { "yes" } else { "" },
                 hex_list(&gap.code_refs),
                 hex_list(&gap.pointer_refs),
-                gap.reason.unwrap_or("")
+                if referenced { "referenced" } else { "dead" }
             );
         }
-
-        out.push_str("\n## Hints for unexplained gaps\n\n");
-        out.push_str(
-            "Referenced starts are likely reached through pointers; the rest look dead.\n",
-        );
-        out.push_str("Check each against the listing before pasting.\n\n```toml\n");
-        for gap in self.gaps.iter().filter(|gap| gap.reason.is_none()) {
-            if gap.code_refs.is_empty() && gap.pointer_refs.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "[[unreached]]\nstart = 0x{:06X}\nend = 0x{:06X}\nreason = \"dead\"\n",
-                    gap.start, gap.end
-                );
-            } else {
-                let _ = writeln!(out, "[[function]]\naddress = 0x{:06X}\n", gap.start);
-            }
-        }
-        out.push_str("```\n");
         let _ = writeln!(
             out,
             "\n{} functions, {} labelled addresses in the listing.",
@@ -410,11 +351,8 @@ fn has_one_size(mnemonic: Mnemonic) -> bool {
 }
 
 /// Splits the listed instructions into runs the analysis does not reach.
-fn gaps(
-    in_rom: &[(u32, &ListedInstruction)],
-    analysis: &Analysis,
-) -> Vec<(u32, u32, usize, Vec<u32>)> {
-    let mut runs: Vec<(u32, u32, usize, Vec<u32>)> = Vec::new();
+fn gaps(in_rom: &[(u32, &ListedInstruction)], analysis: &Analysis) -> Vec<(u32, u32, usize)> {
+    let mut runs: Vec<(u32, u32, usize)> = Vec::new();
     let mut open = false;
     for &(address, instruction) in in_rom {
         if analysis.instructions.contains_key(&Address::new(address)) {
@@ -426,22 +364,12 @@ fn gaps(
             Some(run) if open => {
                 run.1 = end;
                 run.2 += 1;
-                run.3.push(address);
             }
-            _ => runs.push((address, end, 1, vec![address])),
+            _ => runs.push((address, end, 1)),
         }
         open = true;
     }
     runs
-}
-
-/// The reason of the one `[[unreached]]` region holding every address, if there is one.
-fn common_reason(config: &GameConfig, addresses: &[u32]) -> Option<&'static str> {
-    let first = config.unreached_region(Address::new(*addresses.first()?))?;
-    addresses
-        .iter()
-        .all(|&address| first.contains(Address::new(address)))
-        .then(|| first.reason.name())
 }
 
 /// Who names which address: decoded operands and branches, and 32-bit words in the ROM.
@@ -501,8 +429,8 @@ impl References {
     }
 }
 
-/// Paste-ready hints for the unresolved sites, table sizes read from the listing.
-fn unresolved_hints(analysis: &Analysis, listing: &Listing) -> Vec<String> {
+/// One line per unresolved site, table sizes read from the listing.
+fn unresolved_sites(analysis: &Analysis, listing: &Listing) -> Vec<String> {
     analysis
         .unresolved
         .iter()
@@ -510,12 +438,11 @@ fn unresolved_hints(analysis: &Analysis, listing: &Listing) -> Vec<String> {
             Suggestion::JumpTable { address, kind, .. } => {
                 let count = listed_table_count(listing, address.get(), *kind);
                 format!(
-                    "```toml\n[[jump_table]]\naddress = 0x{:06X}\ncount = {}\nkind = \"{}\"\n\
-                     site = 0x{:06X}\n```",
+                    "- {:06X}: table at {:06X}, {}, {} entries in the listing",
+                    site.site.get(),
                     address.get(),
-                    count.map_or_else(|| String::from("?"), |count| count.to_string()),
                     kind.name(),
-                    site.site.get()
+                    count.map_or_else(|| String::from("?"), |count| count.to_string())
                 )
             }
             _ => format!(

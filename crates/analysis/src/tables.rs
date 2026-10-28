@@ -1,5 +1,6 @@
-use anygenesis_gamecfg::EntryKind;
 use anygenesis_shared::{Address, read_u16_be, read_u32_be};
+
+use crate::EntryKind;
 
 /// The opcode word of `bra.w`; its displacement follows in the next word.
 pub(crate) const BRA_W: u16 = 0x6000;
@@ -25,7 +26,6 @@ pub(crate) fn entry_target(
         }
         EntryKind::Long => read_u32_be(bytes, offset).ok().map(Address::new),
         EntryKind::BraW => read_u32_be(bytes, offset).ok().map(|_| entry),
-        _ => None,
     }
 }
 

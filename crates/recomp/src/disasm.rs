@@ -7,8 +7,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::ops::Bound;
 
-use anygenesis_analysis::{Analysis, ResolvedTable};
-use anygenesis_gamecfg::{EntryKind, GameConfig};
+use anygenesis_analysis::{Analysis, EntryKind, ResolvedTable};
 use anygenesis_m68k::{Dialect, Ea, FormatOptions, Instruction, Labels, Operand};
 use anygenesis_shared::Address;
 
@@ -18,18 +17,17 @@ const COMMENT_COLUMN: usize = 48;
 /// Data words per `dc.w` line.
 const WORDS_PER_LINE: u32 = 8;
 
-/// Writes the listing of `rom` as `analysis` and `config` describe it, and returns the
-/// 1-based line of every instruction printed as such, for `#line` directives in generated C.
+/// Writes the listing of `rom` as `analysis` describes it, and returns the 1-based line of
+/// every instruction printed as such, for `#line` directives in generated C.
 ///
 /// # Errors
 /// Returns the first error `out` reports.
 pub fn write_listing(
     out: &mut dyn Write,
     rom: &[u8],
-    config: &GameConfig,
     analysis: &Analysis,
 ) -> io::Result<BTreeMap<Address, u32>> {
-    let listing = Listing::new(rom, config, analysis);
+    let listing = Listing::new(rom, analysis);
     let mut counter = LineCounter {
         out,
         lines: 0,
@@ -117,7 +115,7 @@ impl Labels for Recorder {
 
 struct Listing<'a> {
     rom: &'a [u8],
-    config: &'a GameConfig,
+    sha1: &'a str,
     /// The instructions printed as such: overlapped ones are left inside their predecessor.
     code: BTreeMap<Address, &'a Instruction>,
     /// Hinted tables printed entry by entry, by start address.
@@ -126,7 +124,7 @@ struct Listing<'a> {
 }
 
 impl<'a> Listing<'a> {
-    fn new(rom: &'a [u8], config: &'a GameConfig, analysis: &'a Analysis) -> Self {
+    fn new(rom: &'a [u8], analysis: &'a Analysis) -> Self {
         let mut code = BTreeMap::new();
         let mut next = Address::new(0);
         for (&address, instruction) in &analysis.instructions {
@@ -207,7 +205,7 @@ impl<'a> Listing<'a> {
 
         Self {
             rom,
-            config,
+            sha1: &analysis.sha1,
             code,
             tables,
             labels: LabelMap(labels),
@@ -215,18 +213,13 @@ impl<'a> Listing<'a> {
     }
 
     fn write(&self, out: &mut LineCounter<'_>) -> io::Result<()> {
-        writeln!(out, "; ROM SHA-1 {}", self.config.sha1)?;
+        writeln!(out, "; ROM SHA-1 {}", self.sha1)?;
         writeln!(out, "\tcpu\t68000")?;
         writeln!(out, "\tsupmode\ton")?;
         writeln!(out, "\tpadding\toff")?;
         let end = Address::new(self.rom.len() as u32);
         let mut position = Address::new(0);
         while position < end {
-            if let Some(region) = self.config.unreached_region(position)
-                && region.start == position
-            {
-                writeln!(out, "; unreached ({})", region.reason.name())?;
-            }
             if let Some(label) = self.labels.0.get(&position) {
                 writeln!(out, "{label}:")?;
             }
@@ -299,19 +292,13 @@ impl<'a> Listing<'a> {
         Ok(table.address.wrapping_add(table.count * step))
     }
 
-    /// Writes data up to the next instruction, table, label or unreached region.
+    /// Writes data up to the next instruction, table or label.
     fn write_data(&self, out: &mut dyn Write, start: Address, end: Address) -> io::Result<Address> {
         let after = (Bound::Excluded(start), Bound::Unbounded);
         let stop = [
             self.code.range(after).next().map(|(&next, _)| next),
             self.tables.range(after).next().map(|(&next, _)| next),
             self.labels.0.range(after).next().map(|(&next, _)| next),
-            self.config
-                .unreached
-                .iter()
-                .map(|region| region.start)
-                .filter(|&next| next > start)
-                .min(),
         ]
         .into_iter()
         .flatten()

@@ -259,7 +259,7 @@ fn single(prepared: &Prepared) -> Analysis {
     };
     let function = Function {
         entry: address,
-        origins: vec![Origin::Hint { line: 0 }],
+        origins: vec![Origin::Hint],
         callers: BTreeSet::new(),
         blocks: BTreeSet::from([address]),
         tail_jumps: Vec::new(),

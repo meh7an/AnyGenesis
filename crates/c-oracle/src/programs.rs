@@ -1,5 +1,6 @@
 //! The translated programs the build script linked in: the synthetic program always, the
-//! SingleStepTests sample when testdata/ was fetched, Sonic 1 when `ANYGENESIS_ROM` was set.
+//! SingleStepTests sample when testdata/ was fetched, the ROM `ANYGENESIS_ROM` named when it
+//! was set.
 
 use anygenesis_abi::AgFn;
 

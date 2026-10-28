@@ -10,7 +10,6 @@ version = "0.1.0"
 name = "anygenesis-analysis"
 version = "0.1.0"
 dependencies = [
- "anygenesis-gamecfg",
  "anygenesis-ir",
  "anygenesis-m68k",
  "anygenesis-rom",
@@ -25,7 +24,6 @@ dependencies = [
  "anygenesis-abi",
  "anygenesis-analysis",
  "anygenesis-codegen-c",
- "anygenesis-gamecfg",
  "anygenesis-ir",
  "anygenesis-m68k",
  "anygenesis-oracle",
@@ -40,7 +38,6 @@ version = "0.1.0"
 dependencies = [
  "anygenesis-abi",
  "anygenesis-analysis",
- "anygenesis-gamecfg",
  "anygenesis-ir",
  "anygenesis-m68k",
  "anygenesis-rom",
@@ -84,16 +81,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anygenesis-gamecfg"
-version = "0.1.0"
-dependencies = [
- "anygenesis-shared",
- "serde",
- "thiserror",
- "toml",
-]
-
-[[package]]
 name = "anygenesis-ir"
 version = "0.1.0"
 dependencies = [
@@ -126,7 +113,6 @@ version = "0.1.0"
 dependencies = [
  "anygenesis-analysis",
  "anygenesis-codegen-c",
- "anygenesis-gamecfg",
  "anygenesis-m68k",
  "anygenesis-rom",
  "anygenesis-shared",

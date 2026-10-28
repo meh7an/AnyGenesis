@@ -1,6 +1,5 @@
-//! Flag liveness over the real ROM named by `ANYGENESIS_ROM`, analysed with
-//! `games/sonic1.toml`: liveness on against liveness off for every function from random
-//! states, and the flag op removal statistics, written to
+//! Flag liveness over the real ROM named by `ANYGENESIS_ROM`, analysed from its vectors as
+//! game builds do: liveness on against liveness off for every function from random states, and the flag op removal statistics, written to
 //! `target/tmp/flag-liveness-report.md`. Run with
 //! `cargo test -p anygenesis-analysis --test liveness_rom -- --ignored --nocapture`.
 
@@ -9,7 +8,6 @@ mod equivalence;
 use std::{collections::BTreeMap, fmt::Write as _, path::Path};
 
 use anygenesis_analysis::{FlagLiveness, FlagStats, LivenessOptions, analyze};
-use anygenesis_gamecfg::GameConfig;
 use anygenesis_ir::Flag;
 use anygenesis_rom::Rom;
 
@@ -22,20 +20,11 @@ const CAP: u64 = 20_000;
 const SEED_BASE: u64 = 0x5EED_0001;
 
 #[test]
-#[ignore = "needs ANYGENESIS_ROM pointing at the Sonic 1 REV00 .bin"]
-fn test_liveness_real_rom_sonic1_is_equivalent_and_reports_removals() {
+#[ignore = "needs ANYGENESIS_ROM pointing at a ROM image"]
+fn test_liveness_real_rom_is_equivalent_and_reports_removals() {
     let path = std::env::var_os("ANYGENESIS_ROM").expect("ANYGENESIS_ROM is not set");
     let rom = Rom::load(&path).expect("ANYGENESIS_ROM loads");
-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/sonic1.toml");
-    let text = std::fs::read_to_string(&config_path).expect("games/sonic1.toml is readable");
-    let config = match GameConfig::parse(&text) {
-        Ok(config) => config,
-        Err(error) => panic!("games/sonic1.toml:\n{error}"),
-    };
-    let analysis = match analyze(&rom, &config) {
-        Ok(analysis) => analysis,
-        Err(error) => panic!("{error}"),
-    };
+    let analysis = analyze(&rom);
     let liveness = FlagLiveness::new(&analysis, LivenessOptions::default());
     let checked = FlagLiveness::new(
         &analysis,
@@ -74,7 +63,7 @@ fn test_liveness_real_rom_sonic1_is_equivalent_and_reports_removals() {
         })
         .count();
     let mut report = String::new();
-    writeln!(report, "# Flag liveness: Sonic 1\n").unwrap();
+    writeln!(report, "# Flag liveness: ROM SHA-1 {}\n", rom.sha1()).unwrap();
     writeln!(report, "| Item | Count |\n|------|------:|").unwrap();
     writeln!(report, "| Functions | {} |", analysis.functions.len()).unwrap();
     writeln!(report, "| Instructions | {} |", analysis.instructions.len()).unwrap();

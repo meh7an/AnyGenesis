@@ -307,7 +307,7 @@ fn has_unknown_callers(program: &Program, function: &Function) -> bool {
     };
     !analysis.unresolved.is_empty()
         || function.origins.iter().any(|origin| match *origin {
-            Origin::Reset | Origin::Vector(_) | Origin::Hint { .. } => true,
+            Origin::Reset | Origin::Vector(_) | Origin::Hint => true,
             Origin::Table { table } => !analysis
                 .jump_tables
                 .iter()

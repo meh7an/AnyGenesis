@@ -1,26 +1,20 @@
-//! Recompiles the game `GAME` names from the ROM `ANYGENESIS_ROM` names: translated C into
-//! OUT_DIR, compiled with clang and linked into the binary, plus `game.rs` (included by
-//! src/game.rs) describing it. Without `GAME` the binary builds with no game in it.
-//!
-//! `ANYGENESIS_HINTS=off` builds the game with none of its config's hints (functions, jump
-//! tables, data regions, indirect targets, unreached code), discovery from the vectors only,
-//! so a test can show that native coverage changes speed only. The input goes when M2.6
-//! retires the hints.
+//! Recompiles the ROM `ANYGENESIS_ROM` names: translated C into OUT_DIR, compiled with clang
+//! and linked into the binary, plus `game.rs` (included by src/game.rs) describing it.
+//! Nothing but the ROM decides what is built: any image the loader accepts translates, with
+//! code found from its vectors and every other address as stepped code. Without
+//! `ANYGENESIS_ROM` the binary builds with no game in it.
 
 use std::{
     env,
-    ffi::OsString,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use anygenesis_recomp::build::{self, Report, Translation};
+use anygenesis_recomp::build::{self, Translation};
 
-const GAME_VAR: &str = "GAME";
 const ROM_VAR: &str = "ANYGENESIS_ROM";
-const HINTS_VAR: &str = "ANYGENESIS_HINTS";
 const LIBRARY: &str = "ag_game";
 /// The optimisation level of the stepped files, `None` for the profile's. /O1 (clang-cl)
 /// cut Sonic 1's exe by 6% and its build by 14% for about 2% of speed (M2.5, Mehran's pick).
@@ -28,9 +22,7 @@ const STEPPED_OPTIMIZATION: Option<&str> = Some("1");
 
 fn main() -> ExitCode {
     println!("cargo::rerun-if-changed=build.rs");
-    println!("cargo::rerun-if-env-changed={GAME_VAR}");
     println!("cargo::rerun-if-env-changed={ROM_VAR}");
-    println!("cargo::rerun-if-env-changed={HINTS_VAR}");
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -44,91 +36,34 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("cargo sets OUT_DIR")?);
-    let items = match env::var_os(GAME_VAR) {
-        Some(game) => recompile(&game, &out)?,
-        None => "/// The game compiled into this binary: none, `GAME` was not set.\n\
-                 pub fn compiled() -> Option<CompiledGame> {\n    None\n}\n"
-            .to_owned(),
+    let items = match env::var_os(ROM_VAR) {
+        Some(rom_path) => recompile(Path::new(&rom_path), &out)?,
+        None => format!(
+            "/// The game compiled into this binary: none, `{ROM_VAR}` was not set.\n\
+             pub fn compiled() -> Option<CompiledGame> {{\n    None\n}}\n"
+        ),
     };
     let path = out.join("game.rs");
     fs::write(&path, items).map_err(|error| format!("writing {}: {error}", path.display()))
 }
 
-/// Translates and compiles the game, and returns the Rust items describing it.
-fn recompile(game: &OsString, out: &Path) -> Result<String, String> {
-    let game = game
-        .to_str()
-        .ok_or_else(|| format!("{GAME_VAR}={game:?} is not UTF-8"))?;
-    let config_path = build::config_path(game).map_err(|error| format!("{GAME_VAR}: {error}"))?;
-    println!("cargo::rerun-if-changed={}", config_path.display());
-    let rom_path = env::var_os(ROM_VAR).ok_or_else(|| {
-        format!("{GAME_VAR}={game} needs its ROM: set {ROM_VAR} to the path of the .bin image")
-    })?;
-    let rom_path = PathBuf::from(rom_path);
+/// Translates and compiles the ROM at `rom_path`, and returns the Rust items describing it.
+fn recompile(rom_path: &Path, out: &Path) -> Result<String, String> {
     println!("cargo::rerun-if-changed={}", rom_path.display());
-    let mut config = build::load_config(&config_path).map_err(|error| error.to_string())?;
-    if !hints()? {
-        config.functions.clear();
-        config.jump_tables.clear();
-        config.data_regions.clear();
-        config.indirect.clear();
-        config.unreached.clear();
-    }
-    let rom = build::load_rom(&rom_path).map_err(|error| format!("{ROM_VAR}: {error}"))?;
-    let translation = build::translate(
-        &rom,
-        &config,
-        build::game_liveness(),
-        &build::game_options(),
-    )
-    .map_err(|error| format!("{ROM_VAR} does not fit games/{game}.toml: {error}"))?;
+    let rom = build::load_rom(rom_path).map_err(|error| format!("{ROM_VAR}: {error}"))?;
+    let name = rom.title();
+    let translation = build::translate(&rom, build::game_liveness(), &build::game_options());
     let directory = out.join("c");
-    let sources =
-        build::write_output(&translation.output, &directory).map_err(|error| error.to_string())?;
-    build::compile_game(LIBRARY, &directory, &sources, STEPPED_OPTIMIZATION)
-        .map_err(|error| error.to_string())?;
-    Ok(game_items(game, &translation, config.report.as_ref()))
-}
-
-/// Whether the config's hints apply: `ANYGENESIS_HINTS` unset or `on`, not `off`.
-fn hints() -> Result<bool, String> {
-    match env::var_os(HINTS_VAR) {
-        None => Ok(true),
-        Some(value) if value == "on" => Ok(true),
-        Some(value) if value == "off" => Ok(false),
-        Some(value) => Err(format!("{HINTS_VAR}={value:?}: expected on or off")),
-    }
-}
-
-/// The `ReportConfig` expression for `report`.
-fn report_expression(report: Option<&Report>) -> String {
-    let Some(report) = report else {
-        return "None".to_owned();
+    let failed = |error: build::BuildError| {
+        format!("building {name} (SHA-1 {}) failed: {error}", rom.sha1())
     };
-    let address = |address: Option<u32>| {
-        address.map_or_else(
-            || "None".to_owned(),
-            |address| format!("Some(0x{address:06X})"),
-        )
-    };
-    let mut values = String::new();
-    for (name, value) in &report.values {
-        write!(values, "({name:?}, 0x{value:02X}), ").expect("writing to a String cannot fail");
-    }
-    format!(
-        "Some(ReportConfig {{\n            \
-         watched: 0x{watched:06X},\n            \
-         palette: {palette},\n            \
-         vdp_setup: {vdp_setup},\n            \
-         values: &[{values}],\n        }})",
-        watched = report.watched.get(),
-        palette = address(report.palette.map(|address| address.get())),
-        vdp_setup = address(report.vdp_setup.map(|address| address.get())),
-    )
+    let sources = build::write_output(&translation.output, &directory).map_err(failed)?;
+    build::compile_game(LIBRARY, &directory, &sources, STEPPED_OPTIMIZATION).map_err(failed)?;
+    Ok(game_items(&name, &translation))
 }
 
-/// The Rust items that reach the compiled program.
-fn game_items(game: &str, translation: &Translation, report: Option<&Report>) -> String {
+/// The Rust items that reach the compiled program, `name` the game's title.
+fn game_items(name: &str, translation: &Translation) -> String {
     let analysis = &translation.analysis;
     let mut handlers = String::new();
     for entry in build::vector_handlers(analysis) {
@@ -158,7 +93,7 @@ fn game_items(game: &str, translation: &Translation, report: Option<&Report>) ->
          std::slice::from_raw_parts(&raw const ag_steps, ag_steps_size as usize),\n        \
          )\n    }};\n    \
          Some(CompiledGame {{\n        \
-         name: {game:?},\n        \
+         name: {name:?},\n        \
          sha1: {sha1:?},\n        \
          functions: {functions},\n        \
          table,\n        \
@@ -166,10 +101,8 @@ fn game_items(game: &str, translation: &Translation, report: Option<&Report>) ->
          step_entry: ag_step_entry,\n        \
          interrupt: ag_interrupt,\n        \
          vector_handlers: &[{handlers}],\n        \
-         function_entries: &[{entries}],\n        \
-         report: {report},\n    }})\n}}\n",
+         function_entries: &[{entries}],\n    }})\n}}\n",
         sha1 = analysis.sha1,
         functions = analysis.functions.len(),
-        report = report_expression(report),
     )
 }

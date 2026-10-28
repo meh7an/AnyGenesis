@@ -10,7 +10,7 @@ use crate::{Analysis, Diagnostic, Source, Suggestion, UnresolvedSite};
 const CONTEXT_INSTRUCTIONS: usize = 3;
 
 /// A Markdown report of an [`Analysis`]: counts, every unresolved indirect site with a
-/// paste-ready hint, the diagnostics and the shared blocks.
+/// what it most likely is, the diagnostics and the shared blocks.
 #[derive(Debug, Clone, Copy)]
 pub struct Report<'a> {
     analysis: &'a Analysis,
@@ -75,30 +75,24 @@ impl<'a> Report<'a> {
             }
         }
         writeln!(f, "```\n")?;
-        writeln!(f, "Suggested hint, check before use:\n")?;
-        writeln!(f, "```toml")?;
         match site.suggestion {
             Suggestion::JumpTable {
                 address,
                 kind,
                 count_guess,
             } => {
-                writeln!(f, "# [[jump_table]]")?;
-                writeln!(f, "# address = {address}")?;
-                match count_guess {
-                    Some(count) => writeln!(f, "# count = {count}  # guessed, verify")?,
-                    None => writeln!(f, "# count = 0  # unknown, count by hand")?,
-                }
-                writeln!(f, "# kind = \"{}\"", kind.name())?;
-                writeln!(f, "# site = {}", site.site)?;
+                let count = match count_guess {
+                    Some(count) => format!("{count} entries (guessed, verify)"),
+                    None => "entries unknown (count by hand)".to_owned(),
+                };
+                writeln!(
+                    f,
+                    "Likely a jump table at {address}, {}, {count}.\n",
+                    kind.name()
+                )
             }
-            Suggestion::Indirect => {
-                writeln!(f, "# [[indirect]]")?;
-                writeln!(f, "# site = {}", site.site)?;
-                writeln!(f, "# targets = []")?;
-            }
+            Suggestion::Indirect => writeln!(f, "A jump through a register: targets unknown.\n"),
         }
-        writeln!(f, "```\n")
     }
 
     /// Returns the site and up to [`CONTEXT_INSTRUCTIONS`] instructions running straight
@@ -259,19 +253,12 @@ impl fmt::Display for Diagnostic {
             Self::DataTarget {
                 source,
                 target,
-                region_line,
-            } => write!(
-                f,
-                "{target} from {source}, in the data region at line {region_line}"
-            ),
+                region,
+            } => write!(f, "{target} from {source}, in the data region at {region}"),
             Self::DecodeFailed { address, error } => write!(f, "{address}: {error}"),
-            Self::FallsIntoData {
-                address,
-                region_line,
-            } => write!(
-                f,
-                "after {address}, into the data region at line {region_line}"
-            ),
+            Self::FallsIntoData { address, region } => {
+                write!(f, "after {address}, into the data region at {region}")
+            }
             Self::RunsOffRom { address } => write!(f, "after {address}"),
             Self::SharedHandler { target, vectors } => {
                 let list: Vec<String> = vectors.iter().map(u8::to_string).collect();
@@ -297,7 +284,7 @@ impl fmt::Display for Source {
         match self {
             Self::Instruction(address) => write!(f, "the instruction at {address}"),
             Self::Vector(index) => write!(f, "vector {index}"),
-            Self::Config { line } => write!(f, "config line {line}"),
+            Self::Hint => write!(f, "a hint"),
         }
     }
 }

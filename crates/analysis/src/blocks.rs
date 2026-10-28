@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anygenesis_gamecfg::GameConfig;
 use anygenesis_m68k::Instruction;
 use anygenesis_shared::Address;
 
 use crate::{
-    Block, Diagnostic, Edge, EdgeKind, Function, TailJump, Terminator,
+    Block, Diagnostic, Edge, EdgeKind, Function, Hints, TailJump, Terminator,
     discover::{Effect, Entry},
 };
 
@@ -67,7 +66,7 @@ fn build_block(
 pub(crate) fn build_functions(
     blocks: &mut BTreeMap<Address, Block>,
     entries: BTreeMap<Address, Entry>,
-    config: &GameConfig,
+    hints: &Hints,
 ) -> BTreeMap<Address, Function> {
     let entry_set: BTreeSet<Address> = entries
         .keys()
@@ -84,7 +83,7 @@ pub(crate) fn build_functions(
                 callers: found.callers,
                 blocks: BTreeSet::new(),
                 tail_jumps: Vec::new(),
-                noreturn: config.function(entry).is_some_and(|hint| hint.noreturn),
+                noreturn: hints.function(entry).is_some_and(|hint| hint.noreturn),
             };
             let mut pending = vec![entry];
             while let Some(start) = pending.pop() {

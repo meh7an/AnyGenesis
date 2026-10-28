@@ -12,6 +12,5 @@ anygenesis-m68k = { version = "0.1.0", path = "../m68k" }
 anygenesis-shared = { version = "0.1.0", path = "../shared" }
 
 [dev-dependencies]
-anygenesis-gamecfg = { path = "../gamecfg" }
 anygenesis-rom = { path = "../rom" }
 cc = "1.10.0"

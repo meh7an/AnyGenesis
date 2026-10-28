@@ -1,9 +1,9 @@
 //! The AS-dialect listing over a synthetic image, hand-assembled word by word.
 
-use anygenesis_analysis::analyze;
-use anygenesis_gamecfg::GameConfig;
+use anygenesis_analysis::{EntryKind, FunctionHint, Hints, JumpTable, TargetKind, analyze_with};
 use anygenesis_recomp::disasm::write_listing;
 use anygenesis_rom::Rom;
+use anygenesis_shared::Address;
 
 const ROM_SIZE: usize = 0x400;
 const HANDLER: usize = 0x200;
@@ -18,7 +18,7 @@ fn put(bytes: &mut [u8], address: usize, words: &[u16]) {
 }
 
 /// Every vector points at an `rte`; reset calls a function and loops; a word-offset table
-/// leads to two functions; an unreached region holds `nop`, `rts`. Hinted functions at 0x350
+/// leads to two functions; nothing reaches the `nop`, `rts` at 0x340. Hinted functions at 0x350
 /// (`move.b 0(a0),d0`) and 0x360 (`lea` into the middle of that move) cover AS's limits.
 fn image() -> Vec<u8> {
     let mut bytes = vec![0; ROM_SIZE];
@@ -36,14 +36,38 @@ fn image() -> Vec<u8> {
     bytes
 }
 
-fn listing(hints: &str) -> String {
+fn listing(hints: &Hints) -> String {
     let rom = Rom::from_bytes(image()).expect("synthetic image loads");
-    let text = format!("sha1 = \"{}\"\n{hints}", rom.sha1());
-    let config = GameConfig::parse(&text).expect("valid config");
-    let analysis = analyze(&rom, &config).expect("SHA-1 matches");
+    let analysis = analyze_with(&rom, hints);
     let mut out = Vec::new();
-    write_listing(&mut out, rom.bytes(), &config, &analysis).expect("writes to memory");
+    write_listing(&mut out, rom.bytes(), &analysis).expect("writes to memory");
     String::from_utf8(out).expect("ASCII listing")
+}
+
+/// The word-offset table at 0x320, whose two entries are functions.
+fn table_hints() -> Hints {
+    Hints {
+        jump_tables: vec![JumpTable {
+            address: Address::new(0x320),
+            count: 2,
+            kind: EntryKind::WordOffset,
+            site: None,
+            target: Some(TargetKind::Function),
+        }],
+        ..Hints::default()
+    }
+}
+
+/// The functions at 0x350 and 0x360, which cover AS's limits.
+fn as_limit_hints() -> Hints {
+    let function = |address| FunctionHint {
+        address: Address::new(address),
+        noreturn: false,
+    };
+    Hints {
+        functions: vec![function(0x350), function(0x360)],
+        ..Hints::default()
+    }
 }
 
 /// The assembler text of each line, comments and trailing spaces removed.
@@ -55,13 +79,9 @@ fn code(listing: &str) -> Vec<&str> {
         .collect()
 }
 
-const HINTS: &str = "[[jump_table]]\naddress = 0x320\ncount = 2\nkind = \"word_offset\"\n\
-                     target = \"function\"\n\
-                     [[unreached]]\nstart = 0x340\nend = 0x344\nreason = \"dead\"\n";
-
 #[test]
 fn test_listing_prints_code_with_labels_and_branch_sizes() {
-    let text = listing(HINTS);
+    let text = listing(&table_hints());
     let lines = code(&text);
     let start = lines
         .iter()
@@ -83,7 +103,7 @@ fn test_listing_prints_code_with_labels_and_branch_sizes() {
 
 #[test]
 fn test_listing_prints_word_offset_tables_symbolically() {
-    let text = listing(HINTS);
+    let text = listing(&table_hints());
     let lines = code(&text);
     let start = lines
         .iter()
@@ -100,20 +120,15 @@ fn test_listing_prints_word_offset_tables_symbolically() {
 }
 
 #[test]
-fn test_listing_marks_unreached_regions_and_prints_them_as_data() {
-    let text = listing(HINTS);
-    let lines: Vec<&str> = text.lines().collect();
-    let marker = lines
-        .iter()
-        .position(|line| *line == "; unreached (dead)")
-        .expect("unreached region is marked");
-    assert!(lines[marker + 1].starts_with("\tdc.w\t$4E71,$4E75"));
-    assert!(lines[marker + 1].ends_with("; 000340"));
+fn test_listing_prints_unreached_code_as_data() {
+    let text = listing(&table_hints());
+    assert!(!text.contains("; 000340: "), "{text}");
+    assert!(!text.contains("; 000342: "), "{text}");
 }
 
 #[test]
 fn test_listing_has_header_footer_and_ascending_addresses() {
-    let text = listing("");
+    let text = listing(&Hints::default());
     let lines: Vec<&str> = text.lines().collect();
     assert!(lines[0].starts_with("; ROM SHA-1 "));
     assert_eq!(
@@ -135,11 +150,9 @@ fn test_listing_has_header_footer_and_ascending_addresses() {
     );
 }
 
-const AS_LIMIT_HINTS: &str = "[[function]]\naddress = 0x350\n[[function]]\naddress = 0x360\n";
-
 #[test]
 fn test_listing_prints_zero_displacement_as_words_with_text_in_comment() {
-    let text = listing(AS_LIMIT_HINTS);
+    let text = listing(&as_limit_hints());
     let line = text
         .lines()
         .find(|line| line.ends_with("; 000350: 1028 0000  move.b $0(a0),d0"))
@@ -149,7 +162,7 @@ fn test_listing_prints_zero_displacement_as_words_with_text_in_comment() {
 
 #[test]
 fn test_listing_names_targets_inside_instructions_from_the_next_label() {
-    let text = listing(AS_LIMIT_HINTS);
+    let text = listing(&as_limit_hints());
     assert!(
         code(&text).contains(&"\tlea\tfn_000360-14(pc),a0"),
         "label-relative lea missing:\n{text}"
@@ -158,7 +171,7 @@ fn test_listing_names_targets_inside_instructions_from_the_next_label() {
 
 #[test]
 fn test_listing_instruction_comment_carries_address_and_words() {
-    let text = listing("");
+    let text = listing(&Hints::default());
     let line = text
         .lines()
         .find(|line| line.starts_with("\tbsr.s"))
@@ -169,11 +182,9 @@ fn test_listing_instruction_comment_carries_address_and_words() {
 #[test]
 fn test_listing_line_map_points_at_each_instruction_line() {
     let rom = Rom::from_bytes(image()).expect("synthetic image loads");
-    let text = format!("sha1 = \"{}\"\n{HINTS}", rom.sha1());
-    let config = GameConfig::parse(&text).expect("valid config");
-    let analysis = analyze(&rom, &config).expect("SHA-1 matches");
+    let analysis = analyze_with(&rom, &table_hints());
     let mut out = Vec::new();
-    let lines = write_listing(&mut out, rom.bytes(), &config, &analysis).expect("writes");
+    let lines = write_listing(&mut out, rom.bytes(), &analysis).expect("writes");
     let listing = String::from_utf8(out).expect("ASCII listing");
     let listing: Vec<&str> = listing.lines().collect();
     assert_eq!(lines.len(), analysis.instructions.len());

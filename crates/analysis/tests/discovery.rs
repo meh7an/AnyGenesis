@@ -3,10 +3,10 @@
 use std::collections::BTreeSet;
 
 use anygenesis_analysis::{
-    Analysis, AnalysisError, Call, CallKind, Diagnostic, Edge, EdgeKind, Origin, Source,
-    Suggestion, TailJump, Terminator, UnresolvedSite, analyze,
+    Analysis, Call, CallKind, DataRegion, Diagnostic, Edge, EdgeKind, EntryKind, FunctionHint,
+    Hints, IndirectHint, JumpTable, Origin, Source, Suggestion, TailJump, TargetKind, Terminator,
+    UnresolvedSite, analyze, analyze_with,
 };
-use anygenesis_gamecfg::{EntryKind, GameConfig};
 use anygenesis_m68k::DecodeError;
 use anygenesis_rom::Rom;
 use anygenesis_shared::Address;
@@ -51,17 +51,51 @@ impl Image {
         Rom::from_bytes(self.bytes.clone()).expect("synthetic image loads")
     }
 
-    /// Analyses the image with a config made of its SHA-1 and `hints`.
-    fn analyze(&self, hints: &str) -> Analysis {
-        let rom = self.rom();
-        let text = format!("sha1 = \"{}\"\n{hints}", rom.sha1());
-        let config = GameConfig::parse(&text).expect("valid config");
-        analyze(&rom, &config).expect("SHA-1 matches")
+    /// Analyses the image from its vectors alone.
+    fn analyze(&self) -> Analysis {
+        analyze(&self.rom())
+    }
+
+    /// Analyses the image from its vectors and `hints`.
+    fn analyze_with(&self, hints: &Hints) -> Analysis {
+        analyze_with(&self.rom(), hints)
     }
 }
 
 fn a(raw: u32) -> Address {
     Address::new(raw)
+}
+
+/// A table of `count` entries at `address` with no site and no target kind.
+fn table(address: u32, count: u32, kind: EntryKind) -> JumpTable {
+    JumpTable {
+        address: a(address),
+        count,
+        kind,
+        site: None,
+        target: None,
+    }
+}
+
+fn tables(jump_tables: Vec<JumpTable>) -> Hints {
+    Hints {
+        jump_tables,
+        ..Hints::default()
+    }
+}
+
+fn function(address: u32, noreturn: bool) -> FunctionHint {
+    FunctionHint {
+        address: a(address),
+        noreturn,
+    }
+}
+
+fn functions(functions: Vec<FunctionHint>) -> Hints {
+    Hints {
+        functions,
+        ..Hints::default()
+    }
 }
 
 fn edge(target: u32, kind: EdgeKind) -> Edge {
@@ -77,7 +111,7 @@ fn set(addresses: &[u32]) -> BTreeSet<Address> {
 
 #[test]
 fn test_analyze_straight_function_gives_one_returning_block() {
-    let analysis = Image::new().words(RESET, &[0x7000, RTS]).analyze("");
+    let analysis = Image::new().words(RESET, &[0x7000, RTS]).analyze();
     let function = &analysis.functions[&a(RESET)];
     assert_eq!(function.origins, [Origin::Reset]);
     assert_eq!(function.blocks, set(&[RESET]));
@@ -97,7 +131,7 @@ fn test_analyze_dbcc_loop_splits_blocks_at_loop_target() {
     // moveq #3,d0 / loop: nop / dbf d0,loop / rts
     let analysis = Image::new()
         .words(RESET, &[0x7003, NOP, 0x51C8, 0xFFFC, RTS])
-        .analyze("");
+        .analyze();
     let entry = &analysis.blocks[&a(0x300)];
     assert_eq!(entry.terminator, Terminator::Fallthrough);
     assert_eq!(entry.successors, [edge(0x302, EdgeKind::Fallthrough)]);
@@ -123,7 +157,7 @@ fn test_analyze_conditional_branch_lists_taken_then_fallthrough() {
     // beq.s skip / moveq #1,d0 / rts / skip: rts
     let analysis = Image::new()
         .words(RESET, &[0x6704, 0x7001, RTS, RTS])
-        .analyze("");
+        .analyze();
     let block = &analysis.blocks[&a(0x300)];
     assert_eq!(block.terminator, Terminator::Conditional);
     assert_eq!(
@@ -144,7 +178,7 @@ fn test_analyze_bsr_targets_become_functions_and_tail_jump_recorded() {
         .words(RESET, &[0x6100, 0x000E, 0x6100, 0x001A, RTS])
         .words(0x310, &[0x7001, 0x600C])
         .words(0x320, &[RTS])
-        .analyze("");
+        .analyze();
     let caller = &analysis.blocks[&a(RESET)];
     assert_eq!(caller.end, a(0x30A));
     assert_eq!(
@@ -186,7 +220,7 @@ fn test_analyze_block_reached_by_two_functions_is_shared() {
         .words(0x310, &[0x7001, 0x6000, 0x001C])
         .words(0x320, &[0x7002, 0x6000, 0x000C])
         .words(0x330, &[RTS])
-        .analyze("");
+        .analyze();
     let shared: Vec<Address> = analysis.shared_blocks().map(|block| block.start).collect();
     assert_eq!(shared, [a(0x330)]);
     assert_eq!(analysis.blocks[&a(0x330)].functions, set(&[0x310, 0x320]));
@@ -204,8 +238,8 @@ fn word_table_image() -> Image {
 
 #[test]
 fn test_analyze_hinted_word_offset_table_resolves_entries() {
-    let analysis = word_table_image()
-        .analyze("[[jump_table]]\naddress = 0x308\ncount = 2\nkind = \"word_offset\"\n");
+    let analysis =
+        word_table_image().analyze_with(&tables(vec![table(0x308, 2, EntryKind::WordOffset)]));
     let block = &analysis.blocks[&a(RESET)];
     assert_eq!(block.terminator, Terminator::IndirectJump);
     let table = EdgeKind::Table { table: a(0x308) };
@@ -228,7 +262,7 @@ fn test_analyze_hinted_word_offset_table_resolves_entries() {
 
 #[test]
 fn test_analyze_unhinted_word_table_suggests_hint_with_count_guess() {
-    let analysis = word_table_image().analyze("");
+    let analysis = word_table_image().analyze();
     assert_eq!(
         analysis.unresolved,
         [UnresolvedSite {
@@ -244,8 +278,7 @@ fn test_analyze_unhinted_word_table_suggests_hint_with_count_guess() {
     let report = analysis.report().to_string();
     assert!(
         report.contains(
-            "# [[jump_table]]\n# address = 0x000308\n# count = 2  # guessed, verify\n\
-             # kind = \"word_offset\"\n# site = 0x000304\n"
+            "Likely a jump table at 0x000308, word_offset, 2 entries (guessed, verify).\n"
         ),
         "{report}"
     );
@@ -264,8 +297,7 @@ fn bra_table_image() -> Image {
 
 #[test]
 fn test_analyze_bra_w_table_entries_are_code() {
-    let analysis =
-        bra_table_image().analyze("[[jump_table]]\naddress = 0x304\ncount = 2\nkind = \"bra_w\"\n");
+    let analysis = bra_table_image().analyze_with(&tables(vec![table(0x304, 2, EntryKind::BraW)]));
     let table = EdgeKind::Table { table: a(0x304) };
     assert_eq!(
         analysis.blocks[&a(RESET)].successors,
@@ -293,7 +325,7 @@ fn test_analyze_bra_w_table_entries_are_code() {
 
 #[test]
 fn test_analyze_unhinted_pc_index_jump_without_move_suggests_bra_w() {
-    let analysis = bra_table_image().analyze("");
+    let analysis = bra_table_image().analyze();
     assert_eq!(
         analysis.unresolved[0].suggestion,
         Suggestion::JumpTable {
@@ -312,7 +344,10 @@ fn test_analyze_long_table_at_jsr_site_makes_functions() {
         .words(0x400, &[0x0000, 0x0410, 0x0000, 0x0420])
         .words(0x410, &[RTS])
         .words(0x420, &[RTS])
-        .analyze("[[jump_table]]\naddress = 0x400\ncount = 2\nkind = \"long\"\nsite = 0x300\n");
+        .analyze_with(&tables(vec![JumpTable {
+            site: Some(a(0x300)),
+            ..table(0x400, 2, EntryKind::Long)
+        }]));
     let block = &analysis.blocks[&a(RESET)];
     assert_eq!(block.terminator, Terminator::Return);
     assert_eq!(
@@ -333,7 +368,7 @@ fn test_analyze_long_table_at_jsr_site_makes_functions() {
 #[test]
 fn test_analyze_register_jumps_reported_unresolved() {
     // jsr (a0) / jmp (a0)
-    let analysis = Image::new().words(RESET, &[0x4E90, 0x4ED0]).analyze("");
+    let analysis = Image::new().words(RESET, &[0x4E90, 0x4ED0]).analyze();
     assert_eq!(
         analysis.unresolved,
         [
@@ -367,7 +402,7 @@ fn test_analyze_register_jumps_reported_unresolved() {
     );
     assert!(report.contains("### 0x000302 (jump)"), "{report}");
     assert!(
-        report.contains("# [[indirect]]\n# site = 0x000302\n# targets = []\n"),
+        report.contains("A jump through a register: targets unknown.\n"),
         "{report}"
     );
 }
@@ -377,7 +412,7 @@ fn test_report_context_stops_after_instruction_without_fallthrough() {
     // rts; a hinted function right after it: jmp (a0)
     let analysis = Image::new()
         .words(RESET, &[RTS, 0x4ED0])
-        .analyze("[[function]]\naddress = 0x302\n");
+        .analyze_with(&functions(vec![function(0x302, false)]));
     let report = analysis.report().to_string();
     assert!(report.contains("```text\n0x000302  jmp"), "{report}");
     assert!(!report.contains("0x000300  rts"), "{report}");
@@ -389,7 +424,13 @@ fn test_analyze_indirect_hint_supplies_jump_targets() {
         .words(RESET, &[0x4ED0])
         .words(0x310, &[RTS])
         .words(0x320, &[RTS])
-        .analyze("[[indirect]]\nsite = 0x300\ntargets = [0x310, 0x320]\n");
+        .analyze_with(&Hints {
+            indirect: vec![IndirectHint {
+                site: a(0x300),
+                targets: vec![a(0x310), a(0x320)],
+            }],
+            ..Hints::default()
+        });
     assert!(analysis.unresolved.is_empty());
     assert_eq!(
         analysis.blocks[&a(RESET)].successors,
@@ -406,7 +447,7 @@ fn test_analyze_branch_into_instruction_middle_flags_overlap() {
     // beq.s into the immediate of move.l #$4E754E75,d0, whose words decode as rts.
     let analysis = Image::new()
         .words(RESET, &[0x6702, 0x203C, 0x4E75, 0x4E75, RTS])
-        .analyze("");
+        .analyze();
     assert!(analysis.diagnostics.contains(&Diagnostic::Overlap {
         first: a(0x302),
         second: a(0x304),
@@ -425,7 +466,7 @@ fn test_analyze_bad_targets_reported_and_not_decoded() {
                 0x4EB8, 0x8000, 0x4EB9, 0x0010, 0x0000, 0x4EF9, 0x0000, 0x0301,
             ],
         )
-        .analyze("");
+        .analyze();
     for diagnostic in [
         Diagnostic::RamTarget {
             source: Source::Instruction(a(0x300)),
@@ -458,7 +499,7 @@ fn test_analyze_noreturn_hint_stops_decoding_after_call() {
     let analysis = Image::new()
         .words(RESET, &[0x6100, 0x000E, 0x4E7A])
         .words(0x310, &[0x60FE])
-        .analyze("[[function]]\naddress = 0x310\nnoreturn = true\n");
+        .analyze_with(&functions(vec![function(0x310, true)]));
     assert!(!analysis.instructions.contains_key(&a(0x304)));
     assert_eq!(
         analysis.blocks[&a(RESET)].terminator,
@@ -466,7 +507,7 @@ fn test_analyze_noreturn_hint_stops_decoding_after_call() {
     );
     let forever = &analysis.functions[&a(0x310)];
     assert!(forever.noreturn);
-    assert_eq!(forever.origins, [Origin::Hint { line: 3 }]);
+    assert_eq!(forever.origins, [Origin::Hint]);
     assert!(forever.tail_jumps.is_empty());
     assert_eq!(
         analysis.blocks[&a(0x310)].successors,
@@ -483,7 +524,7 @@ fn test_analyze_noreturn_hint_stops_decoding_after_call() {
 #[test]
 fn test_analyze_trap_calls_handler_and_falls_through() {
     // trap #0 / rts
-    let analysis = Image::new().words(RESET, &[0x4E40, RTS]).analyze("");
+    let analysis = Image::new().words(RESET, &[0x4E40, RTS]).analyze();
     let block = &analysis.blocks[&a(RESET)];
     assert_eq!(block.terminator, Terminator::Trap);
     assert_eq!(block.successors, [edge(0x302, EdgeKind::Fallthrough)]);
@@ -504,7 +545,7 @@ fn test_analyze_stop_illegal_and_rtr_terminators() {
     let analysis = Image::new()
         .words(RESET, &[0x4E72, 0x2700, 0x4AFC])
         .words(0x310, &[0x4E77])
-        .analyze("[[function]]\naddress = 0x310\n");
+        .analyze_with(&functions(vec![function(0x310, false)]));
     let stop = &analysis.blocks[&a(RESET)];
     assert_eq!(stop.terminator, Terminator::Stop);
     assert_eq!(stop.successors, [edge(0x304, EdgeKind::Fallthrough)]);
@@ -520,7 +561,7 @@ fn test_analyze_stop_illegal_and_rtr_terminators() {
 #[test]
 fn test_analyze_undecodable_bytes_end_block_invalid() {
     // moveq #0,d0 / 0x4E7A (MOVEC, not on the 68000)
-    let analysis = Image::new().words(RESET, &[0x7000, 0x4E7A]).analyze("");
+    let analysis = Image::new().words(RESET, &[0x7000, 0x4E7A]).analyze();
     assert!(analysis.diagnostics.contains(&Diagnostic::DecodeFailed {
         address: a(0x302),
         error: DecodeError::InvalidOpcode { opcode: 0x4E7A },
@@ -535,7 +576,7 @@ fn test_analyze_code_running_off_rom_reported() {
     let analysis = Image::new()
         .vector(1, 0xFFC)
         .words(0xFFC, &[NOP, NOP])
-        .analyze("");
+        .analyze();
     assert!(
         analysis
             .diagnostics
@@ -550,18 +591,28 @@ fn test_analyze_data_regions_are_never_decoded() {
     let analysis = Image::new()
         .words(RESET, &[0x600E])
         .words(0x330, &[NOP])
-        .analyze(
-            "[[data]]\nstart = 0x310\nend = 0x320\n[[function]]\naddress = 0x330\n\
-             [[data]]\nstart = 0x332\nend = 0x340\n",
-        );
+        .analyze_with(&Hints {
+            functions: vec![function(0x330, false)],
+            data_regions: vec![
+                DataRegion {
+                    start: a(0x310),
+                    end: a(0x320),
+                },
+                DataRegion {
+                    start: a(0x332),
+                    end: a(0x340),
+                },
+            ],
+            ..Hints::default()
+        });
     assert!(analysis.diagnostics.contains(&Diagnostic::DataTarget {
         source: Source::Instruction(a(0x300)),
         target: a(0x310),
-        region_line: 3,
+        region: a(0x310),
     }));
     assert!(analysis.diagnostics.contains(&Diagnostic::FallsIntoData {
         address: a(0x330),
-        region_line: 8,
+        region: a(0x332),
     }));
     assert!(!analysis.instructions.contains_key(&a(0x310)));
     assert!(!analysis.instructions.contains_key(&a(0x332)));
@@ -569,7 +620,7 @@ fn test_analyze_data_regions_are_never_decoded() {
 
 #[test]
 fn test_analyze_vectors_sharing_handler_reported_once() {
-    let analysis = Image::new().words(RESET, &[RTS]).analyze("");
+    let analysis = Image::new().words(RESET, &[RTS]).analyze();
     let expected: Vec<u8> = (2..=11).chain([15]).chain(24..=47).collect();
     let shared: Vec<&Diagnostic> = analysis
         .diagnostics
@@ -593,7 +644,7 @@ fn test_analyze_table_without_site_makes_its_targets_functions() {
         .words(RESET, &[RTS])
         .words(0x400, &[0x0000, 0x0410])
         .words(0x410, &[RTS])
-        .analyze("[[jump_table]]\naddress = 0x400\ncount = 1\nkind = \"long\"\n");
+        .analyze_with(&tables(vec![table(0x400, 1, EntryKind::Long)]));
     let function = &analysis.functions[&a(0x410)];
     assert_eq!(function.origins, [Origin::Table { table: a(0x400) }]);
     assert!(function.callers.is_empty());
@@ -606,9 +657,10 @@ fn test_analyze_block_table_without_site_leaves_unowned_blocks() {
         .words(RESET, &[RTS])
         .words(0x400, &[0x0000, 0x0410])
         .words(0x410, &[RTS])
-        .analyze(
-            "[[jump_table]]\naddress = 0x400\ncount = 1\nkind = \"long\"\ntarget = \"block\"\n",
-        );
+        .analyze_with(&tables(vec![JumpTable {
+            target: Some(TargetKind::Block),
+            ..table(0x400, 1, EntryKind::Long)
+        }]));
     assert!(!analysis.functions.contains_key(&a(0x410)));
     assert!(
         analysis
@@ -623,7 +675,10 @@ fn test_analyze_table_site_that_is_not_indirect_reported() {
         .words(RESET, &[RTS])
         .words(0x400, &[0x0000, 0x0410])
         .words(0x410, &[RTS])
-        .analyze("[[jump_table]]\naddress = 0x400\ncount = 1\nkind = \"long\"\nsite = 0x300\n");
+        .analyze_with(&tables(vec![JumpTable {
+            site: Some(a(0x300)),
+            ..table(0x400, 1, EntryKind::Long)
+        }]));
     assert!(
         analysis
             .diagnostics
@@ -633,15 +688,4 @@ fn test_analyze_table_site_that_is_not_indirect_reported() {
             })
     );
     assert!(analysis.functions.contains_key(&a(0x410)));
-}
-
-#[test]
-fn test_analyze_config_for_other_rom_refused() {
-    let rom = Image::new().words(RESET, &[RTS]).rom();
-    let config =
-        GameConfig::parse("sha1 = \"0000000000000000000000000000000000000000\"\n").expect("valid");
-    assert!(matches!(
-        analyze(&rom, &config),
-        Err(AnalysisError::Sha1Mismatch { .. })
-    ));
 }

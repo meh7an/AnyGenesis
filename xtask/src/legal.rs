@@ -1,5 +1,5 @@
-//! Legal guard: keeps ROM images, other large binaries, and the external reference
-//! emulator's programs and scripts out of the repository.
+//! Legal guard: keeps ROM images, other large binaries, the external reference emulator's
+//! programs and scripts, and per-game hint files out of the repository.
 
 use std::{
     ffi::OsStr,
@@ -36,6 +36,11 @@ const NATIVE_MAGICS: [&[u8]; 2] = [b"MZ", b"\x7FELF"];
 /// scripts and the dumps they save stay outside the repository.
 const SCRIPT_MAGIC: &[u8] = b"breakpoint $";
 
+/// Games build from their ROM alone (Architecture Decision 7): the folder per-game configs
+/// lived in stays gone, and no TOML file anywhere holds a hint section of the old format.
+const GAMES_FOLDER: &str = "games/";
+const HINT_SECTIONS: [&str; 5] = ["jump_table", "function", "indirect", "unreached", "data"];
+
 /// A rule a candidate file breaks.
 #[derive(Debug, PartialEq, Eq)]
 enum Violation {
@@ -44,6 +49,8 @@ enum Violation {
     RomHeader,
     NativeBinary,
     DebuggerScript,
+    GamesFolder,
+    HintSection { name: &'static str },
 }
 
 impl fmt::Display for Violation {
@@ -63,6 +70,15 @@ impl fmt::Display for Violation {
                 f,
                 "is a reference emulator debugger script (generate it outside the repository)"
             ),
+            Self::GamesFolder => write!(
+                f,
+                "is in {GAMES_FOLDER}, where per-game configs lived (games build from the ROM \
+                 alone)"
+            ),
+            Self::HintSection { name } => write!(
+                f,
+                "holds a [[{name}]] hint section (games build from the ROM alone)"
+            ),
         }
     }
 }
@@ -80,8 +96,14 @@ pub(crate) fn run() -> Result<ExitCode> {
     let mut failed = false;
 
     for file in &files {
+        // TOML files are read whole for the hint check; the size rule keeps them small.
+        let limit = if is_toml(Path::new(file)) {
+            MAX_FILE_SIZE
+        } else {
+            HEAD_LEN as u64
+        };
         let Some((size, head)) =
-            read_head(&root.join(file)).with_context(|| format!("reading {file}"))?
+            read_head(&root.join(file), limit).with_context(|| format!("reading {file}"))?
         else {
             eprintln!("warning: {file} is tracked but missing from the working tree; skipped");
             continue;
@@ -103,7 +125,8 @@ pub(crate) fn run() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Returns every rule broken by a file with this path, size and leading bytes.
+/// Returns every rule broken by a file with this path, size and leading bytes (all of them
+/// for a TOML file).
 fn check_file(path: &Path, size: u64, head: &[u8]) -> Vec<Violation> {
     let mut violations = Vec::new();
     if size > MAX_FILE_SIZE {
@@ -123,7 +146,39 @@ fn check_file(path: &Path, size: u64, head: &[u8]) -> Vec<Violation> {
     if head.starts_with(SCRIPT_MAGIC) {
         violations.push(Violation::DebuggerScript);
     }
+    if path.starts_with(GAMES_FOLDER) {
+        violations.push(Violation::GamesFolder);
+    }
+    if is_toml(path) {
+        violations.extend(hint_sections(head).map(|name| Violation::HintSection { name }));
+    }
     violations
+}
+
+fn is_toml(path: &Path) -> bool {
+    has_extension(path, &["toml"])
+}
+
+/// The hint section names `text` opens as TOML arrays of tables, in order, each once.
+fn hint_sections(text: &[u8]) -> impl Iterator<Item = &'static str> {
+    let text = String::from_utf8_lossy(text);
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let Some(name) = line
+            .trim_start()
+            .strip_prefix("[[")
+            .and_then(|rest| rest.split_once("]]"))
+            .map(|(name, _)| name.trim())
+        else {
+            continue;
+        };
+        if let Some(&hint) = HINT_SECTIONS.iter().find(|&&hint| hint == name)
+            && !found.contains(&hint)
+        {
+            found.push(hint);
+        }
+    }
+    found.into_iter()
 }
 
 fn has_extension(path: &Path, extensions: &[&str]) -> bool {
@@ -166,17 +221,17 @@ fn parse_file_list(stdout: &[u8]) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Returns the file size and just enough leading bytes for the header check, or `None` if
-/// the file does not exist.
-fn read_head(path: &Path) -> io::Result<Option<(u64, Vec<u8>)>> {
+/// Returns the file size and up to `limit` leading bytes, or `None` if the file does not
+/// exist.
+fn read_head(path: &Path, limit: u64) -> io::Result<Option<(u64, Vec<u8>)>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
     let size = file.metadata()?.len();
-    let mut head = Vec::with_capacity(HEAD_LEN);
-    file.take(HEAD_LEN as u64).read_to_end(&mut head)?;
+    let mut head = Vec::new();
+    file.take(limit).read_to_end(&mut head)?;
     Ok(Some((size, head)))
 }
 
@@ -246,7 +301,38 @@ mod tests {
     fn test_check_file_normal_sources_accepted() {
         assert!(check("xtask/src/main.rs", b"fn main() {}\n").is_empty());
         assert!(check("README.md", b"# AnyGenesis\n").is_empty());
-        assert!(check("games/sonic1.toml", b"sha1 = \"\"\n").is_empty());
+        assert!(check("crates/rom/Cargo.toml", b"[package]\nname = \"rom\"\n").is_empty());
+    }
+
+    #[test]
+    fn test_check_file_games_folder_rejected() {
+        for path in ["games/sonic1.toml", "games/notes.md"] {
+            assert_eq!(check(path, b"tiny"), [Violation::GamesFolder], "{path}");
+        }
+        assert!(check("crates/games/src/lib.rs", b"//! Games.\n").is_empty());
+    }
+
+    #[test]
+    fn test_check_file_hint_sections_in_toml_rejected() {
+        let text = b"# hints\nsha1 = \"\"\n\n[[jump_table]]\naddress = 0x396\n\
+                     [[ indirect ]]\nsite = 0x300\n[[jump_table]]\naddress = 0x400\n";
+        assert_eq!(
+            check("crates/game/tests/sonic1.toml", text),
+            [
+                Violation::HintSection { name: "jump_table" },
+                Violation::HintSection { name: "indirect" },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_check_file_other_toml_sections_accepted() {
+        let masks = b"[[mask]]\nregion = \"ram\"\nstart = 0xFFFDF3\nend = 0xFFFDF4\n";
+        assert!(check("crates/framediff/tests/masks/sonic1.toml", masks).is_empty());
+        let manifest = b"[[bin]]\nname = \"recomp\"\n[dependencies]\n";
+        assert!(check("crates/recomp/Cargo.toml", manifest).is_empty());
+        let prose = b"The old [[jump_table]] hints are gone.\n";
+        assert!(check("notes.md", prose).is_empty());
     }
 
     #[test]

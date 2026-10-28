@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anygenesis_gamecfg::{EntryKind, TargetKind};
 use anygenesis_m68k::{DecodeError, Instruction};
 use anygenesis_shared::Address;
 
-use crate::Report;
+use crate::{EntryKind, Report, TargetKind};
 
 /// What control-flow discovery found in one ROM image.
 ///
@@ -130,7 +129,7 @@ pub enum EdgeKind {
     Taken,
     /// An entry of the jump table at `table`.
     Table { table: Address },
-    /// A target listed by an `[[indirect]]` hint.
+    /// A target listed by an indirect hint.
     Hinted,
 }
 
@@ -179,11 +178,11 @@ pub enum Origin {
     Reset,
     /// Exception vector `n` (2 to 47).
     Vector(u8),
-    /// A `[[function]]` hint on this config line.
-    Hint { line: u32 },
+    /// A function hint.
+    Hint,
     /// An entry of a jump table whose targets are functions.
     Table { table: Address },
-    /// A target of the `[[indirect]]` hint for this site.
+    /// A target of the indirect hint for this site.
     Indirect { site: Address },
 }
 
@@ -206,8 +205,6 @@ pub struct ResolvedTable {
     pub target: TargetKind,
     /// The decoded target of every entry, in table order.
     pub targets: Vec<Address>,
-    /// The `[[jump_table]]` line.
-    pub line: u32,
 }
 
 /// An indirect jump or call with no hint.
@@ -242,8 +239,8 @@ pub enum Source {
     Instruction(Address),
     /// Exception vector `n` (1 is reset).
     Vector(u8),
-    /// A config entry on this line.
-    Config { line: u32 },
+    /// A hint.
+    Hint,
 }
 
 /// Something the analysis could not follow or that needs a human look.
@@ -262,7 +259,7 @@ pub enum Diagnostic {
     DataTarget {
         source: Source,
         target: Address,
-        region_line: u32,
+        region: Address,
     },
     /// The bytes at a reachable address are not an instruction.
     DecodeFailed {
@@ -270,7 +267,7 @@ pub enum Diagnostic {
         error: DecodeError,
     },
     /// Execution continues past the instruction at `address` into a data region.
-    FallsIntoData { address: Address, region_line: u32 },
+    FallsIntoData { address: Address, region: Address },
     /// Execution continues past the instruction at `address` beyond the end of the ROM.
     RunsOffRom { address: Address },
     /// Several vectors share one handler.

@@ -4,7 +4,6 @@
 mod equivalence;
 
 use anygenesis_analysis::{Analysis, FlagLiveness, LivenessOptions, analyze};
-use anygenesis_gamecfg::GameConfig;
 use anygenesis_ir::{Flag, FlagSet, Lifted, Op, flags};
 use anygenesis_rom::Rom;
 use anygenesis_shared::Address;
@@ -77,10 +76,7 @@ impl Image {
     }
 
     fn analyze(&self) -> Analysis {
-        let rom = Rom::from_bytes(self.bytes.clone()).expect("synthetic image loads");
-        let text = format!("sha1 = \"{}\"\n", rom.sha1());
-        let config = GameConfig::parse(&text).expect("valid config");
-        analyze(&rom, &config).expect("SHA-1 matches")
+        analyze(&Rom::from_bytes(self.bytes.clone()).expect("synthetic image loads"))
     }
 }
 

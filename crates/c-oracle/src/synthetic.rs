@@ -13,16 +13,13 @@
 //! - spin (0x700, hinted): `bra.s *`, which never returns: every run reaches the cap.
 //! - every exception vector points at an rte at 0x200.
 
-use anygenesis_analysis::{Analysis, analyze};
-use anygenesis_gamecfg::GameConfig;
+use anygenesis_analysis::{Analysis, EntryKind, FunctionHint, Hints, JumpTable, analyze_with};
 use anygenesis_rom::Rom;
+use anygenesis_shared::Address;
 
 const SIZE: usize = 0x1000;
 const HANDLER: u32 = 0x200;
 const RESET: u32 = 0x300;
-
-const HINTS: &str = "[[jump_table]]\naddress = 0x316\ncount = 2\nkind = \"word_offset\"\n\
-                     [[function]]\naddress = 0x700\n";
 
 /// The program's code, as (address, words).
 const CODE: &[(u32, &[u16])] = &[
@@ -101,7 +98,19 @@ pub fn image() -> Vec<u8> {
 /// Analyses the program.
 pub fn analysis() -> Analysis {
     let rom = Rom::from_bytes(image()).expect("the synthetic image is a valid ROM");
-    let text = format!("sha1 = \"{}\"\n{HINTS}", rom.sha1());
-    let config = GameConfig::parse(&text).expect("the synthetic config is valid");
-    analyze(&rom, &config).expect("the config carries the image's SHA-1")
+    let hints = Hints {
+        functions: vec![FunctionHint {
+            address: Address::new(0x700),
+            noreturn: false,
+        }],
+        jump_tables: vec![JumpTable {
+            address: Address::new(0x316),
+            count: 2,
+            kind: EntryKind::WordOffset,
+            site: None,
+            target: None,
+        }],
+        ..Hints::default()
+    };
+    analyze_with(&rom, &hints)
 }
