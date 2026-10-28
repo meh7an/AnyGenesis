@@ -65,7 +65,9 @@ version = "0.1.0"
 dependencies = [
  "anygenesis-runtime",
  "sdl3",
+ "serde",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

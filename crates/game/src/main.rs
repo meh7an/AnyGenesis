@@ -16,6 +16,13 @@
 //! (window only, `--state` may go with it) writes the buttons the window applied there in
 //! that format. Runs with any of the three use a console without TMSS like the reference
 //! emulator's, so a recording replays to the same machine headless and in the reference.
+//!
+//! The window reads its key and gamepad bindings, hotkeys (fullscreen, scale, pause, reset,
+//! quit) and start-up settings from `--controls <file>`, else from `controls.toml` in SDL's
+//! per-user folder if it is there, else uses the defaults. It remembers the picture scaling
+//! the scale hotkey picks in `settings.toml` in that folder. A reset builds the run afresh, as
+//! at start; a run that records refuses it, so a recording is one run from power-on. Pauses
+//! are free: they fall between vertical interrupts, where nothing is recorded.
 
 mod game;
 
@@ -30,7 +37,7 @@ use std::{
 
 use anygenesis_abi::{AgState, RAM_SIZE, ram_index};
 use anygenesis_framediff::{Dump, Input, Recorder, Region, dump};
-use anygenesis_frontend::{Config, Pad};
+use anygenesis_frontend::{Config, Controls, Pad, Settings, controls, settings};
 use anygenesis_rom::{Rom, Sha1Digest};
 use anygenesis_runtime::{
     Access, Buttons, Exit, Hardware, InterruptStop, Miss, Options, RUN_STACK, Runtime, Vdp,
@@ -43,9 +50,9 @@ use crate::game::CompiledGame;
 
 const ROM_VAR: &str = "ANYGENESIS_ROM";
 const USAGE: &str = "usage: anygenesis [<rom.bin> [<frames>]] [--dump <frame>[,<frame>...]] \
-                     [--state <folder>] [--input <file>] [--record <file>] (the ROM may come \
-                     from ANYGENESIS_ROM; it runs in a window with no frames and no options, \
-                     or with --record and at most --state)";
+                     [--state <folder>] [--input <file>] [--record <file>] [--controls <file>] \
+                     (the ROM may come from ANYGENESIS_ROM; it runs in a window with no frames \
+                     and no options but --controls, or with --record and at most --state)";
 /// Window pixels per picture pixel when the window opens.
 const WINDOW_SCALE: u32 = 3;
 /// The vertical interrupt's level: the frame diff stops at its handler's entry.
@@ -96,7 +103,10 @@ fn main() -> Result<()> {
     };
     let report = match arguments.frames {
         Some(frames) => run_from_reset(game, rom, frames, &arguments.dumps, trace, reference)?,
-        None => run_in_window(game, rom, trace, reference)?,
+        None => {
+            let controls = load_controls(arguments.controls.as_deref())?;
+            run_in_window(game, rom, trace, reference, controls)?
+        }
     };
     report.print();
     if let Some(folder) = &arguments.state {
@@ -138,19 +148,22 @@ struct Arguments {
     input: Option<PathBuf>,
     /// Where to record the window's pad input.
     record: Option<PathBuf>,
+    /// The window's controls file, instead of the per-user one.
+    controls: Option<PathBuf>,
 }
 
 impl Arguments {
     fn parse() -> Result<Self> {
         let mut positional = Vec::new();
         let mut dumps = Vec::new();
-        let (mut state, mut input, mut record) = (None, None, None);
+        let (mut state, mut input, mut record, mut controls) = (None, None, None, None);
         let mut arguments = env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             let path = match argument.to_str() {
                 Some("--state") => Some(&mut state),
                 Some("--input") => Some(&mut input),
                 Some("--record") => Some(&mut record),
+                Some("--controls") => Some(&mut controls),
                 _ => None,
             };
             if let Some(path) = path {
@@ -198,7 +211,8 @@ impl Arguments {
             }
             None => Some(DEFAULT_FRAMES),
         };
-        if positional.next().is_some() || record.is_some() && frames.is_some() {
+        let window_only = record.is_some() || controls.is_some();
+        if positional.next().is_some() || window_only && frames.is_some() {
             bail!(USAGE);
         }
         let last = frames.unwrap_or(0);
@@ -214,6 +228,7 @@ impl Arguments {
             state,
             input,
             record,
+            controls,
         })
     }
 }
@@ -595,20 +610,37 @@ fn run_from_reset(
 /// Runs from reset in a window until it closes, or the run stops at a wait nothing can end,
 /// applying the window's pad at every vertical interrupt and doing there what `trace` asks
 /// besides (its own pad source is replaced); on the reference emulator's console when
-/// `reference` is set.
-fn run_in_window(game: CompiledGame, rom: Rom, trace: Trace, reference: bool) -> Result<Report> {
+/// `reference` is set. The report covers the run since the last reset.
+fn run_in_window(
+    game: CompiledGame,
+    rom: Rom,
+    trace: Trace,
+    reference: bool,
+    controls: Controls,
+) -> Result<Report> {
+    let (settings, settings_path) = load_settings();
     let config = Config {
         title: format!("AnyGenesis - {}", game.name),
         scale: WINDOW_SCALE,
+        controls,
+        settings,
+        settings_path,
+        reset_refused: trace
+            .record
+            .is_some()
+            .then(|| "the run is recording its input".to_owned()),
     };
+    let mut trace = Some(trace);
     anygenesis_frontend::run(
         &config,
         move |pad| {
-            let mut runtime = start(rom, game, reference);
+            let mut runtime = start(rom.clone(), game, reference);
             let failure = Failure::default();
+            // Only a run that records nothing is reset, so after the first run the default
+            // trace is the one it was given.
             let trace = Trace {
                 pad: PadSource::Live(pad),
-                ..trace
+                ..trace.take().unwrap_or_default()
             };
             let recording = trace.hook(&mut runtime, game, Rc::clone(&failure));
             (runtime, (failure, recording))
@@ -618,6 +650,59 @@ fn run_in_window(game: CompiledGame, rom: Rom, trace: Trace, reference: bool) ->
             conclude(runtime, &game, exit, Vec::new(), &failure, recording)
         },
     )?
+}
+
+/// The window's controls: from `path`, else from the per-user file if there is one, else
+/// the defaults; says which.
+///
+/// # Errors
+/// SDL finding no per-user folder, `path` missing, or a controls file that cannot be read
+/// or is refused.
+fn load_controls(path: Option<&Path>) -> Result<Controls> {
+    let named = path.is_some();
+    let path = match path {
+        Some(path) => path.to_owned(),
+        None => controls::default_path().context("finding the controls file")?,
+    };
+    let loaded =
+        Controls::load(&path).with_context(|| format!("controls file {}", path.display()))?;
+    match loaded {
+        Some(controls) => {
+            println!("controls from {}", path.display());
+            Ok(controls)
+        }
+        None if named => bail!("controls file {} not found", path.display()),
+        None => {
+            println!("controls: defaults ({} not found)", path.display());
+            Ok(Controls::default())
+        }
+    }
+}
+
+/// The window's remembered settings and where to write them back; says which. The file is
+/// the window's own, so a missing folder or a file that cannot be used only costs the
+/// memory: the run goes on with the defaults.
+fn load_settings() -> (Settings, Option<PathBuf>) {
+    let path = match settings::default_path() {
+        Ok(path) => path,
+        Err(error) => {
+            println!("settings: defaults, not saved ({error})");
+            return (Settings::default(), None);
+        }
+    };
+    let settings = match Settings::load(&path) {
+        Ok(Some(settings)) => {
+            println!("settings from {}", path.display());
+            settings
+        }
+        Ok(None) => Settings::default(),
+        Err(error) => {
+            println!("settings: defaults ({}: {error})", path.display());
+            Settings::default()
+        }
+    };
+    println!("picture scaling: {}", settings.scaling.name());
+    (settings, Some(path))
 }
 
 /// The runtime for `game` at reset on the VDP, ending a run at a wait nothing can end; on
