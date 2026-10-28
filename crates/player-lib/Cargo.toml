@@ -1,0 +1,16 @@
+[package]
+name = "anygenesis-player-lib"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+# A test harness would link a program without the `ag_game` table only games define.
+test = false
+doctest = false
+
+[dependencies]
+anygenesis-abi = { version = "0.1.0", path = "../abi" }
+anygenesis-player = { version = "0.1.0", path = "../player" }
+anyhow = "1.0.104"

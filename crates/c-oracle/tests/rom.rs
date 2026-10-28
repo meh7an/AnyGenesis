@@ -16,7 +16,7 @@ use anygenesis_c_oracle::{
     reference::Stop,
 };
 use anygenesis_rom::Rom;
-use anygenesis_shared::Address;
+use anygenesis_shared::{Address, ROM_MARKER};
 
 const ENTRY_SEEDS: u64 = 8;
 const RESUME_SEEDS: u64 = 2;
@@ -139,7 +139,7 @@ fn run() {
         }
     }
     let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rom-c-report.md");
-    fs::write(&output, &report).expect("writing the report");
+    fs::write(&output, format!("{ROM_MARKER}\n\n{report}")).expect("writing the report");
     println!("{report}\nreport written to {}", output.display());
     assert_eq!(failed, 0, "{failed} runs failed; see {}", output.display());
 }

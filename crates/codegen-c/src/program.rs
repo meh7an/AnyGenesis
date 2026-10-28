@@ -132,7 +132,11 @@ pub fn emit(
         });
         stepped.stats
     });
-    Output { files, stepped }
+    Output {
+        files,
+        table_rows: table.len(),
+        stepped,
+    }
 }
 
 /// Maps each exception vector to the translated function analysed from it.

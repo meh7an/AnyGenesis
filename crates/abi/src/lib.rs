@@ -7,7 +7,7 @@
 
 mod header;
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 
 pub use header::header;
 
@@ -63,6 +63,42 @@ impl CType for *mut AgState {
 impl CType for AgFn {
     fn declare(name: &str) -> String {
         format!("AgFn *{name}")
+    }
+}
+
+impl CType for AgInterrupt {
+    fn declare(name: &str) -> String {
+        format!("AgInterrupt *{name}")
+    }
+}
+
+impl CType for *const c_char {
+    fn declare(name: &str) -> String {
+        format!("const char *{name}")
+    }
+}
+
+impl CType for *const u32 {
+    fn declare(name: &str) -> String {
+        format!("const uint32_t *{name}")
+    }
+}
+
+impl CType for *const AgEntry {
+    fn declare(name: &str) -> String {
+        format!("const AgEntry *{name}")
+    }
+}
+
+impl CType for *const Option<AgFn> {
+    fn declare(name: &str) -> String {
+        format!("AgFn *const *{name}")
+    }
+}
+
+impl CType for *const AgExtra {
+    fn declare(name: &str) -> String {
+        format!("const AgExtra *{name}")
     }
 }
 
@@ -215,6 +251,19 @@ pub fn function_typedef() -> String {
     )
 }
 
+/// Returns the C typedef of [`AgInterrupt`].
+pub fn interrupt_typedef() -> String {
+    let params = [
+        <*mut AgState>::declare("state"),
+        u32::declare("level"),
+        u32::declare("pc"),
+    ];
+    format!(
+        "typedef {};",
+        u32::declare(&format!("AgInterrupt({})", params.join(", ")))
+    )
+}
+
 c_struct! {
     /// One row of the address table: the function that runs `address`.
     pub struct AgEntry as ENTRY {
@@ -222,6 +271,67 @@ c_struct! {
         pub address: u32,
         /// The function to call with `address`.
         pub function: AgFn,
+    }
+}
+
+/// The layout version of [`AgGame`]: a player refuses a table with another, so a game
+/// linked against a player from a different build fails at start instead of misreading it.
+pub const GAME_ABI: u32 = 1;
+
+c_struct! {
+    /// Something embedded beside the ROM image for the player (overlays, settings
+    /// defaults); no kind is defined yet.
+    pub struct AgExtra as EXTRA {
+        /// What the extra holds.
+        pub kind: u32,
+        /// Bytes at `data`.
+        pub size: u32,
+        /// Its name, NUL-terminated.
+        pub name: *const c_char,
+        /// Its bytes.
+        pub data: *const u8,
+    }
+}
+
+c_struct! {
+    /// Everything a game program tells the player about itself, written by the build as
+    /// the one symbol `ag_game`.
+    pub struct AgGame as GAME {
+        /// `AG_GAME_ABI` of the header the build wrote it with.
+        pub abi: u32,
+        /// Bytes in `image`.
+        pub image_size: u32,
+        /// The whole ROM image the program was translated from.
+        pub image: *const u8,
+        /// The SHA-1 of `image` as the build computed it.
+        pub sha1: [u8; 20],
+        /// The title from the ROM's header, NUL-terminated UTF-8.
+        pub title: *const c_char,
+        /// Every function entry and resume point, ascending by address.
+        pub table: *const AgEntry,
+        /// Rows in `table`.
+        pub table_size: u32,
+        /// Entries in `steps`.
+        pub steps_size: u32,
+        /// The stepped function of every even ROM address, index address / 2, null where
+        /// the superset kept none.
+        pub steps: *const Option<AgFn>,
+        /// The checked entry into the stepped functions, `ag_step_entry`.
+        pub step_entry: AgFn,
+        /// The program's interrupt entry, `ag_interrupt`.
+        pub interrupt: AgInterrupt,
+        /// Entries of the functions reset and the exception vectors start, ascending.
+        pub vector_handlers: *const u32,
+        /// Entries in `vector_handlers`.
+        pub vector_handler_count: u32,
+        /// Entries in `function_entries`.
+        pub function_entry_count: u32,
+        /// Entries of every analysed function, ascending.
+        pub function_entries: *const u32,
+        /// What is embedded beside the image.
+        pub extras: *const AgExtra,
+        /// Entries in `extras`.
+        pub extra_count: u32,
     }
 }
 

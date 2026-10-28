@@ -100,6 +100,8 @@ pub struct OutputFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
     pub files: Vec<OutputFile>,
+    /// Rows in `ag_table`, for a build that describes the program in C constants.
+    pub table_rows: usize,
     /// What the superset kept, with [`EmitOptions::stepped`].
     pub stepped: Option<SteppedStats>,
 }

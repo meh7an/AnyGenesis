@@ -1,0 +1,12 @@
+[package]
+name = "anygenesis"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anygenesis-recomp = { version = "0.1.0", path = "../recomp" }
+anygenesis-rom = { version = "0.1.0", path = "../rom" }
+anygenesis-shared = { version = "0.1.0", path = "../shared" }
+anyhow = "1.0.104"
+cc = "1.10.0"

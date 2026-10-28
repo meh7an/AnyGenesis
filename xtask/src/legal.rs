@@ -1,15 +1,20 @@
-//! Legal guard: keeps ROM images, other large binaries, the external reference emulator's
-//! programs and scripts, and per-game hint files out of the repository.
+//! Legal guard: keeps ROM images, files generated from them, other large binaries, the
+//! external reference emulator's programs and scripts, and per-game hint files out of the
+//! repository. With `ANYGENESIS_ROM` set it also refuses any file holding a run of that
+//! ROM's bytes.
 
 use std::{
+    collections::HashMap,
+    env,
     ffi::OsStr,
     fmt,
-    fs::File,
+    fs::{self, File},
     io::{self, Read},
     path::Path,
     process::{Command, ExitCode},
 };
 
+use anygenesis_shared::ROM_MARKER;
 use anyhow::{Context, Result, bail};
 
 use crate::workspace_root;
@@ -41,6 +46,15 @@ const SCRIPT_MAGIC: &[u8] = b"breakpoint $";
 const GAMES_FOLDER: &str = "games/";
 const HINT_SECTIONS: [&str; 5] = ["jump_table", "function", "indirect", "unreached", "data"];
 
+/// The ROM whose bytes no file may hold a run of.
+const ROM_VAR: &str = "ANYGENESIS_ROM";
+/// The shortest run of ROM bytes refused: long enough that hand-written text and code
+/// cannot match by chance.
+const RUN_LEN: usize = 32;
+/// ROM runs with fewer distinct byte values are skipped: fills and padding (zeros, $FF,
+/// repeated words) match ordinary files.
+const MIN_DISTINCT: usize = 8;
+
 /// A rule a candidate file breaks.
 #[derive(Debug, PartialEq, Eq)]
 enum Violation {
@@ -51,6 +65,8 @@ enum Violation {
     DebuggerScript,
     GamesFolder,
     HintSection { name: &'static str },
+    RomMarker,
+    RomRun { offset: usize, rom_offset: usize },
 }
 
 impl fmt::Display for Violation {
@@ -79,6 +95,16 @@ impl fmt::Display for Violation {
                 f,
                 "holds a [[{name}]] hint section (games build from the ROM alone)"
             ),
+            Self::RomMarker => write!(
+                f,
+                "holds the marker of a file generated from a ROM image (generated files stay \
+                 in build output)"
+            ),
+            Self::RomRun { offset, rom_offset } => write!(
+                f,
+                "holds {RUN_LEN} bytes of the ROM {ROM_VAR} names at byte {offset} (ROM offset \
+                 ${rom_offset:06X})"
+            ),
         }
     }
 }
@@ -89,26 +115,33 @@ impl fmt::Display for Violation {
 /// `roms/` fails before it is ever staged.
 ///
 /// # Errors
-/// Returns an error if git cannot list the files or a listed file cannot be read.
+/// Returns an error if git cannot list the files, a listed file cannot be read, or
+/// `ANYGENESIS_ROM` names a file that cannot be read.
 pub(crate) fn run() -> Result<ExitCode> {
     let root = workspace_root()?;
     let files = candidate_files(&root)?;
+    let runs = match env::var_os(ROM_VAR) {
+        Some(path) => {
+            let path = Path::new(&path);
+            let rom = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            Some(RomRuns::new(rom))
+        }
+        None => None,
+    };
     let mut failed = false;
 
     for file in &files {
-        // TOML files are read whole for the hint check; the size rule keeps them small.
-        let limit = if is_toml(Path::new(file)) {
-            MAX_FILE_SIZE
-        } else {
-            HEAD_LEN as u64
-        };
-        let Some((size, head)) =
-            read_head(&root.join(file), limit).with_context(|| format!("reading {file}"))?
+        // Files are read whole, as the marker and a ROM run can sit anywhere; the size rule
+        // keeps them small.
+        let Some((size, contents)) = read_head(&root.join(file), MAX_FILE_SIZE)
+            .with_context(|| format!("reading {file}"))?
         else {
             eprintln!("warning: {file} is tracked but missing from the working tree; skipped");
             continue;
         };
-        for violation in check_file(Path::new(file), size, &head) {
+        let mut violations = check_file(Path::new(file), size, &contents);
+        violations.extend(runs.as_ref().and_then(|runs| runs.find(&contents)));
+        for violation in violations {
             eprintln!("{file} {violation}");
             failed = true;
         }
@@ -121,12 +154,111 @@ pub(crate) fn run() -> Result<ExitCode> {
         );
         return Ok(ExitCode::FAILURE);
     }
-    println!("legal guard passed: {} files checked", files.len());
+    let scanned = if runs.is_some() {
+        format!(", none holding a {RUN_LEN}-byte run of the ROM {ROM_VAR} names")
+    } else {
+        String::new()
+    };
+    println!("legal guard passed: {} files checked{scanned}", files.len());
     Ok(ExitCode::SUCCESS)
 }
 
-/// Returns every rule broken by a file with this path, size and leading bytes (all of them
-/// for a TOML file).
+/// Every run of [`RUN_LEN`] bytes of a ROM with at least [`MIN_DISTINCT`] distinct values,
+/// by a rolling hash, to find one in a file in a single pass.
+struct RomRuns {
+    rom: Vec<u8>,
+    /// The ROM offsets of the runs with each hash.
+    starts: HashMap<u64, Vec<usize>>,
+}
+
+impl RomRuns {
+    fn new(rom: Vec<u8>) -> Self {
+        let mut starts: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut counts = [0_u16; 256];
+        let mut distinct = 0;
+        let mut hash = RollingHash::default();
+        for (index, &byte) in rom.iter().enumerate() {
+            if counts[usize::from(byte)] == 0 {
+                distinct += 1;
+            }
+            counts[usize::from(byte)] += 1;
+            let leaving = index.checked_sub(RUN_LEN).map(|start| rom[start]);
+            if let Some(leaving) = leaving {
+                counts[usize::from(leaving)] -= 1;
+                if counts[usize::from(leaving)] == 0 {
+                    distinct -= 1;
+                }
+            }
+            hash.roll(byte, leaving);
+            if index + 1 >= RUN_LEN && distinct >= MIN_DISTINCT {
+                starts
+                    .entry(hash.value)
+                    .or_default()
+                    .push(index + 1 - RUN_LEN);
+            }
+        }
+        Self { rom, starts }
+    }
+
+    /// The first run of the ROM in `contents`, with where it starts in both.
+    fn find(&self, contents: &[u8]) -> Option<Violation> {
+        let mut hash = RollingHash::default();
+        for (index, &byte) in contents.iter().enumerate() {
+            let leaving = index.checked_sub(RUN_LEN).map(|start| contents[start]);
+            hash.roll(byte, leaving);
+            let Some(offset) = (index + 1).checked_sub(RUN_LEN) else {
+                continue;
+            };
+            let window = &contents[offset..=index];
+            let found = self.starts.get(&hash.value).and_then(|starts| {
+                starts
+                    .iter()
+                    .find(|&&start| &self.rom[start..start + RUN_LEN] == window)
+            });
+            if let Some(&rom_offset) = found {
+                return Some(Violation::RomRun { offset, rom_offset });
+            }
+        }
+        None
+    }
+}
+
+/// A polynomial hash of the last [`RUN_LEN`] bytes, updated one byte at a time.
+#[derive(Default)]
+struct RollingHash {
+    value: u64,
+}
+
+impl RollingHash {
+    /// An odd multiplier, so every power of it is a unit modulo 2^64.
+    const BASE: u64 = 0x100_0000_01B3;
+    /// `BASE` to the power `RUN_LEN - 1`: the weight of the byte that leaves next.
+    const TOP: u64 = {
+        let mut power = 1_u64;
+        let mut index = 1;
+        while index < RUN_LEN {
+            power = power.wrapping_mul(Self::BASE);
+            index += 1;
+        }
+        power
+    };
+
+    /// Adds `entering` and removes `leaving`, the byte [`RUN_LEN`] places before it.
+    fn roll(&mut self, entering: u8, leaving: Option<u8>) {
+        if let Some(leaving) = leaving {
+            self.value = self
+                .value
+                .wrapping_sub(u64::from(leaving).wrapping_mul(Self::TOP));
+        }
+        self.value = self
+            .value
+            .wrapping_mul(Self::BASE)
+            .wrapping_add(u64::from(entering));
+    }
+}
+
+/// Returns every rule broken by a file with this path, size and contents (the first
+/// [`MAX_FILE_SIZE`] bytes of a larger one).
 fn check_file(path: &Path, size: u64, head: &[u8]) -> Vec<Violation> {
     let mut violations = Vec::new();
     if size > MAX_FILE_SIZE {
@@ -151,6 +283,10 @@ fn check_file(path: &Path, size: u64, head: &[u8]) -> Vec<Violation> {
     }
     if is_toml(path) {
         violations.extend(hint_sections(head).map(|name| Violation::HintSection { name }));
+    }
+    let marker = ROM_MARKER.as_bytes();
+    if head.windows(marker.len()).any(|window| window == marker) {
+        violations.push(Violation::RomMarker);
     }
     violations
 }
@@ -366,6 +502,56 @@ mod tests {
     fn test_check_file_truncated_header_accepted() {
         let image = fixture_rom(b"SEGA");
         assert!(check("data/image.dat", &image[..HEAD_LEN - 1]).is_empty());
+    }
+
+    #[test]
+    fn test_check_file_rom_marker_rejected() {
+        let generated = format!("/* {ROM_MARKER} */\n#include \"ag_runtime.h\"\n");
+        assert_eq!(
+            check("generated/ag_000.c", generated.as_bytes()),
+            [Violation::RomMarker]
+        );
+        let listing = format!("; {ROM_MARKER}\n\tcpu\t68000\n");
+        assert_eq!(
+            check("s1built.asm", listing.as_bytes()),
+            [Violation::RomMarker]
+        );
+        assert!(check("notes.md", b"Generated files carry a marker line.\n").is_empty());
+    }
+
+    /// A synthetic image of varied bytes with a fill of $FF in it.
+    fn fixture_image() -> Vec<u8> {
+        let mut image: Vec<u8> = (0..4096_u32)
+            .map(|index| (index * 7 + index / 251) as u8)
+            .collect();
+        image[1024..1024 + 256].fill(0xFF);
+        image
+    }
+
+    #[test]
+    fn test_rom_runs_find_a_run_anywhere_in_a_file() {
+        let image = fixture_image();
+        let runs = RomRuns::new(image.clone());
+        let mut file = b"some text before the copy ".to_vec();
+        let at = file.len();
+        file.extend_from_slice(&image[300..300 + RUN_LEN + 5]);
+        file.extend_from_slice(b" and after");
+        assert_eq!(
+            runs.find(&file),
+            Some(Violation::RomRun {
+                offset: at,
+                rom_offset: 300
+            })
+        );
+    }
+
+    #[test]
+    fn test_rom_runs_ignore_shorter_runs_and_fills() {
+        let image = fixture_image();
+        let runs = RomRuns::new(image.clone());
+        assert_eq!(runs.find(&image[300..300 + RUN_LEN - 1]), None);
+        assert_eq!(runs.find(&[0xFF; 300]), None);
+        assert_eq!(runs.find(b""), None);
     }
 
     #[test]

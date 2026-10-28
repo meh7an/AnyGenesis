@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "anygenesis"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-recomp",
+ "anygenesis-rom",
+ "anygenesis-shared",
+ "anyhow",
+ "cc",
+]
+
+[[package]]
 name = "anygenesis-abi"
 version = "0.1.0"
 
@@ -74,6 +85,7 @@ dependencies = [
  "anygenesis-abi",
  "anygenesis-framediff",
  "anygenesis-frontend",
+ "anygenesis-player",
  "anygenesis-recomp",
  "anygenesis-rom",
  "anygenesis-runtime",
@@ -105,6 +117,27 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "thiserror",
+]
+
+[[package]]
+name = "anygenesis-player"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-abi",
+ "anygenesis-framediff",
+ "anygenesis-frontend",
+ "anygenesis-rom",
+ "anygenesis-runtime",
+ "anyhow",
+]
+
+[[package]]
+name = "anygenesis-player-lib"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-abi",
+ "anygenesis-player",
+ "anyhow",
 ]
 
 [[package]]
@@ -515,5 +548,6 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "anygenesis-shared",
  "anyhow",
 ]

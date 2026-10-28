@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, fmt::Write as _, path::Path};
 use anygenesis_analysis::{FlagLiveness, FlagStats, LivenessOptions, analyze};
 use anygenesis_ir::Flag;
 use anygenesis_rom::Rom;
+use anygenesis_shared::ROM_MARKER;
 
 use equivalence::{Harness, SplitMix, Stop};
 
@@ -103,7 +104,7 @@ fn test_liveness_real_rom_is_equivalent_and_reports_removals() {
     }
 
     let report_path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("flag-liveness-report.md");
-    std::fs::write(&report_path, &report).expect("report is writable");
+    std::fs::write(&report_path, format!("{ROM_MARKER}\n\n{report}")).expect("report is writable");
     println!("{report}");
     println!("report {}", report_path.display());
 

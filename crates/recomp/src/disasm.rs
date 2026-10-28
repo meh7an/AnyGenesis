@@ -9,7 +9,7 @@ use std::ops::Bound;
 
 use anygenesis_analysis::{Analysis, EntryKind, ResolvedTable};
 use anygenesis_m68k::{Dialect, Ea, FormatOptions, Instruction, Labels, Operand};
-use anygenesis_shared::Address;
+use anygenesis_shared::{Address, ROM_MARKER};
 
 /// The comment with address and bytes starts at this column (tabs stop every 8).
 const COMMENT_COLUMN: usize = 48;
@@ -213,6 +213,7 @@ impl<'a> Listing<'a> {
     }
 
     fn write(&self, out: &mut LineCounter<'_>) -> io::Result<()> {
+        writeln!(out, "; {ROM_MARKER}")?;
         writeln!(out, "; ROM SHA-1 {}", self.sha1)?;
         writeln!(out, "\tcpu\t68000")?;
         writeln!(out, "\tsupmode\ton")?;

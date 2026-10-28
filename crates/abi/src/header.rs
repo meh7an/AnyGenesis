@@ -1,12 +1,15 @@
 use std::fmt::Write;
 
-use crate::{ENTRY, EXTERNS, STATE, Struct, function_typedef};
+use crate::{
+    ENTRY, EXTERNS, EXTRA, GAME, GAME_ABI, STATE, Struct, function_typedef, interrupt_typedef,
+};
 
 /// The include guard and file name of the generated header.
 const GUARD: &str = "AG_STATE_H";
 
 /// Returns `ag_state.h`: the state struct, the address table entry, the translated function
-/// type and the extern functions, with assertions on every offset and size.
+/// and interrupt entry types, the game table the player reads and the extern functions,
+/// with assertions on every offset and size.
 pub fn header() -> String {
     let mut out = String::new();
     // Writing into a String never fails.
@@ -25,8 +28,9 @@ fn write_header(out: &mut String) -> std::fmt::Result {
     writeln!(out, "#include <stddef.h>")?;
     writeln!(out, "#include <stdint.h>")?;
     writeln!(out)?;
-    writeln!(out, "typedef struct {} {};", STATE.name, STATE.name)?;
-    writeln!(out, "typedef struct {} {};", ENTRY.name, ENTRY.name)?;
+    for item in [&STATE, &ENTRY, &EXTRA, &GAME] {
+        writeln!(out, "typedef struct {} {};", item.name, item.name)?;
+    }
     writeln!(out)?;
     write_comment(
         out,
@@ -35,7 +39,17 @@ fn write_header(out: &mut String) -> std::fmt::Result {
          address execution continues at.\n",
     )?;
     writeln!(out, "{}", function_typedef())?;
-    for item in [&STATE, &ENTRY] {
+    write_comment(
+        out,
+        "",
+        "A program's interrupt entry: takes the interrupt at `level` before the instruction\n\
+         at `pc` and returns its handler's address.\n",
+    )?;
+    writeln!(out, "{}", interrupt_typedef())?;
+    writeln!(out)?;
+    write_comment(out, "", "The layout version of AgGame.\n")?;
+    writeln!(out, "#define AG_GAME_ABI {GAME_ABI}u")?;
+    for item in [&STATE, &ENTRY, &EXTRA, &GAME] {
         writeln!(out)?;
         write_struct(out, item)?;
     }
@@ -94,6 +108,21 @@ mod tests {
         }
         assert!(text.contains("    uint32_t d[8];\n"));
         assert!(text.contains("    AgFn *function;\n"));
+    }
+
+    #[test]
+    fn test_header_declares_the_game_table() {
+        let text = header();
+        for field in GAME.fields {
+            assert!(text.contains(&format!("offsetof(AgGame, {}) ==", field.name)));
+        }
+        assert!(text.contains("    AgFn *const *steps;\n"));
+        assert!(text.contains("    AgInterrupt *interrupt;\n"));
+        assert!(text.contains("    uint8_t sha1[20];\n"));
+        assert!(text.contains(&format!("#define AG_GAME_ABI {GAME_ABI}u\n")));
+        assert!(text.contains(
+            "typedef uint32_t AgInterrupt(AgState *state, uint32_t level, uint32_t pc);"
+        ));
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anygenesis_analysis::{FlagLiveness, LivenessOptions, analyze};
 use anygenesis_codegen_c::{CheckPoints, EmitOptions, emit};
 use anygenesis_rom::Rom;
+use anygenesis_shared::c_marker_line;
 
 use support::{Optimization, compile};
 
@@ -32,7 +33,10 @@ fn test_rom_emits_and_compiles() {
         ),
     ];
     for (name, options) in variants {
-        let output = emit(&analysis, &liveness, &options, rom.bytes());
+        let mut output = emit(&analysis, &liveness, &options, rom.bytes());
+        for file in &mut output.files {
+            file.text.insert_str(0, &c_marker_line());
+        }
         let lines: usize = output
             .files
             .iter()

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/abi",
     "crates/analysis",
+    "crates/anygenesis",
     "crates/c-oracle",
     "crates/codegen-c",
     "crates/framediff",
@@ -11,6 +12,8 @@ members = [
     "crates/ir",
     "crates/m68k",
     "crates/oracle",
+    "crates/player",
+    "crates/player-lib",
     "crates/recomp",
     "crates/rom",
     "crates/runtime",

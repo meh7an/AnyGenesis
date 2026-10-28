@@ -3,7 +3,7 @@
 use anygenesis_analysis::{EntryKind, FunctionHint, Hints, JumpTable, TargetKind, analyze_with};
 use anygenesis_recomp::disasm::write_listing;
 use anygenesis_rom::Rom;
-use anygenesis_shared::Address;
+use anygenesis_shared::{Address, ROM_MARKER};
 
 const ROM_SIZE: usize = 0x400;
 const HANDLER: usize = 0x200;
@@ -130,9 +130,10 @@ fn test_listing_prints_unreached_code_as_data() {
 fn test_listing_has_header_footer_and_ascending_addresses() {
     let text = listing(&Hints::default());
     let lines: Vec<&str> = text.lines().collect();
-    assert!(lines[0].starts_with("; ROM SHA-1 "));
+    assert_eq!(lines[0], format!("; {ROM_MARKER}"));
+    assert!(lines[1].starts_with("; ROM SHA-1 "));
     assert_eq!(
-        lines[1..4],
+        lines[2..5],
         ["\tcpu\t68000", "\tsupmode\ton", "\tpadding\toff"]
     );
     assert_eq!(lines.last(), Some(&"\tend"));

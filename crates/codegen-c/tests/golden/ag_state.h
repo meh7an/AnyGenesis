@@ -7,10 +7,18 @@
 
 typedef struct AgState AgState;
 typedef struct AgEntry AgEntry;
+typedef struct AgExtra AgExtra;
+typedef struct AgGame AgGame;
 
 /* A translated function: called with the 68000 address to start at, it returns the
  * address execution continues at. */
 typedef uint32_t AgFn(AgState *state, uint32_t pc);
+/* A program's interrupt entry: takes the interrupt at `level` before the instruction
+ * at `pc` and returns its handler's address. */
+typedef uint32_t AgInterrupt(AgState *state, uint32_t level, uint32_t pc);
+
+/* The layout version of AgGame. */
+#define AG_GAME_ABI 1u
 
 /* The machine state translated code runs on. */
 struct AgState {
@@ -72,6 +80,82 @@ struct AgEntry {
 _Static_assert(offsetof(AgEntry, address) == 0, "AgEntry.address moved");
 _Static_assert(offsetof(AgEntry, function) == 8, "AgEntry.function moved");
 _Static_assert(sizeof(AgEntry) == 16, "AgEntry changed size");
+
+/* Something embedded beside the ROM image for the player (overlays, settings
+ * defaults); no kind is defined yet. */
+struct AgExtra {
+    /* What the extra holds. */
+    uint32_t kind;
+    /* Bytes at `data`. */
+    uint32_t size;
+    /* Its name, NUL-terminated. */
+    const char *name;
+    /* Its bytes. */
+    const uint8_t *data;
+};
+_Static_assert(offsetof(AgExtra, kind) == 0, "AgExtra.kind moved");
+_Static_assert(offsetof(AgExtra, size) == 4, "AgExtra.size moved");
+_Static_assert(offsetof(AgExtra, name) == 8, "AgExtra.name moved");
+_Static_assert(offsetof(AgExtra, data) == 16, "AgExtra.data moved");
+_Static_assert(sizeof(AgExtra) == 24, "AgExtra changed size");
+
+/* Everything a game program tells the player about itself, written by the build as
+ * the one symbol `ag_game`. */
+struct AgGame {
+    /* `AG_GAME_ABI` of the header the build wrote it with. */
+    uint32_t abi;
+    /* Bytes in `image`. */
+    uint32_t image_size;
+    /* The whole ROM image the program was translated from. */
+    const uint8_t *image;
+    /* The SHA-1 of `image` as the build computed it. */
+    uint8_t sha1[20];
+    /* The title from the ROM's header, NUL-terminated UTF-8. */
+    const char *title;
+    /* Every function entry and resume point, ascending by address. */
+    const AgEntry *table;
+    /* Rows in `table`. */
+    uint32_t table_size;
+    /* Entries in `steps`. */
+    uint32_t steps_size;
+    /* The stepped function of every even ROM address, index address / 2, null where
+     * the superset kept none. */
+    AgFn *const *steps;
+    /* The checked entry into the stepped functions, `ag_step_entry`. */
+    AgFn *step_entry;
+    /* The program's interrupt entry, `ag_interrupt`. */
+    AgInterrupt *interrupt;
+    /* Entries of the functions reset and the exception vectors start, ascending. */
+    const uint32_t *vector_handlers;
+    /* Entries in `vector_handlers`. */
+    uint32_t vector_handler_count;
+    /* Entries in `function_entries`. */
+    uint32_t function_entry_count;
+    /* Entries of every analysed function, ascending. */
+    const uint32_t *function_entries;
+    /* What is embedded beside the image. */
+    const AgExtra *extras;
+    /* Entries in `extras`. */
+    uint32_t extra_count;
+};
+_Static_assert(offsetof(AgGame, abi) == 0, "AgGame.abi moved");
+_Static_assert(offsetof(AgGame, image_size) == 4, "AgGame.image_size moved");
+_Static_assert(offsetof(AgGame, image) == 8, "AgGame.image moved");
+_Static_assert(offsetof(AgGame, sha1) == 16, "AgGame.sha1 moved");
+_Static_assert(offsetof(AgGame, title) == 40, "AgGame.title moved");
+_Static_assert(offsetof(AgGame, table) == 48, "AgGame.table moved");
+_Static_assert(offsetof(AgGame, table_size) == 56, "AgGame.table_size moved");
+_Static_assert(offsetof(AgGame, steps_size) == 60, "AgGame.steps_size moved");
+_Static_assert(offsetof(AgGame, steps) == 64, "AgGame.steps moved");
+_Static_assert(offsetof(AgGame, step_entry) == 72, "AgGame.step_entry moved");
+_Static_assert(offsetof(AgGame, interrupt) == 80, "AgGame.interrupt moved");
+_Static_assert(offsetof(AgGame, vector_handlers) == 88, "AgGame.vector_handlers moved");
+_Static_assert(offsetof(AgGame, vector_handler_count) == 96, "AgGame.vector_handler_count moved");
+_Static_assert(offsetof(AgGame, function_entry_count) == 100, "AgGame.function_entry_count moved");
+_Static_assert(offsetof(AgGame, function_entries) == 104, "AgGame.function_entries moved");
+_Static_assert(offsetof(AgGame, extras) == 112, "AgGame.extras moved");
+_Static_assert(offsetof(AgGame, extra_count) == 120, "AgGame.extra_count moved");
+_Static_assert(sizeof(AgGame) == 128, "AgGame changed size");
 
 /* Reads a byte outside the inline fast path; `address` has 24 bits. */
 uint32_t ag_read8(AgState *state, uint32_t address);

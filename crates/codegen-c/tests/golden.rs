@@ -240,6 +240,7 @@ fn test_golden_stepped_instructions() {
     });
     let output = Output {
         files,
+        table_rows: 0,
         stepped: None,
     };
     compile(&output, &scratch("stepped"), Optimization::Debug);
@@ -311,6 +312,7 @@ fn test_compile_check_rejects_warnings() {
             name: "warning.c".to_owned(),
             text: "int unused_variable(void)\n{\n    int x;\n    return 0;\n}\n".to_owned(),
         }],
+        table_rows: 0,
         stepped: None,
     };
     compile(&output, &scratch("warning"), Optimization::Debug);

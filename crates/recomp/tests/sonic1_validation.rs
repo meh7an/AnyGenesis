@@ -16,7 +16,7 @@ use std::path::Path;
 use anygenesis_analysis::{Analysis, EntryKind, Suggestion, analyze};
 use anygenesis_m68k::{Dialect, Ea, FormatOptions, Instruction, Labels, Mnemonic, Operand};
 use anygenesis_rom::Rom;
-use anygenesis_shared::{Address, Size};
+use anygenesis_shared::{Address, ROM_MARKER, Size};
 
 use listing::{Coverage, ListedInstruction, Listing};
 
@@ -47,7 +47,8 @@ fn test_sonic1_discovery_matches_s1disasm_listing() {
 
     let validation = Validation::run(rom.bytes(), &analysis, &listing);
     let report_path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("s1-validation-report.md");
-    std::fs::write(&report_path, validation.report(&analysis, &listing)).expect("report written");
+    let report = format!("{ROM_MARKER}\n\n{}", validation.report(&analysis, &listing));
+    std::fs::write(&report_path, report).expect("report written");
     println!("report                  {}", report_path.display());
     for (name, value) in validation.summary() {
         println!("{name:<24}{value}");

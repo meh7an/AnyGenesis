@@ -5,13 +5,14 @@ edition = "2024"
 publish = false
 
 [[bin]]
-name = "anygenesis"
+name = "anygenesis-game"
 path = "src/main.rs"
 
 [dependencies]
 anygenesis-abi = { version = "0.1.0", path = "../abi" }
 anygenesis-framediff = { version = "0.1.0", path = "../framediff" }
 anygenesis-frontend = { version = "0.1.0", path = "../frontend" }
+anygenesis-player = { version = "0.1.0", path = "../player" }
 anygenesis-rom = { version = "0.1.0", path = "../rom" }
 anygenesis-runtime = { version = "0.1.0", path = "../runtime", default-features = false }
 anyhow = "1.0.104"
