@@ -10,6 +10,19 @@ unsafe extern "C" {
     fn ag_ymfm_write(chip: *mut c_void, offset: u32, data: u8);
     fn ag_ymfm_read_status(chip: *mut c_void) -> u8;
     fn ag_ymfm_generate(chip: *mut c_void, out: *mut i32, count: u32);
+    fn ag_ymfm_generate_channels(chip: *mut c_void, levels: *mut i32);
+    fn ag_ymfm_operator(chip: *mut c_void, index: u32, out: *mut u32);
+}
+
+/// One operator's state, for finding where two renders part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Operator {
+    /// The envelope's 10-bit attenuation.
+    pub attenuation: u32,
+    /// ymfm's envelope state: 1 attack, 2 decay, 3 sustain, 4 release.
+    pub state: u32,
+    /// The phase's top 10 bits.
+    pub phase: u32,
 }
 
 /// One YM2612, reset.
@@ -53,6 +66,28 @@ impl Ym2612 {
         let count = u32::try_from(out.len() / 2).expect("fewer than 2^32 samples");
         // SAFETY: `out` holds 2 * count values; `chip` is live until Drop.
         unsafe { ag_ymfm_generate(self.chip, out.as_mut_ptr(), count) }
+    }
+
+    /// Renders one sample as each channel's 9-bit level, before ymfm's mix: `[left, right]`
+    /// per channel; channel 6 is the DAC while it is on.
+    pub fn generate_channels(&mut self) -> [[i32; 2]; 6] {
+        let mut levels = [0; 12];
+        // SAFETY: `levels` holds the 12 values the shim writes; `chip` is live until Drop.
+        unsafe { ag_ymfm_generate_channels(self.chip, levels.as_mut_ptr()) };
+        std::array::from_fn(|channel| [levels[2 * channel], levels[2 * channel + 1]])
+    }
+
+    /// Operator `index` (0-23, ymfm's order) as it is now.
+    pub fn operator(&self, index: u32) -> Operator {
+        assert!(index < 24, "the YM2612 has 24 operators");
+        let mut out = [0; 3];
+        // SAFETY: `out` holds the 3 values the shim writes; `index` is in range.
+        unsafe { ag_ymfm_operator(self.chip, index, out.as_mut_ptr()) };
+        Operator {
+            attenuation: out[0],
+            state: out[1],
+            phase: out[2],
+        }
     }
 }
 

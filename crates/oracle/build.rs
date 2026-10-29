@@ -58,7 +58,10 @@ fn main() {
 }
 
 /// Compiles the vendored ymfm's YM2612 and the C shim as C++14: the OPN translation unit
-/// with the SSG and ADPCM parts it defines classes for.
+/// with the SSG and ADPCM parts it defines classes for. Unoptimised: the shim calls ymfm's
+/// FM engine templates (`fm_engine_base::output` and the register members it uses), which
+/// ymfm_opn.cpp instantiates only implicitly, and an optimising GCC or clang build inlines
+/// them all without keeping a copy to link to.
 fn build_ymfm(manifest_dir: &Path) {
     let ymfm = manifest_dir.join("../../vendor/ymfm/src");
     let shim = manifest_dir.join("csrc/ymfm_shim.cpp");
@@ -74,6 +77,7 @@ fn build_ymfm(manifest_dir: &Path) {
             shim,
         ])
         .include(&ymfm)
+        .opt_level(0)
         // Vendored code stays unmodified, so its warnings are not ours to fix.
         .warnings(false)
         .compile("ymfm");

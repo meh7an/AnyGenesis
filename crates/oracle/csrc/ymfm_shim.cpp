@@ -43,9 +43,45 @@ private:
     int32_t m_busy = 0;
 };
 
+// The YM2612 with what its generate() works from in reach: each channel's level before
+// the mix, and its operators' state.
+class Probe : public ymfm::ym2612 {
+public:
+    explicit Probe(ymfm::ymfm_interface &host) : ymfm::ym2612(host) {}
+
+    // Clocks the chip one sample, as generate() does, and writes each channel's 9-bit
+    // level per side to `levels` (channel-major, left then right); channel 6 is the DAC
+    // while it is on, 0 on a side its panning turns off.
+    void generate_channels(int32_t *levels) {
+        m_fm.clock(fm_engine::ALL_CHANNELS);
+        // Like generate(), channel 6's FM is not worked out while the DAC is on: working it
+        // out moves its feedback on.
+        uint32_t const fm_channels = m_dac_enable ? 5 : 6;
+        for (uint32_t chan = 0; chan < fm_channels; chan++) {
+            output_data temp;
+            m_fm.output(temp.clear(), 5, 256, 1 << chan);
+            levels[2 * chan] = temp.data[0];
+            levels[2 * chan + 1] = temp.data[1];
+        }
+        if (m_dac_enable) {
+            int32_t dac = int16_t(m_dac_data << 7) >> 7;
+            levels[10] = m_fm.regs().ch_output_0(0x102) ? dac : 0;
+            levels[11] = m_fm.regs().ch_output_1(0x102) ? dac : 0;
+        }
+    }
+
+    // Operator `index`'s envelope attenuation, envelope state and phase (top 10 bits).
+    void operator_state(uint32_t index, uint32_t *state) const {
+        auto *op = m_fm.debug_operator(index);
+        state[0] = op->debug_eg_attenuation();
+        state[1] = static_cast<uint32_t>(op->debug_eg_state());
+        state[2] = op->phase();
+    }
+};
+
 struct Chip {
     Host host;
-    ymfm::ym2612 chip;
+    Probe chip;
 
     Chip() : chip(host) { chip.reset(); }
 };
@@ -76,6 +112,18 @@ void ag_ymfm_generate(void *chip, int32_t *out, uint32_t count) {
         out[2 * index + 1] = output.data[1];
         state->host.advance(SAMPLE_CLOCKS);
     }
+}
+
+// Writes one sample's 12 channel levels to `levels` (see Probe::generate_channels).
+void ag_ymfm_generate_channels(void *chip, int32_t *levels) {
+    Chip *state = static_cast<Chip *>(chip);
+    state->chip.generate_channels(levels);
+    state->host.advance(SAMPLE_CLOCKS);
+}
+
+// Writes operator `index`'s attenuation, envelope state and phase to `out`.
+void ag_ymfm_operator(void *chip, uint32_t index, uint32_t *out) {
+    static_cast<Chip *>(chip)->chip.operator_state(index, out);
 }
 
 } // extern "C"

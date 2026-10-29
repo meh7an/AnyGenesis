@@ -1,9 +1,14 @@
 //! The chip's sound: its register file as the game wrote it, and one stereo output per
-//! output period. It plays outside the emulation, from the writes the game made, so nothing
-//! in a run depends on it.
+//! output period, the FM channels' and the DAC's in channel 6's place. It plays outside the
+//! emulation, from the writes the game made, so nothing in a run depends on it.
 //!
-//! FM synthesis is not built yet, so channels 1-6 put out 0; the DAC, when on, takes
-//! channel 6's place.
+//! Key on ($28): bits 0-1 the channel in the part bit 2 picks (3 is none), bits 4-7
+//! operators 1-4 (YM2608 manual 2-1, Plutiedev); a key takes effect at the next output
+//! period, with the registers as they are then [O]. CSM: while channel 3's mode bits are
+//! 10, an overflow of timer A sets a key-on flag that the next output period takes and
+//! clears, keying all of channel 3's operators on beside their own keys (Nemesis's hardware
+//! tests, t=386 p=5650 and p=7967); this half keeps its own copy of the timers, fed the
+//! same writes, to know when.
 //!
 //! Sources: $2A an unsigned 8-bit sample, $2B bit 7 the DAC in place of channel 6
 //! (Plutiedev, md.railgun.works); $2C bit 3 the DAC's ninth, lowest bit (Sauraen on
@@ -15,10 +20,13 @@
 //! reset line does the same is assumed [U] (Snake recalls it not clearing things). ymfm
 //! starts its DAC at the centre rather than at sample 0.
 
-use crate::registers::{DAC_DATA, DAC_ENABLE, PAN, TEST};
-
-/// FM channels: three per part.
-pub const CHANNELS: usize = 6;
+use crate::{
+    fm::{CHANNELS, Fm, OPERATORS},
+    registers::{
+        DAC_DATA, DAC_ENABLE, DETUNE_MULTIPLE, KEY_ON, PAN, Registers, TEST, TIMER_CONTROL,
+    },
+    timer::Timers,
+};
 
 /// Register $2B's bit that turns the DAC on.
 const DAC_ON: u8 = 0x80;
@@ -29,6 +37,10 @@ const LEFT: u8 = 0x80;
 const RIGHT: u8 = 0x40;
 /// The panning registers after a reset: both sides on.
 const PAN_RESET: u8 = LEFT | RIGHT;
+/// Channel 3's mode bits in $27 for CSM.
+const CSM_MODE: u8 = 0x80;
+/// The channel CSM keys.
+const CSM_CHANNEL: usize = 2;
 
 /// One output period: each channel's 9-bit signed level on the left and right.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -36,45 +48,127 @@ pub struct Output {
     pub channels: [[i16; 2]; CHANNELS],
 }
 
-/// The register file of both parts.
+impl Output {
+    /// The channels added up on each side through the chip's DAC, whose two halves do not
+    /// meet at 0 (the "ladder effect"): a level of 0 or above comes out 4 higher, one below 0
+    /// 3 lower, so even silence is 4 per channel. The offsets are ymfm's model [O]; testers
+    /// only describe the step at 0 as 3-4 times the others (GManiac and Sauraen, t=386
+    /// start=795).
+    pub fn sides(&self) -> [i32; 2] {
+        [0, 1].map(|side| {
+            self.channels
+                .iter()
+                .map(|levels| {
+                    let level = i32::from(levels[side]);
+                    if level < 0 { level - 3 } else { level + 4 }
+                })
+                .sum()
+        })
+    }
+}
+
+/// The chip's sound half.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ym2612 {
-    registers: [[u8; 256]; 2],
+    registers: Registers,
+    fm: Fm,
+    /// Each operator's key as $28 last set it.
+    keys: [[bool; OPERATORS]; CHANNELS],
+    /// CSM keys channel 3 on in the next output period.
+    csm: bool,
+    timers: Timers,
+    /// Output periods since power-on, the timers' ticks.
+    periods: u64,
 }
 
 impl Default for Ym2612 {
     fn default() -> Self {
-        let mut chip = Self {
-            registers: [[0; 256]; 2],
-        };
-        chip.reset();
-        chip
+        Self {
+            registers: Registers::new(PAN_RESET),
+            fm: Fm::default(),
+            keys: [[false; OPERATORS]; CHANNELS],
+            csm: false,
+            timers: Timers::default(),
+            periods: 0,
+        }
     }
 }
 
 impl Ym2612 {
-    /// Every register back to its power-on value.
+    /// Every register and the synthesis back to power-on; time goes on, and so does the
+    /// envelope clock (ymfm's reset leaves it; no document says what the reset line does to
+    /// it) [O].
     pub fn reset(&mut self) {
-        self.registers = [[0; 256]; 2];
-        for part in &mut self.registers {
-            part[usize::from(PAN)..usize::from(PAN) + 3].fill(PAN_RESET);
-        }
+        let mut fm = std::mem::take(&mut self.fm);
+        fm.reset();
+        *self = Self {
+            fm,
+            periods: self.periods,
+            ..Self::default()
+        };
     }
 
     /// A data write to `register` of `part` (1 or 2).
     pub fn write(&mut self, part: u8, register: u8, value: u8) {
-        self.registers[usize::from(part - 1)][usize::from(register)] = value;
+        self.take_csm();
+        self.registers.write(part, register, value);
+        // The operators' parameters come from the channel 3 mode and registers $30 up.
+        if register >= DETUNE_MULTIPLE || register == TIMER_CONTROL {
+            self.fm.invalidate();
+        }
+        if part != 1 {
+            return;
+        }
+        self.timers.write(register, value, self.periods);
+        if register == KEY_ON {
+            self.key(value);
+        }
+    }
+
+    /// Operator `operator` (0-3, operators 1-4) of channel `channel` (0-5) as its attenuation,
+    /// its envelope's phase and its phase's top 10 bits, for finding where two renders part.
+    #[doc(hidden)]
+    pub fn operator_state(&self, channel: usize, operator: usize) -> (u16, String, u32) {
+        let (attenuation, envelope, phase) = self.fm.operator(channel, operator).state();
+        (attenuation, format!("{envelope:?}"), phase)
     }
 
     /// The output of the next period.
     pub fn sample(&mut self) -> Output {
-        let mut output = Output::default();
-        if self.register(1, DAC_ENABLE) & DAC_ON != 0 {
-            let dac = self.dac();
-            let pan = self.register(2, PAN + 2);
-            output.channels[CHANNELS - 1] = [side(pan, LEFT, dac), side(pan, RIGHT, dac)];
+        self.take_csm();
+        let mut keys = self.keys;
+        if std::mem::take(&mut self.csm) {
+            keys[CSM_CHANNEL] = [true; OPERATORS];
         }
+        let dac = self.register(1, DAC_ENABLE) & DAC_ON != 0;
+        let mut output = Output {
+            channels: self.fm.sample(&self.registers, &keys, dac),
+        };
+        if dac {
+            let level = self.dac();
+            let pan = self.register(2, PAN + 2);
+            output.channels[CHANNELS - 1] = [side(pan, LEFT, level), side(pan, RIGHT, level)];
+        }
+        self.periods += 1;
         output
+    }
+
+    /// $28: sets the keys of the channel it names.
+    fn key(&mut self, value: u8) {
+        let channel = match value & 0x07 {
+            low @ 0..=2 => usize::from(low),
+            high @ 4..=6 => usize::from(high) - 1,
+            _ => return,
+        };
+        self.keys[channel] = std::array::from_fn(|operator| value >> (4 + operator) & 1 != 0);
+    }
+
+    /// Notes a timer A overflow by now while CSM is on.
+    fn take_csm(&mut self) {
+        let mode = self.register(1, TIMER_CONTROL) & 0xC0;
+        if self.timers.take_overflow_a(self.periods) && mode == CSM_MODE {
+            self.csm = true;
+        }
     }
 
     /// The DAC's 9-bit signed level: the sample, offset so $80 is 0, above the low bit.
@@ -85,7 +179,7 @@ impl Ym2612 {
     }
 
     fn register(&self, part: u8, register: u8) -> u8 {
-        self.registers[usize::from(part - 1)][usize::from(register)]
+        self.registers.get(part, register)
     }
 }
 

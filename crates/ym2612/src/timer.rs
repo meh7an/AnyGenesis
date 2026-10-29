@@ -89,6 +89,14 @@ impl Timers {
         }
     }
 
+    /// Whether timer A overflowed after the last call and by `tick`, taking the overflows up
+    /// to `tick` into the flags.
+    pub fn take_overflow_a(&mut self, tick: u64) -> bool {
+        let overflowed = self.next_a.is_some_and(|next| next <= tick);
+        self.advance(tick);
+        overflowed
+    }
+
     fn write_control(&mut self, value: u8, tick: u64) {
         for bits in [A, B] {
             if value & bits.reset != 0 {

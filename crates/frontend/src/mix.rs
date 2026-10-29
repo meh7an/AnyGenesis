@@ -3,7 +3,8 @@
 //! stereo sample at [`SAMPLE_RATE`]: the YM2612's output for that period, which sees every
 //! write made before the period ends (as the chip computes a period's output once), plus
 //! the PSG averaged over the period (the area under its output, so a level that lasts part
-//! of a period counts for that part).
+//! of a period counts for that part). A high-pass at [`HIGH_PASS_HZ`] then takes out the
+//! constant the YM2612's DAC adds even in silence, as the console's output capacitors do.
 //!
 //! The chips sit outside the emulation: they only take the writes the run has made, and
 //! nothing in the run reads them, so sound cannot change what the run does.
@@ -23,9 +24,12 @@ pub const SAMPLE_RATE: i32 = (MASTER_CLOCK_HZ / SAMPLE_CLOCKS) as i32;
 /// Master clocks per PSG step: the PSG's clock is the master clock divided by 15.
 const PSG_STEP_CLOCKS: u64 = 15 * anygenesis_psg::STEP_CLOCKS;
 
-/// Full scale per YM2612 level unit: all six channels at their loudest, 9-bit levels of
-/// up to 256, reach full scale.
-const YM_GAIN: f32 = 1.0 / (YM_CHANNELS as f32 * 256.0);
+/// The loudest a YM2612 channel comes out of its DAC: a 9-bit level of 256 and the DAC's
+/// offset of 4 (see [`Output::sides`]).
+const YM_LOUDEST: f32 = 260.0;
+
+/// Full scale per YM2612 level unit: all six channels at their loudest reach full scale.
+const YM_GAIN: f32 = 1.0 / (YM_CHANNELS as f32 * YM_LOUDEST);
 
 /// Full scale per PSG level unit: all four channels at their loudest match one YM2612
 /// channel at its loudest. The official balance is not public; hardware owners put the PSG
@@ -33,8 +37,18 @@ const YM_GAIN: f32 = 1.0 / (YM_CHANNELS as f32 * 256.0);
 /// tuned by ear.
 const PSG_GAIN: f32 = 1.0 / (4.0 * YM_CHANNELS as f32);
 
+/// The output high-pass's corner. The console's own is not documented; this one only has to
+/// remove a constant and stay below anything audible [U].
+const HIGH_PASS_HZ: f64 = 5.0;
+
+/// The one-pole high-pass's feedback for [`HIGH_PASS_HZ`] at [`SAMPLE_RATE`]: e^(-2 pi f /
+/// rate).
+fn high_pass_pole() -> f32 {
+    (-2.0 * std::f64::consts::PI * HIGH_PASS_HZ / f64::from(SAMPLE_RATE)).exp() as f32
+}
+
 /// The sound chips and how far they have played.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Mixer {
     psg: Psg,
     ym: Ym2612,
@@ -42,6 +56,50 @@ pub struct Mixer {
     clock: u64,
     /// The PSG's output since the current sample began, times master clocks.
     area: f64,
+    high_pass: HighPass,
+}
+
+impl Default for Mixer {
+    fn default() -> Self {
+        let ym = Ym2612::default();
+        // The high-pass starts settled on the chips' silence, so sound starts without a step.
+        let silence = ym_sides(&Output::default());
+        Self {
+            psg: Psg::default(),
+            ym,
+            clock: 0,
+            area: 0.0,
+            high_pass: HighPass::settled(silence),
+        }
+    }
+}
+
+/// A one-pole high-pass per side: `y = x - x' + pole * y'`.
+#[derive(Debug, Clone, Copy)]
+struct HighPass {
+    pole: f32,
+    input: [f32; CHANNELS],
+    output: [f32; CHANNELS],
+}
+
+impl HighPass {
+    /// A high-pass that has had `level` on each side for ever.
+    fn settled(level: [f32; CHANNELS]) -> Self {
+        Self {
+            pole: high_pass_pole(),
+            input: level,
+            output: [0.0; CHANNELS],
+        }
+    }
+
+    fn filter(&mut self, sample: [f32; CHANNELS]) -> [f32; CHANNELS] {
+        let pole = self.pole;
+        for ((output, input), sample) in self.output.iter_mut().zip(&mut self.input).zip(sample) {
+            *output = sample - *input + pole * *output;
+            *input = sample;
+        }
+        self.output
+    }
 }
 
 impl Mixer {
@@ -71,7 +129,7 @@ impl Mixer {
             if end == sample {
                 let psg = (self.area / SAMPLE_CLOCKS as f64) as f32 * PSG_GAIN;
                 let ym = ym_sides(&self.ym.sample());
-                out.extend(ym.map(|side| side + psg));
+                out.extend(self.high_pass.filter(ym.map(|side| side + psg)));
                 self.area = 0.0;
             }
             if end == step {
@@ -81,16 +139,9 @@ impl Mixer {
     }
 }
 
-/// The YM2612's channels added up on each side, scaled to full scale.
+/// The YM2612's channels out of its DAC on each side, scaled to full scale.
 fn ym_sides(output: &Output) -> [f32; CHANNELS] {
-    [0, 1].map(|side| {
-        let sum: i32 = output
-            .channels
-            .iter()
-            .map(|levels| i32::from(levels[side]))
-            .sum();
-        sum as f32 * YM_GAIN
-    })
+    output.sides().map(|sum| sum as f32 * YM_GAIN)
 }
 
 /// The first multiple of `period` after `clock`.
@@ -187,9 +238,25 @@ mod tests {
         );
         let full = mixer.psg.output() * PSG_GAIN;
         assert_ne!(full, 0.0);
-        assert!((out[2] - full * 0.75).abs() < 1e-6, "{} vs {full}", out[2]);
-        assert!((out[4] - full).abs() < 1e-6, "{} vs {full}", out[4]);
+        let silence = ym_sides(&Output::default());
+        let raw = [0.0, 0.75 * full, full].map(|psg| silence.map(|side| side + psg));
+        assert_eq!(out, through_high_pass(&raw));
         assert_eq!(out[2], out[3], "both channels");
+    }
+
+    /// `raw` stereo samples through a fresh mixer's high-pass.
+    fn through_high_pass(raw: &[[f32; CHANNELS]]) -> Vec<f32> {
+        let mut high_pass = Mixer::default().high_pass;
+        raw.iter()
+            .flat_map(|&sample| high_pass.filter(sample))
+            .collect()
+    }
+
+    /// The YM2612's sides with only channel 6 playing, at `levels`.
+    fn channel_6(levels: [i16; CHANNELS]) -> [f32; CHANNELS] {
+        let mut output = Output::default();
+        output.channels[YM_CHANNELS - 1] = levels;
+        ym_sides(&output)
     }
 
     fn ym(clock: u64, part: u8, register: u8, value: u8) -> SoundWrite {
@@ -213,10 +280,8 @@ mod tests {
         ];
         let mut out = Vec::new();
         mixer.play(&writes, SAMPLE_CLOCKS * 3, &mut out);
-        let level = |dac: f32| dac * YM_GAIN;
-        assert_eq!(out[..2], [level(128.0); 2]);
-        assert_eq!(out[2..4], [level(-128.0), 0.0]);
-        assert_eq!(out[4..6], [level(-128.0), 0.0]);
+        let raw = [[128, 128], [-128, 0], [-128, 0]].map(channel_6);
+        assert_eq!(out, through_high_pass(&raw));
     }
 
     #[test]
@@ -227,14 +292,22 @@ mod tests {
         let writes = [ym(0, 1, 0x2B, 0x80), ym(0, 1, 0x2A, 0xFF), reset];
         let mut out = Vec::new();
         mixer.play(&writes, SAMPLE_CLOCKS * 2, &mut out);
-        assert_ne!(out[0], 0.0);
-        assert_eq!(out[2..4], [0.0; 2]);
+        let raw = [channel_6([254, 254]), ym_sides(&Output::default())];
+        assert_eq!(out, through_high_pass(&raw));
+    }
+
+    #[test]
+    fn test_high_pass_takes_a_constant_out_and_passes_a_step() {
+        let mut high_pass = HighPass::settled([0.0; CHANNELS]);
+        assert_eq!(high_pass.filter([0.5, -0.5]), [0.5, -0.5]);
+        let settled = (0..SAMPLE_RATE).fold([0.0; CHANNELS], |_, _| high_pass.filter([0.5, -0.5]));
+        assert!(settled.iter().all(|side| side.abs() < 1e-6), "{settled:?}");
     }
 
     #[test]
     fn test_gains_put_six_ym2612_channels_at_full_scale_and_the_psg_at_one() {
-        assert_eq!(YM_GAIN * 256.0 * YM_CHANNELS as f32, 1.0);
-        assert_eq!(PSG_GAIN * 4.0, YM_GAIN * 256.0);
+        assert_eq!(YM_GAIN * YM_LOUDEST * YM_CHANNELS as f32, 1.0);
+        assert_eq!(PSG_GAIN * 4.0, YM_GAIN * YM_LOUDEST);
     }
 
     #[test]
