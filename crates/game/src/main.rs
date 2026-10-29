@@ -41,7 +41,10 @@ mod tests {
 
     /// Sega Retro, "Sonic the Hedgehog (Mega Drive)/Technical information", Revision 00.
     const SONIC1_REV00_SHA1: &str = "6ddb7de1e17e7f6cdb88927bd906352030daa194";
-    /// The game mode byte in work RAM, and its values on the title screen and in a level.
+    /// Sega Retro, "Sonic the Hedgehog 2 (Mega Drive)", Revision 01.
+    const SONIC2_REV01_SHA1: &str = "8bca5dcef1af3e00098666fd892dc1c2a76333f9";
+    /// The game mode byte in work RAM, and its values on the title screen and in a level;
+    /// both games keep them there (Sonic 2's read from its frame diff with the reference).
     const GAME_MODE: u32 = 0xFF_F600;
     const TITLE_MODE: u8 = 0x04;
     const LEVEL_MODE: u8 = 0x0C;
@@ -93,17 +96,26 @@ mod tests {
         registers
     }
 
-    /// The translated game, which must be Sonic 1 REV00, and the ROM image it carries.
-    fn sonic1() -> (Game, Rom) {
+    /// The translated game, which must be the ROM with SHA-1 `sha1` (`name`), and the ROM
+    /// image it carries.
+    fn translated(sha1: &str, name: &str) -> (Game, Rom) {
         let table = game::table().expect("the game crate was built with ANYGENESIS_ROM set");
         let game = Game::from_table(table).expect("the game table checks out");
         assert_eq!(
             game.sha1.to_string(),
-            SONIC1_REV00_SHA1,
-            "these tests need a build of Sonic 1 REV00"
+            sha1,
+            "these tests need a build of {name}"
         );
         let rom = game.rom().expect("the embedded image loads");
         (game, rom)
+    }
+
+    fn sonic1() -> (Game, Rom) {
+        translated(SONIC1_REV00_SHA1, "Sonic 1 REV00")
+    }
+
+    fn sonic2() -> (Game, Rom) {
+        translated(SONIC2_REV01_SHA1, "Sonic 2 REV01")
     }
 
     /// The game mode byte at the end of the run `report` describes.
@@ -448,5 +460,55 @@ mod tests {
                 .expect("the stops read back");
         assert!(stops.passed(), "{stops}");
         assert_eq!(game_mode(&replayed), LEVEL_MODE);
+    }
+
+    /// Frames from reset to Sonic 2's idle title screen menu (stop 900 ends frame 1104).
+    const SONIC2_TITLE_FRAMES: u64 = 1_100;
+    /// Sonic 2 from boot to its first level, in the frame diff's input format: Start held for
+    /// ten vertical interrupts on the title screen menu, then right held in the level. The
+    /// frame diff against the reference (v0.2 M4.2) runs this input.
+    const SONIC2_TO_LEVEL: &str = "900 S\n910 -\n1250 R\n";
+    /// Frames the run to the level lasts.
+    const SONIC2_LEVEL_FRAMES: u64 = 2_000;
+
+    /// Runs Sonic 2 from reset for `frames` frames on the reference console with `input`,
+    /// and checks that it ran them all on native code alone, nothing taken late or logged.
+    fn sonic2_run(frames: u64, input: &str) -> Report {
+        let (game, rom) = sonic2();
+        let trace = Trace {
+            pad: PadSource::Replay(Input::parse(input).expect("the input is valid")),
+            ..Trace::default()
+        };
+        let report = run_from_reset(game, rom, frames, &[], trace, true).expect("the run finishes");
+        report.print();
+        assert!(
+            matches!(report.exit, Exit::Frames { .. }),
+            "{}",
+            report.exit
+        );
+        assert_eq!(report.frames, frames);
+        assert_eq!(report.late, 0);
+        assert!(report.misses.is_empty(), "{:?}", report.misses);
+        assert!(report.accesses.is_empty(), "{:?}", report.accesses);
+        assert_eq!(report.unwinds, 0);
+        assert!(report.tmss_unlocked);
+        assert!(report.z80_bytes > 0);
+        report
+    }
+
+    /// Sonic 2 boots to its title screen with nothing written for it.
+    #[test]
+    #[ignore = "needs a build with ANYGENESIS_ROM set to Sonic 2 REV01"]
+    fn test_sonic2_runs_to_the_title_screen_without_misses() {
+        let report = sonic2_run(SONIC2_TITLE_FRAMES, "");
+        assert_eq!(game_mode(&report), TITLE_MODE);
+    }
+
+    /// Pressing Start on Sonic 2's title screen menu reaches the first level.
+    #[test]
+    #[ignore = "needs a build with ANYGENESIS_ROM set to Sonic 2 REV01"]
+    fn test_sonic2_title_screen_accepts_start() {
+        let report = sonic2_run(SONIC2_LEVEL_FRAMES, SONIC2_TO_LEVEL);
+        assert_eq!(game_mode(&report), LEVEL_MODE);
     }
 }

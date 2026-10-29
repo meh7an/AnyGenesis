@@ -25,8 +25,10 @@ fn test_every_mask_file_parses() {
 }
 
 #[test]
-fn test_sonic1_masks_are_the_two_stacked_pc_bytes() {
-    let masks =
-        Masks::load(&masks_folder().join("sonic1.toml")).unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(masks.masks().len(), 2);
+fn test_sonic_masks_are_the_two_stacked_pc_bytes() {
+    for file in ["sonic1.toml", "sonic2.toml"] {
+        let masks =
+            Masks::load(&masks_folder().join(file)).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(masks.masks().len(), 2, "{file}");
+    }
 }

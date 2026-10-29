@@ -1,0 +1,21 @@
+# Sonic the Hedgehog 2 (REV01): the frame diff's masks against the reference emulator, signed
+# off by Mehran on 2026-10-30 (v0.2 M4.2, option A). The run from boot to Emerald Hill Zone
+# Act 1 pairs every stop one to one; the stops these masks leave are signed off in the plan,
+# not masked: the stack below SP and the interrupted call chain, and live buffers mid-work
+# at the SEGA screen and in level loading, all where the vertical interrupt lands. Work RAM
+# by 68000 address, end exclusive.
+
+[[mask]]
+region = "ram"
+start = 0xFFFDF3
+end = 0xFFFDF4
+reason = """the low byte of the PC stacked by the vertical interrupt, frame at SP $FFFDEE \
+(at SP $FFFDF2 this is the stacked SR's low byte). Idle stops interrupt the loop that waits \
+for the interrupt at $003388 or $00338C, so this byte is $88 or $8C: the loop's phase when the \
+interrupt comes, which needs each frame's work to be cycle exact, as in Sonic 1"""
+
+[[mask]]
+region = "ram"
+start = 0xFFFDF7
+end = 0xFFFDF8
+reason = """the same stacked PC low byte for the frame at SP $FFFDF2"""
