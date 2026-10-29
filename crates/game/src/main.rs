@@ -48,8 +48,8 @@ mod tests {
     /// The copy of CRAM in work RAM that the vertical interrupt copies to CRAM.
     const PALETTE_COPY: u32 = 0xFF_FB00;
     /// The length and SHA-1 of the WAV file of the first 600 frames' sound, as Mehran
-    /// signed it off after listening (v0.2 M3.3: the PSG only).
-    const SOUND_AT_600: (usize, &str) = (2_132_956, "ff01e996db903ceee8b9f29e0948c8d9417a0717");
+    /// signed it off after listening (v0.2 M3.4: the PSG and the YM2612's DAC).
+    const SOUND_AT_600: (usize, &str) = (2_132_956, "23a7e3fb399f083e927e27f1a57d792e96635485");
     /// The colours the title screen rotates by a step every few frames, in the main loop.
     const CYCLED_COLOURS: Range<usize> = 40..44;
     /// The ROM table of 19 `0x8RVV` words that sets VDP registers 0-18 at boot.

@@ -9,6 +9,7 @@
 
 use anygenesis_abi::{RAM_SIZE, Region, ram_index};
 use anygenesis_shared::{Address, Bus, Size};
+use anygenesis_ym2612::Written;
 
 use crate::{
     hardware::{Hardware, Memory, port},
@@ -16,7 +17,6 @@ use crate::{
     log::{Access, AccessKind, Log},
     sound::{Chip, Cpu, SoundLog, SoundWrite},
     timing::CPU_DIVIDER,
-    ym2612::Written,
     z80::{self, Main, Z80},
 };
 
@@ -452,7 +452,7 @@ impl SystemBus<'_> {
             // Reads without the bus see the open bus.
             None => return self.open_bus(size),
             Some(z80::Target::Ram(index)) => self.devices.z80.read(index),
-            Some(z80::Target::Ym2612(offset)) => self.devices.z80.ym_status(offset, now),
+            Some(z80::Target::Ym2612(_)) => self.devices.z80.ym_status(now),
             Some(_) => Z80_OPEN,
         };
         spread(value, size)
@@ -469,7 +469,7 @@ impl SystemBus<'_> {
             Some(z80::Target::Ram(index)) => self.devices.z80.write(index, byte),
             Some(z80::Target::Ym2612(offset)) => {
                 let written = self.devices.z80.ym_write(offset, byte, now);
-                self.record_ym(written, byte, now, size, address);
+                self.record_ym(written, byte, now);
             }
             Some(z80::Target::Bank) => self.devices.z80.write_bank(byte),
             // Writes without the bus are ignored.
@@ -477,10 +477,9 @@ impl SystemBus<'_> {
         }
     }
 
-    /// Logs a YM2612 write the 68000 made at `clock`, an access of `size` to `address`.
-    fn record_ym(&mut self, written: Written, value: u8, clock: u64, size: Size, address: u32) {
+    /// Logs a YM2612 write the 68000 made at `clock`.
+    fn record_ym(&mut self, written: Written, value: u8, clock: u64) {
         if written.timer {
-            self.note(AccessKind::YmTimer, true, size, address);
             self.devices.sound.timer(Cpu::M68000);
         }
         if let Some((part, register)) = written.data {
@@ -844,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ym2612_reads_busy_for_192_cycles_after_a_data_write() {
+    fn test_ym2612_reads_busy_at_every_port_for_192_cycles_after_a_data_write() {
         let mut fixture = Fixture::new(0);
         let mut bus = fixture.bus();
         take_z80_bus(&mut bus);
@@ -853,7 +852,7 @@ mod tests {
         assert_eq!(bus.read_byte(at(0xA0_4000)), 0);
         // The data write is made at 12, after the two waits before it.
         bus.write_byte(at(0xA0_4001), 0x80);
-        for (address, status) in [(0xA0_4000, 0x80), (0xA0_5FFC, 0x80), (0xA0_4002, 0)] {
+        for (address, status) in [(0xA0_4000, 0x80), (0xA0_5FFF, 0x80), (0xA0_4002, 0x80)] {
             bus.elapsed = 12 + 191;
             assert_eq!(bus.read_byte(at(address)), status, "{address:06X}");
         }
@@ -865,14 +864,21 @@ mod tests {
     }
 
     #[test]
-    fn test_ym2612_timer_runs_are_logged() {
+    fn test_ym2612_timer_a_flags_in_the_status_read_by_the_68000() {
         let mut fixture = Fixture::new(0);
         let mut bus = fixture.bus();
         take_z80_bus(&mut bus);
-        bus.write_byte(at(0xA0_4000), 0x27);
-        bus.write_byte(at(0xA0_4001), 0x00);
-        bus.write_byte(at(0xA0_4001), 0x15);
-        assert_eq!(fixture.logged(), [(AccessKind::YmTimer, true, 0xA0_4001)]);
+        for (register, value) in [(0x24, 0xFF), (0x25, 0x02), (0x27, 0x00), (0x27, 0x15)] {
+            bus.write_byte(at(0xA0_4000), register);
+            bus.write_byte(at(0xA0_4001), value);
+        }
+        // Timer A's two counts end with the second output period from power-on, 144 cycles
+        // each, after the busy flag of the last write has gone.
+        bus.elapsed = 2 * 144 - 1;
+        assert_eq!(bus.read_byte(at(0xA0_4000)), 0);
+        bus.elapsed = 2 * 144;
+        assert_eq!(bus.read_byte(at(0xA0_4000)), 0x01);
+        assert!(fixture.logged().is_empty());
         assert_eq!(fixture.devices.sound.counts().timers, [1, 0]);
     }
 

@@ -1,20 +1,21 @@
 //! The console's sound as samples. The sound chips play the writes the game made at the
-//! master clocks it made them, and their output is averaged over each YM2612 output period,
-//! [`SAMPLE_CLOCKS`], into one stereo sample at [`SAMPLE_RATE`]: the area under the chips'
-//! output, so a level that lasts part of a period counts for that part. The PSG is the only
-//! chip so far; the YM2612 makes one sample per period of its own and joins sample for
-//! sample.
+//! master clocks it made them, and each YM2612 output period, [`SAMPLE_CLOCKS`], becomes one
+//! stereo sample at [`SAMPLE_RATE`]: the YM2612's output for that period, which sees every
+//! write made before the period ends (as the chip computes a period's output once), plus
+//! the PSG averaged over the period (the area under its output, so a level that lasts part
+//! of a period counts for that part).
 //!
 //! The chips sit outside the emulation: they only take the writes the run has made, and
 //! nothing in the run reads them, so sound cannot change what the run does.
 
 use anygenesis_psg::Psg;
 use anygenesis_runtime::{Chip, SoundWrite, timing::MASTER_CLOCK_HZ};
+use anygenesis_ym2612::{CHANNELS as YM_CHANNELS, Output, Ym2612};
 
 use crate::audio::CHANNELS;
 
 /// Master clocks per output sample: 144 YM2612 clocks of 7 master clocks each.
-pub const SAMPLE_CLOCKS: u64 = 1008;
+pub const SAMPLE_CLOCKS: u64 = anygenesis_ym2612::SAMPLE_CLOCKS;
 
 /// Output samples per second: 53,693,175 / 1008 = 53,267.04, rounded.
 pub const SAMPLE_RATE: i32 = (MASTER_CLOCK_HZ / SAMPLE_CLOCKS) as i32;
@@ -22,18 +23,24 @@ pub const SAMPLE_RATE: i32 = (MASTER_CLOCK_HZ / SAMPLE_CLOCKS) as i32;
 /// Master clocks per PSG step: the PSG's clock is the master clock divided by 15.
 const PSG_STEP_CLOCKS: u64 = 15 * anygenesis_psg::STEP_CLOCKS;
 
-/// Full scale per PSG level unit: all four channels at their loudest reach half of full
-/// scale. The balance against the YM2612 is set when it plays (hardware owners put the PSG
-/// at about 1/6 of an emulator's YM2612 channel, research note v0.2-m3.3-research-psg.md).
-const PSG_GAIN: f32 = 0.125;
+/// Full scale per YM2612 level unit: all six channels at their loudest, 9-bit levels of
+/// up to 256, reach full scale.
+const YM_GAIN: f32 = 1.0 / (YM_CHANNELS as f32 * 256.0);
+
+/// Full scale per PSG level unit: all four channels at their loudest match one YM2612
+/// channel at its loudest. The official balance is not public; hardware owners put the PSG
+/// at about 1/6 of an emulator's YM2612 (research note v0.2-m3.3-research-psg.md), to be
+/// tuned by ear.
+const PSG_GAIN: f32 = 1.0 / (4.0 * YM_CHANNELS as f32);
 
 /// The sound chips and how far they have played.
 #[derive(Debug, Clone, Default)]
 pub struct Mixer {
     psg: Psg,
+    ym: Ym2612,
     /// The master clock played to.
     clock: u64,
-    /// The output since the current sample began, times master clocks.
+    /// The PSG's output since the current sample began, times master clocks.
     area: f64,
 }
 
@@ -42,9 +49,13 @@ impl Mixer {
     /// to master clock `until`, adding every sample that ends by then to `out` as
     /// interleaved stereo.
     pub fn play(&mut self, writes: &[SoundWrite], until: u64, out: &mut Vec<f32>) {
-        for write in writes.iter().filter(|write| write.chip == Chip::Psg) {
+        for write in writes {
             self.run(write.clock, out);
-            self.psg.write(write.value);
+            match write.chip {
+                Chip::Psg => self.psg.write(write.value),
+                Chip::Ym2612 { part, register } => self.ym.write(part, register, write.value),
+                Chip::Ym2612Reset => self.ym.reset(),
+            }
         }
         self.run(until, out);
     }
@@ -58,8 +69,9 @@ impl Mixer {
             self.area += f64::from(self.psg.output()) * (end - self.clock) as f64;
             self.clock = end;
             if end == sample {
-                let value = (self.area / SAMPLE_CLOCKS as f64) as f32 * PSG_GAIN;
-                out.extend([value; CHANNELS]);
+                let psg = (self.area / SAMPLE_CLOCKS as f64) as f32 * PSG_GAIN;
+                let ym = ym_sides(&self.ym.sample());
+                out.extend(ym.map(|side| side + psg));
                 self.area = 0.0;
             }
             if end == step {
@@ -67,6 +79,18 @@ impl Mixer {
             }
         }
     }
+}
+
+/// The YM2612's channels added up on each side, scaled to full scale.
+fn ym_sides(output: &Output) -> [f32; CHANNELS] {
+    [0, 1].map(|side| {
+        let sum: i32 = output
+            .channels
+            .iter()
+            .map(|levels| i32::from(levels[side]))
+            .sum();
+        sum as f32 * YM_GAIN
+    })
 }
 
 /// The first multiple of `period` after `clock`.
@@ -168,21 +192,49 @@ mod tests {
         assert_eq!(out[2], out[3], "both channels");
     }
 
+    fn ym(clock: u64, part: u8, register: u8, value: u8) -> SoundWrite {
+        SoundWrite {
+            clock,
+            cpu: Cpu::Z80,
+            chip: Chip::Ym2612 { part, register },
+            value,
+        }
+    }
+
     #[test]
-    fn test_play_ignores_ym2612_writes() {
-        let write = SoundWrite {
-            chip: Chip::Ym2612 {
-                part: 1,
-                register: 0x2A,
-            },
-            ..psg(10, 0x90)
-        };
-        let (mut with, mut without) = (Mixer::default(), Mixer::default());
-        let (mut heard, mut silent) = (Vec::new(), Vec::new());
-        with.play(&[write], SAMPLE_CLOCKS, &mut heard);
-        without.play(&[], SAMPLE_CLOCKS, &mut silent);
-        assert_eq!(with.psg, without.psg);
-        assert_eq!(heard, silent);
+    fn test_play_holds_the_dac_level_a_period_sees_at_its_end() {
+        let mut mixer = Mixer::default();
+        let writes = [
+            ym(0, 1, 0x2B, 0x80),
+            ym(10, 1, 0x2A, 0xFF),
+            ym(SAMPLE_CLOCKS - 1, 1, 0x2A, 0xC0),
+            ym(SAMPLE_CLOCKS, 1, 0x2A, 0x40),
+            ym(SAMPLE_CLOCKS + 1, 2, 0xB6, 0x80),
+        ];
+        let mut out = Vec::new();
+        mixer.play(&writes, SAMPLE_CLOCKS * 3, &mut out);
+        let level = |dac: f32| dac * YM_GAIN;
+        assert_eq!(out[..2], [level(128.0); 2]);
+        assert_eq!(out[2..4], [level(-128.0), 0.0]);
+        assert_eq!(out[4..6], [level(-128.0), 0.0]);
+    }
+
+    #[test]
+    fn test_play_resets_the_ym2612_with_the_reset_line() {
+        let mut mixer = Mixer::default();
+        let mut reset = ym(SAMPLE_CLOCKS, 1, 0, 0);
+        reset.chip = Chip::Ym2612Reset;
+        let writes = [ym(0, 1, 0x2B, 0x80), ym(0, 1, 0x2A, 0xFF), reset];
+        let mut out = Vec::new();
+        mixer.play(&writes, SAMPLE_CLOCKS * 2, &mut out);
+        assert_ne!(out[0], 0.0);
+        assert_eq!(out[2..4], [0.0; 2]);
+    }
+
+    #[test]
+    fn test_gains_put_six_ym2612_channels_at_full_scale_and_the_psg_at_one() {
+        assert_eq!(YM_GAIN * 256.0 * YM_CHANNELS as f32, 1.0);
+        assert_eq!(PSG_GAIN * 4.0, YM_GAIN * 256.0);
     }
 
     #[test]

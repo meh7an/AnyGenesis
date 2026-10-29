@@ -1,9 +1,11 @@
-//! Test-only CPU oracles: the vendored Musashi core and disassembler behind a safe wrapper,
-//! and loaders for the SingleStepTests/m68000 and SingleStepTests/z80 per-instruction vectors.
+//! Test-only oracles: the vendored Musashi core and disassembler behind a safe wrapper,
+//! loaders for the SingleStepTests/m68000 and SingleStepTests/z80 per-instruction vectors,
+//! and the vendored ymfm's YM2612.
 
 pub mod musashi;
 pub mod sst;
 pub mod sst_z80;
+pub mod ymfm;
 
 /// The 68000 programmer-visible registers, in the order SingleStepTests stores them.
 ///

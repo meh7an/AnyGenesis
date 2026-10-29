@@ -426,7 +426,8 @@ fn word(state: &AgState, address: u32) -> u16 {
 }
 
 /// The text of a sound log: a comment line, then one write per line: master clock, CPU,
-/// chip (`ym1`, `ym2` or `psg`), YM2612 register (`-` for the PSG) and value, in hex.
+/// chip (`ym1`, `ym2`, `psg`, or `ymreset` for the YM2612's reset line), YM2612 register
+/// (`-` for the others) and value, in hex.
 pub fn sound_log(writes: &[SoundWrite]) -> String {
     let mut text = String::from("# sound writes: master clock, CPU, chip, register, value\n");
     for write in writes {
@@ -437,6 +438,7 @@ pub fn sound_log(writes: &[SoundWrite]) -> String {
         let (chip, register) = match write.chip {
             Chip::Ym2612 { part, register } => (format!("ym{part}"), format!("{register:02X}")),
             Chip::Psg => ("psg".to_owned(), "-".to_owned()),
+            Chip::Ym2612Reset => ("ymreset".to_owned(), "-".to_owned()),
         };
         // Writing to a String cannot fail.
         let _ = writeln!(

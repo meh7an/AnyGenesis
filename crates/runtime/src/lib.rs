@@ -20,7 +20,6 @@ pub mod refresh;
 pub mod sound;
 pub mod timing;
 pub mod vdp;
-mod ym2612;
 pub mod z80;
 
 pub use externs::{

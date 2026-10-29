@@ -1,6 +1,6 @@
 //! The writes that reach the sound chips, from either CPU: counted always, kept in order
 //! when a run asks for them. The sound chips sit outside the runtime and play these writes
-//! (the frontend's mixer); the YM2612's synthesis comes later.
+//! (the frontend's mixer), with the YM2612's resets among them.
 
 /// The CPU that made a write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +25,9 @@ pub enum Chip {
     Ym2612 { part: u8, register: u8 },
     /// The PSG's one write port.
     Psg,
+    /// The YM2612's reset line, which it shares with the Z80, asserted by the 68000: every
+    /// register goes back to its power-on value. The value is 0.
+    Ym2612Reset,
 }
 
 /// The YM2612 register whose data writes play the DAC channel.
@@ -58,7 +61,7 @@ pub struct SoundCounts {
     /// DAC samples.
     pub dac: [u64; 2],
     pub psg: [u64; 2],
-    /// YM2612 timer loads or enables, which start no timer yet.
+    /// YM2612 timer control writes that load or enable a timer.
     pub timers: [u64; 2],
 }
 
@@ -73,6 +76,7 @@ impl SoundCounts {
                 }
             }
             Chip::Psg => self.psg[cpu] += 1,
+            Chip::Ym2612Reset => {}
         }
     }
 

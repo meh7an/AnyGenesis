@@ -73,6 +73,7 @@ version = "0.1.0"
 dependencies = [
  "anygenesis-psg",
  "anygenesis-runtime",
+ "anygenesis-ym2612",
  "sdl3",
  "serde",
  "thiserror",
@@ -177,6 +178,7 @@ dependencies = [
  "anygenesis-m68k",
  "anygenesis-rom",
  "anygenesis-shared",
+ "anygenesis-ym2612",
  "anygenesis-z80",
 ]
 
@@ -185,6 +187,13 @@ name = "anygenesis-shared"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "anygenesis-ym2612"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-oracle",
 ]
 
 [[package]]

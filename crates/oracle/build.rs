@@ -1,6 +1,6 @@
 //! Builds the vendored Musashi core: compiles and runs its `m68kmake` generator, which writes
 //! the opcode handlers (`m68kops.c`, `m68kops.h`) from `m68k_in.c`, then compiles the core,
-//! its disassembler and the Rust bridge with `cc`.
+//! its disassembler and the Rust bridge with `cc`; then the vendored ymfm with its shim.
 
 use std::{
     env,
@@ -53,6 +53,30 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_FAMILY").is_ok_and(|family| family == "unix") {
         println!("cargo:rustc-link-lib=m");
     }
+
+    build_ymfm(&manifest_dir);
+}
+
+/// Compiles the vendored ymfm's YM2612 and the C shim as C++14: the OPN translation unit
+/// with the SSG and ADPCM parts it defines classes for.
+fn build_ymfm(manifest_dir: &Path) {
+    let ymfm = manifest_dir.join("../../vendor/ymfm/src");
+    let shim = manifest_dir.join("csrc/ymfm_shim.cpp");
+    println!("cargo:rerun-if-changed={}", ymfm.display());
+    println!("cargo:rerun-if-changed={}", shim.display());
+    cc::Build::new()
+        .cpp(true)
+        .std("c++14")
+        .files([
+            ymfm.join("ymfm_opn.cpp"),
+            ymfm.join("ymfm_ssg.cpp"),
+            ymfm.join("ymfm_adpcm.cpp"),
+            shim,
+        ])
+        .include(&ymfm)
+        // Vendored code stays unmodified, so its warnings are not ours to fix.
+        .warnings(false)
+        .compile("ymfm");
 }
 
 /// Compiles `m68kmake` for the host and runs it, writing its output into `out_dir`.

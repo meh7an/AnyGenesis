@@ -28,12 +28,10 @@
 //! Chosen, unverified: a flat 3 T wait and 11-cycle steal per access, and the grant coming
 //! at once when reset releases while the bus is requested.
 
+use anygenesis_ym2612::{Control, Written};
 use anygenesis_z80::{Bus as CoreBus, Z80 as Core};
 
-use crate::{
-    sound::{Chip, Cpu, SoundCounts, SoundLog, SoundWrite},
-    ym2612::{Written, Ym2612},
-};
+use crate::sound::{Chip, Cpu, SoundCounts, SoundLog, SoundWrite};
 
 /// Bytes of Z80 RAM; both CPUs see them twice in the first 16 KiB of the Z80's space.
 pub const RAM_SIZE: usize = 0x2000;
@@ -132,7 +130,7 @@ struct Mark {
     clock: u64,
     cpu: Core,
     bank: u16,
-    ym: Ym2612,
+    ym: Control,
     /// The undo log's position then.
     undo: usize,
     sound: usize,
@@ -153,7 +151,7 @@ pub struct Z80 {
     cpu: Core,
     ram: Box<[u8; RAM_SIZE]>,
     bank: u16,
-    ym: Ym2612,
+    ym: Control,
     requested: bool,
     reset: bool,
     /// Where the standing bus request was granted.
@@ -186,7 +184,7 @@ impl Default for Z80 {
             cpu: Core::default(),
             ram: Box::new([0; RAM_SIZE]),
             bank: 0,
-            ym: Ym2612::default(),
+            ym: Control::default(),
             requested: false,
             reset: true,
             granted: 0,
@@ -268,8 +266,8 @@ impl Z80 {
     }
 
     /// The YM2612's status at `now`, for the 68000 holding the bus.
-    pub(crate) fn ym_status(&self, offset: u32, now: u64) -> u8 {
-        self.ym.status(offset, now)
+    pub(crate) fn ym_status(&self, now: u64) -> u8 {
+        self.ym.status(now)
     }
 
     /// A YM2612 write by the 68000 holding the bus.
@@ -360,9 +358,15 @@ impl Z80 {
         }
         self.reset = true;
         self.cpu.reset();
-        self.ym = Ym2612::default();
+        self.ym = Control::default();
         self.clock = self.clock.max(now);
         self.forget();
+        self.sound.record(SoundWrite {
+            clock: now,
+            cpu: Cpu::M68000,
+            chip: Chip::Ym2612Reset,
+            value: 0,
+        });
         steals
     }
 
@@ -563,7 +567,7 @@ fn record_ym(sound: &mut SoundLog, written: Written, value: u8, clock: u64) {
 struct Trial<'a, M: Main> {
     ram: &'a [u8; RAM_SIZE],
     bank: u16,
-    ym: &'a Ym2612,
+    ym: &'a Control,
     main: &'a M,
     start: u64,
     deferred: &'a mut Vec<Deferred>,
@@ -574,9 +578,7 @@ impl<M: Main> CoreBus for Trial<'_, M> {
     fn read(&mut self, address: u16, at: u32) -> u8 {
         match Reach::of(address, self.bank) {
             Reach::Ram(index) => self.ram[index],
-            Reach::Ym2612(offset) => self
-                .ym
-                .status(offset, self.start + u64::from(at) * CLOCK_DIVIDER),
+            Reach::Ym2612(_) => self.ym.status(self.start + u64::from(at) * CLOCK_DIVIDER),
             Reach::Bank | Reach::Nothing => OPEN,
             Reach::Main(target) => {
                 self.main_at.get_or_insert(at);
@@ -616,7 +618,7 @@ impl<M: Main> CoreBus for Trial<'_, M> {
 struct Attached<'a, M: Main> {
     ram: &'a mut [u8; RAM_SIZE],
     bank: &'a mut u16,
-    ym: &'a mut Ym2612,
+    ym: &'a mut Control,
     sound: &'a mut SoundLog,
     main: &'a mut M,
     cycles: &'a mut Vec<u64>,
@@ -653,7 +655,7 @@ impl<M: Main> CoreBus for Attached<'_, M> {
         self.cycle(at - 1);
         match Reach::of(address, *self.bank) {
             Reach::Ram(index) => self.ram[index],
-            Reach::Ym2612(offset) => self.ym.status(offset, self.clock(at)),
+            Reach::Ym2612(_) => self.ym.status(self.clock(at)),
             Reach::Bank | Reach::Nothing => OPEN,
             Reach::Main(target) => {
                 let clock = self.clock(at);
@@ -899,9 +901,9 @@ mod tests {
         let mut main = Fake::default();
         z80.sync(40 * T, &mut main);
         assert_eq!(z80.sound().counts().dac, [0, 1]);
-        assert_ne!(z80.ym_status(0, 40 * T), 0);
+        assert_ne!(z80.ym_status(40 * T), 0);
         z80.assert_reset(40 * T, &mut main);
-        assert_eq!(z80.ym_status(0, 40 * T), 0);
+        assert_eq!(z80.ym_status(40 * T), 0);
     }
 
     #[test]
