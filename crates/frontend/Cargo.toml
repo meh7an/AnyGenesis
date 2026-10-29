@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+anygenesis-psg = { version = "0.1.0", path = "../psg" }
 anygenesis-runtime = { version = "0.1.0", path = "../runtime", default-features = false }
 sdl3 = { version = "0.20.0", features = ["build-from-source-static"] }
 serde = { version = "1.0.229", features = ["derive"] }

@@ -15,10 +15,14 @@
 //! the window is moved or resized. The run thread keeps its own time ([`pace`]), so a display
 //! that is not at 59.92 Hz repeats or skips a picture now and then. The window shows each
 //! picture by the [`Scaling`] in its [`Settings`], in a window or borderless fullscreen, and
-//! presents with vsync. Sound stays silent.
+//! presents with vsync. Sound ([`audio`]) plays the run's writes to the sound chips
+//! ([`mix`]) at the run's own pace, so a run sounds the same whatever the device; the
+//! [`Settings`] remember whether it is muted.
 
+pub mod audio;
 pub mod controls;
 pub mod input;
+pub mod mix;
 pub mod pace;
 pub mod settings;
 
@@ -56,13 +60,15 @@ use sdl3::{
     video::Window,
 };
 
+use crate::{
+    audio::Sound,
+    controls::{Chord, Hotkey, Modifiers},
+    mix::Mixer,
+    pace::Pacer,
+};
 pub use crate::{
     controls::Controls,
     settings::{Scaling, Settings},
-};
-use crate::{
-    controls::{Chord, Hotkey, Modifiers},
-    pace::Pacer,
 };
 
 /// One NTSC frame: 262 lines of 3420 master clocks, about 16.688 ms (59.92 Hz).
@@ -243,6 +249,16 @@ pub fn run<S, R: Send + 'static>(
         show_fullscreen(&mut canvas, &mouse, true)?;
     }
 
+    let mut settings = config.settings;
+    let sound = Arc::new(Sound::new(settings.muted));
+    // Kept open for the whole run: dropping the stream closes the device.
+    let stream = context
+        .audio()
+        .inspect_err(|error| eprintln!("sound: no audio, running silent: {error}"))
+        .ok()
+        .and_then(|audio| audio::open(&audio, &sound));
+    let playing = stream.is_some().then(|| Arc::clone(&sound));
+
     let shared = Arc::new(Shared::default());
     let worker = {
         let shared = Arc::clone(&shared);
@@ -250,14 +266,13 @@ pub fn run<S, R: Send + 'static>(
             .name("68000".into())
             .stack_size(RUN_STACK)
             .spawn(move || {
-                let (runtime, exit, handed) = run_paced(&mut start, &shared);
+                let (runtime, exit, handed) = run_paced(&mut start, &shared, playing.as_deref());
                 finish(&runtime, exit, handed)
             })
             .map_err(Error::Thread)?
     };
 
     let mut pad: Option<Gamepad> = None;
-    let mut settings = config.settings;
     let mut width = 0;
     let mut paused = false;
     let mut hold = Hold::default();
@@ -319,6 +334,12 @@ pub fn run<S, R: Send + 'static>(
                         break 'window Err(error);
                     }
                 }
+                Some(Hotkey::Mute) => {
+                    settings.muted = !settings.muted;
+                    sound.set_muted(settings.muted);
+                    eprintln!("sound: {}", if settings.muted { "off" } else { "on" });
+                    remember(settings, config.settings_path.as_deref());
+                }
                 None => {}
             }
         }
@@ -332,6 +353,7 @@ pub fn run<S, R: Send + 'static>(
             unfocused: controls.pause_on_focus_loss && !window.has_input_focus(),
         };
         if held != hold || reset {
+            sound.set_held(held.any());
             shared.request(|requests| {
                 requests.hold = held;
                 requests.reset |= reset;
@@ -377,6 +399,13 @@ pub fn run<S, R: Send + 'static>(
     };
     shared.request(|requests| requests.stop = true);
     let result = worker.join().map_err(|_| Error::Panicked)?;
+    if stream.is_some() {
+        eprintln!(
+            "sound: {} underruns, {} samples dropped on a full buffer",
+            sound.underruns(),
+            sound.dropped() / audio::CHANNELS as u64
+        );
+    }
     drawn.map(|()| result)
 }
 
@@ -434,12 +463,22 @@ fn upload(texture: &mut Texture<'_>, picture: &Frame) -> Result<(), Error> {
 /// Runs frame after frame at the NTSC rate, leaving each finished picture in the slot and
 /// taking up the window's requests between frames, until `shared` asks to stop or the run
 /// ends by itself; returns the last runtime, its last frame's exit and what `start` handed
-/// over with it.
+/// over with it. With `sound`, every frame's sound goes there, and it starts afresh with each
+/// new epoch of the schedule.
 fn run_paced<S>(
     start: &mut impl FnMut(Pad) -> (Runtime, S),
     shared: &Shared,
+    sound: Option<&Sound>,
 ) -> (Runtime, Exit, S) {
-    let (mut runtime, mut handed) = start(shared.pad.clone());
+    let mut begin = || {
+        let (mut runtime, handed) = start(shared.pad.clone());
+        if sound.is_some() {
+            runtime.record_sound(true);
+        }
+        (runtime, handed, Mixer::default())
+    };
+    let (mut runtime, mut handed, mut mixer) = begin();
+    let mut samples = Vec::new();
     let mut pacer = Pacer::new(Instant::now());
     loop {
         thread::sleep(pacer.due().saturating_duration_since(Instant::now()));
@@ -447,17 +486,28 @@ fn run_paced<S>(
         if let Some(vdp) = runtime.hardware::<Vdp>() {
             *lock(&shared.picture) = Some(vdp.frame().clone());
         }
+        if let Some(sound) = sound {
+            samples.clear();
+            mixer.play(&runtime.take_sound_writes(), runtime.clock(), &mut samples);
+            sound.push(&samples);
+        }
         if !matches!(exit, Exit::Frames { .. }) {
             return (runtime, exit, handed);
         }
+        let epoch = pacer.epoch();
         match shared.next() {
             Next::Go => pacer.advance(Instant::now()),
             Next::Resume => pacer.restart(Instant::now()),
             Next::Reset => {
-                (runtime, handed) = start(shared.pad.clone());
+                (runtime, handed, mixer) = begin();
                 pacer.restart(Instant::now());
             }
             Next::Stop => return (runtime, exit, handed),
+        }
+        if pacer.epoch() != epoch
+            && let Some(sound) = sound
+        {
+            sound.restart();
         }
     }
 }

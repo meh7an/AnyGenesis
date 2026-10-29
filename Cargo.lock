@@ -71,6 +71,7 @@ dependencies = [
 name = "anygenesis-frontend"
 version = "0.1.0"
 dependencies = [
+ "anygenesis-psg",
  "anygenesis-runtime",
  "sdl3",
  "serde",
@@ -139,6 +140,10 @@ dependencies = [
  "anygenesis-player",
  "anyhow",
 ]
+
+[[package]]
+name = "anygenesis-psg"
+version = "0.1.0"
 
 [[package]]
 name = "anygenesis-recomp"

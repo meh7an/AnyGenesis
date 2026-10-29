@@ -3,6 +3,7 @@
 //!
 //! ```toml
 //! scaling = "exact"   # exact, fit or stretch
+//! muted = false
 //! ```
 //!
 //! The file is the program's, not the player's: a missing or unreadable one gives the
@@ -58,6 +59,8 @@ impl Scaling {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub scaling: Scaling,
+    /// Whether the sound is off.
+    pub muted: bool,
 }
 
 impl Settings {
@@ -91,7 +94,8 @@ impl Settings {
 
     /// The settings as the file holds them.
     fn to_text(self) -> String {
-        // Infallible: a struct of unit enum variants always serialises to a TOML table.
+        // Infallible: a struct of unit enum variants and booleans always serialises to a TOML
+        // table.
         toml::to_string(&self).expect("settings serialise to TOML")
     }
 }
@@ -132,6 +136,7 @@ mod tests {
         let settings = Settings::parse("").expect("parses");
         assert_eq!(settings, Settings::default());
         assert_eq!(settings.scaling, Scaling::Exact);
+        assert!(!settings.muted);
     }
 
     #[test]
@@ -156,12 +161,20 @@ mod tests {
     fn test_to_text_parses_back_to_the_same_settings() {
         let settings = Settings {
             scaling: Scaling::Stretch,
+            muted: true,
         };
-        assert_eq!(settings.to_text(), "scaling = \"stretch\"\n");
+        assert_eq!(settings.to_text(), "scaling = \"stretch\"\nmuted = true\n");
         assert_eq!(
             Settings::parse(&settings.to_text()).expect("parses"),
             settings
         );
+    }
+
+    #[test]
+    fn test_parse_file_without_muted_keeps_the_sound_on() {
+        let settings = Settings::parse("scaling = \"fit\"\n").expect("parses");
+        assert_eq!(settings.scaling, Scaling::Fit);
+        assert!(!settings.muted);
     }
 
     #[test]

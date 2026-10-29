@@ -41,7 +41,11 @@ use std::{
 
 use anygenesis_abi::{AgState, RAM_SIZE, ram_index};
 use anygenesis_framediff::{Dump, Input, Recorder, Region, dump};
-use anygenesis_frontend::{Config, Controls, Pad, Settings, controls, settings};
+use anygenesis_frontend::{
+    Config, Controls, Pad, Settings, controls,
+    mix::{self, Mixer},
+    settings,
+};
 use anygenesis_rom::{Rom, Sha1Digest};
 use anygenesis_runtime::{
     Access, Buttons, Chip, Cpu, Exit, Hardware, InterruptStop, Miss, Options, RUN_STACK, Runtime,
@@ -54,8 +58,8 @@ use anyhow::{Context, Result, anyhow, bail};
 pub use crate::game::Game;
 
 const USAGE: &str = "usage: <game> [<frames>] [--dump <frame>[,<frame>...]] [--state <folder>] \
-                     [--input <file>] [--sound-log <file>] [--record <file>] [--controls \
-                     <file>] (the game carries its own ROM image; it runs in a window with no \
+                     [--input <file>] [--sound-log <file>] [--wav <file>] [--record <file>] \
+                     [--controls <file>] (the game carries its own ROM image; it runs in a window with no \
                      frames and no options but --controls, or with --record and at most \
                      --state)";
 /// Window pixels per picture pixel when the window opens.
@@ -107,7 +111,7 @@ pub fn main(game: Game) -> Result<()> {
         folder: arguments.state.clone(),
         pad,
         record,
-        sound: arguments.sound_log.is_some(),
+        sound: arguments.sound_log.is_some() || arguments.wav.is_some(),
     };
     let report = match arguments.frames {
         Some(frames) => run_from_reset(game, rom, frames, &arguments.dumps, trace, reference)?,
@@ -146,6 +150,17 @@ pub fn main(game: Game) -> Result<()> {
             path.display()
         );
     }
+    if let Some(path) = &arguments.wav {
+        let samples = sound_samples(&report);
+        fs::write(path, mix::wav(&samples))
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "{} stereo samples at {} Hz saved to {}",
+            samples.len() / 2,
+            mix::SAMPLE_RATE,
+            path.display()
+        );
+    }
     if let Exit::NoNativeCode { pc } = report.exit {
         bail!("the game ran into ${pc:06X}, which has no native code");
     }
@@ -170,6 +185,8 @@ struct Arguments {
     controls: Option<PathBuf>,
     /// Where to save the sound writes.
     sound_log: Option<PathBuf>,
+    /// Where to save the sound as a WAV file.
+    wav: Option<PathBuf>,
 }
 
 impl Arguments {
@@ -177,7 +194,7 @@ impl Arguments {
         let mut positional = Vec::new();
         let mut dumps = Vec::new();
         let (mut state, mut input, mut record, mut controls) = (None, None, None, None);
-        let mut sound_log = None;
+        let (mut sound_log, mut wav) = (None, None);
         let mut arguments = env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             let path = match argument.to_str() {
@@ -186,6 +203,7 @@ impl Arguments {
                 Some("--record") => Some(&mut record),
                 Some("--controls") => Some(&mut controls),
                 Some("--sound-log") => Some(&mut sound_log),
+                Some("--wav") => Some(&mut wav),
                 _ => None,
             };
             if let Some(path) = path {
@@ -224,6 +242,7 @@ impl Arguments {
             None if dumps.is_empty()
                 && input.is_none()
                 && sound_log.is_none()
+                && wav.is_none()
                 && (state.is_none() || record.is_some()) =>
             {
                 None
@@ -233,7 +252,7 @@ impl Arguments {
         let window_only = record.is_some() || controls.is_some();
         if positional.next().is_some()
             || window_only && frames.is_some()
-            || window_only && sound_log.is_some()
+            || window_only && (sound_log.is_some() || wav.is_some())
         {
             bail!(USAGE);
         }
@@ -251,6 +270,7 @@ impl Arguments {
             record,
             controls,
             sound_log,
+            wav,
         })
     }
 }
@@ -270,7 +290,8 @@ pub struct Trace {
     pub pad: PadSource,
     /// Where to record the buttons applied.
     pub record: Option<Recorder<File>>,
-    /// Keep every write to the sound chips, for the report (headless runs only).
+    /// Keep every write to the sound chips, for the report (headless runs only): what the
+    /// sound log and the WAV file are made from.
     pub sound: bool,
 }
 
@@ -427,6 +448,14 @@ pub fn sound_log(writes: &[SoundWrite]) -> String {
     text
 }
 
+/// The sound of a run that kept its sound writes, from reset to where it ended: interleaved
+/// stereo at [`mix::SAMPLE_RATE`].
+pub fn sound_samples(report: &Report) -> Vec<f32> {
+    let mut samples = Vec::new();
+    Mixer::default().play(&report.sound_writes, report.clock, &mut samples);
+    samples
+}
+
 /// Saves `picture`, frame `frame`, as a BMP file in `folder`; returns its path.
 ///
 /// # Errors
@@ -466,6 +495,8 @@ pub struct Report {
     pub sound: SoundCounts,
     /// Every sound write, when the run kept them ([`Trace::sound`]).
     pub sound_writes: Vec<SoundWrite>,
+    /// The master clock the run reached; the sound writes all fall before it.
+    pub clock: u64,
     pub vdp: Vdp,
     /// Work RAM at the end.
     pub ram: Box<[u8; RAM_SIZE]>,
@@ -519,6 +550,7 @@ impl Report {
             z80_bank: runtime.z80().bank(),
             sound: runtime.sound_counts(),
             sound_writes: Vec::new(),
+            clock: runtime.clock(),
             vdp: runtime.hardware::<Vdp>().cloned().unwrap_or_default(),
             ram: Box::new(state.ram),
             pictures,

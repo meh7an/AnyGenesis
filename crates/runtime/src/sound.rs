@@ -1,6 +1,6 @@
 //! The writes that reach the sound chips, from either CPU: counted always, kept in order
-//! when a run asks for them. There is no sound output yet; the PSG and the YM2612's
-//! synthesis come later, and these writes are what they will play.
+//! when a run asks for them. The sound chips sit outside the runtime and play these writes
+//! (the frontend's mixer); the YM2612's synthesis comes later.
 
 /// The CPU that made a write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

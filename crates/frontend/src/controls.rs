@@ -6,9 +6,10 @@
 //! a = ["Z", "A"]
 //! [gamepad]           # SDL gamepad names by position: a = bottom, x = left, ...
 //! c = ["b"]
-//! [hotkeys]           # fullscreen scale pause reset quit; Ctrl+, Alt+, Shift+ may lead a key
+//! [hotkeys]           # fullscreen scale mute pause reset quit; Ctrl+, Alt+, Shift+ may lead
 //! fullscreen = ["F11", "Alt+Return"]
 //! scale = ["F10"]     # exact, fit, stretch in turn; see settings
+//! mute = ["M"]        # sound off and on; see settings
 //! [gamepad_hotkeys]
 //! pause = ["back"]
 //! [window]
@@ -67,15 +68,18 @@ pub enum Hotkey {
     Fullscreen,
     /// The next picture scaling, remembered for later runs.
     Scale,
+    /// Sound off or back on, remembered for later runs.
+    Mute,
     Pause,
     Reset,
     Quit,
 }
 
 impl Hotkey {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Fullscreen,
         Self::Scale,
+        Self::Mute,
         Self::Pause,
         Self::Reset,
         Self::Quit,
@@ -85,6 +89,7 @@ impl Hotkey {
         match self {
             Self::Fullscreen => "fullscreen",
             Self::Scale => "scale",
+            Self::Mute => "mute",
             Self::Pause => "pause",
             Self::Reset => "reset",
             Self::Quit => "quit",
@@ -219,6 +224,7 @@ impl Default for Controls {
                     Hotkey::Fullscreen,
                 ),
                 (Chord::plain(Scancode::F10), Hotkey::Scale),
+                (Chord::plain(Scancode::M), Hotkey::Mute),
                 (Chord::plain(Scancode::P), Hotkey::Pause),
                 (Chord::plain(Scancode::F5), Hotkey::Reset),
                 (Chord::plain(Scancode::Escape), Hotkey::Quit),
@@ -409,6 +415,7 @@ impl RawPad {
 struct RawHotkeys {
     fullscreen: Option<Names>,
     scale: Option<Names>,
+    mute: Option<Names>,
     pause: Option<Names>,
     reset: Option<Names>,
     quit: Option<Names>,
@@ -417,15 +424,16 @@ struct RawHotkeys {
 impl RawHotkeys {
     /// Each hotkey with the names bound to it, if the file lists any, in [`Hotkey::ALL`]
     /// order.
-    fn entries(self) -> [(Hotkey, Option<Names>); 5] {
+    fn entries(self) -> [(Hotkey, Option<Names>); 6] {
         let Self {
             fullscreen,
             scale,
+            mute,
             pause,
             reset,
             quit,
         } = self;
-        let mut names = [fullscreen, scale, pause, reset, quit].into_iter();
+        let mut names = [fullscreen, scale, mute, pause, reset, quit].into_iter();
         Hotkey::ALL.map(|hotkey| (hotkey, names.next().flatten()))
     }
 }
@@ -733,6 +741,22 @@ mod tests {
             controls.hotkey(Chord::plain(Scancode::F9)),
             Some(Hotkey::Scale)
         );
+    }
+
+    #[test]
+    fn test_parse_mute_hotkey_defaults_to_m_and_rebinds() {
+        let defaults = Controls::default();
+        assert_eq!(
+            defaults.hotkey(Chord::plain(Scancode::M)),
+            Some(Hotkey::Mute)
+        );
+        let controls = Controls::parse("[hotkeys]\nmute = [\"Ctrl+M\"]\n").expect("parses");
+        assert_eq!(controls.hotkey(Chord::plain(Scancode::M)), None);
+        let chord = Chord {
+            key: Scancode::M,
+            modifiers: Modifiers::CTRL,
+        };
+        assert_eq!(controls.hotkey(chord), Some(Hotkey::Mute));
     }
 
     #[test]

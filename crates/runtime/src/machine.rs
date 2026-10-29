@@ -1585,7 +1585,13 @@ impl Runtime {
         devices.z80.sound_mut().set_recording(recording);
     }
 
-    /// Takes the sound writes kept so far that the 68000 has reached, in time order.
+    /// The master clock the 68000 has reached; the Z80 may have run past it.
+    pub fn clock(&self) -> u64 {
+        self.context.devices.clock_at(0)
+    }
+
+    /// Takes the sound writes kept so far that the 68000 has reached ([`Runtime::clock`]),
+    /// in time order; none of them can be rolled back.
     pub fn take_sound_writes(&mut self) -> Vec<SoundWrite> {
         let devices = &mut self.context.devices;
         let now = devices.clock_at(0);

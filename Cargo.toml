@@ -14,6 +14,7 @@ members = [
     "crates/oracle",
     "crates/player",
     "crates/player-lib",
+    "crates/psg",
     "crates/recomp",
     "crates/rom",
     "crates/runtime",

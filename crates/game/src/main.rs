@@ -26,10 +26,13 @@ mod tests {
 
     use anygenesis_abi::ram_index;
     use anygenesis_framediff::{Folder, Input, Masks, Recorder};
-    use anygenesis_frontend::Pad;
+    use anygenesis_frontend::{
+        Pad,
+        mix::{SAMPLE_CLOCKS, wav},
+    };
     use anygenesis_player::{
         DEFAULT_FRAMES, Failure, PadSource, Report, Trace, conclude, native, run_from_reset,
-        save_picture, start, vdp_hashes,
+        save_picture, sound_samples, start, vdp_hashes,
     };
     use anygenesis_rom::{Rom, Sha1Digest};
     use anygenesis_runtime::{Buttons, Exit, Options, RUN_STACK, Vdp, vdp::CRAM_MASK};
@@ -44,6 +47,9 @@ mod tests {
     const LEVEL_MODE: u8 = 0x0C;
     /// The copy of CRAM in work RAM that the vertical interrupt copies to CRAM.
     const PALETTE_COPY: u32 = 0xFF_FB00;
+    /// The length and SHA-1 of the WAV file of the first 600 frames' sound, as Mehran
+    /// signed it off after listening (v0.2 M3.3: the PSG only).
+    const SOUND_AT_600: (usize, &str) = (2_132_956, "ff01e996db903ceee8b9f29e0948c8d9417a0717");
     /// The colours the title screen rotates by a step every few frames, in the main loop.
     const CYCLED_COLOURS: Range<usize> = 40..44;
     /// The ROM table of 19 `0x8RVV` words that sets VDP registers 0-18 at boot.
@@ -193,6 +199,47 @@ mod tests {
             .map(|(frame, hash)| (frame, hash.to_owned()))
             .collect();
         assert_eq!(pictures, expected);
+    }
+
+    /// Sonic 1's sound over the 600 frames, made from its sound writes: the WAV file's
+    /// length and SHA-1, saved to `dumps/` at the workspace root to listen to. The SHA-1
+    /// changes whenever the writes, their timing or a sound chip does.
+    #[test]
+    #[ignore = "needs a build with ANYGENESIS_ROM set to Sonic 1 REV00"]
+    fn test_sonic1_sound_is_as_signed_off() {
+        let (game, rom) = sonic1();
+        let trace = Trace {
+            sound: true,
+            ..Trace::default()
+        };
+        let report =
+            run_from_reset(game, rom, DEFAULT_FRAMES, &[], trace, false).expect("the run finishes");
+        let hashes: Vec<(&str, String)> = vdp_hashes(&report.vdp)
+            .into_iter()
+            .map(|(name, hash)| (name, hash.to_string()))
+            .collect();
+        let expected: Vec<(&str, String)> = HASHES_AT_600
+            .into_iter()
+            .map(|(name, hash)| (name, hash.to_owned()))
+            .collect();
+        assert_eq!(hashes, expected, "keeping the sound changed the run");
+        assert!(
+            report.sound.psg.iter().sum::<u64>() > 0,
+            "{:?}",
+            report.sound
+        );
+
+        let samples = sound_samples(&report);
+        assert_eq!(samples.len() as u64, report.clock / SAMPLE_CLOCKS * 2);
+        assert!(samples.iter().any(|&sample| sample != 0.0));
+        let file = wav(&samples);
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dumps");
+        fs::create_dir_all(&folder).expect("the dumps folder exists");
+        fs::write(folder.join("sonic1-sound-600.wav"), &file).expect("the WAV file is saved");
+        assert_eq!(
+            (file.len(), Sha1Digest::of(&file).to_string().as_str()),
+            SOUND_AT_600
+        );
     }
 
     /// The machine where a run ended, for comparing two runs.
