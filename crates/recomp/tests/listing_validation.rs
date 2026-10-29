@@ -1,10 +1,12 @@
-//! Validates decoding and discovery of Sonic 1 against the listing of a local s1disasm build
-//! (REV00), analysed from its vectors alone as game builds do: every listed instruction must
-//! decode as the listing has it and nothing found may be data, while coverage is reported,
-//! not asserted (stepped code covers what discovery misses). Run with
-//! `cargo test -p anygenesis-recomp --test sonic1_validation -- --ignored --nocapture`
-//! with `ANYGENESIS_ROM` and `ANYGENESIS_S1_LISTING` set. The report quotes listing mnemonics,
-//! so it goes to `target/tmp/s1-validation-report.md` and never into the repo.
+//! Validates a ROM against the assembler listing of a local disassembly build (s1disasm,
+//! s2disasm), analysed from its vectors alone as game builds do: every listed instruction must
+//! decode as the listing has it and have native code (a stepped function at least), and
+//! nothing discovery finds may be data, while discovery's coverage is reported, not asserted
+//! (stepped code covers what discovery misses). The decoder comparison also proves that the
+//! listing belongs to the ROM. Run with
+//! `cargo test -p anygenesis-recomp --test listing_validation -- --ignored --nocapture`
+//! with `ANYGENESIS_ROM` and `ANYGENESIS_LISTING` set. The report quotes listing mnemonics,
+//! so it goes to `target/tmp/listing-validation-report.md` and never into the repo.
 
 mod listing;
 
@@ -14,39 +16,32 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use anygenesis_analysis::{Analysis, EntryKind, Suggestion, analyze};
+use anygenesis_codegen_c::{SteppedStats, superset};
 use anygenesis_m68k::{Dialect, Ea, FormatOptions, Instruction, Labels, Mnemonic, Operand};
 use anygenesis_rom::Rom;
 use anygenesis_shared::{Address, ROM_MARKER, Size};
 
 use listing::{Coverage, ListedInstruction, Listing};
 
-/// Table sizes read from the listing stop here; no Sonic 1 table comes close.
+/// Table sizes read from the listing stop here; no table in either Sonic comes close.
 const MAX_TABLE_ENTRIES: u32 = 1024;
 
-/// Sega Retro, "Sonic the Hedgehog (Mega Drive)/Technical information", Revision 00.
-const SONIC1_REV00_SHA1: &str = "6ddb7de1e17e7f6cdb88927bd906352030daa194";
-
 #[test]
-#[ignore = "needs ANYGENESIS_ROM and ANYGENESIS_S1_LISTING from a local s1disasm REV00 build"]
-fn test_sonic1_discovery_matches_s1disasm_listing() {
+#[ignore = "needs ANYGENESIS_ROM and ANYGENESIS_LISTING from a local disassembly build"]
+fn test_listing_instructions_decode_and_have_native_code() {
     let rom_path = std::env::var_os("ANYGENESIS_ROM").expect("ANYGENESIS_ROM is not set");
     let listing_path =
-        std::env::var_os("ANYGENESIS_S1_LISTING").expect("ANYGENESIS_S1_LISTING is not set");
+        std::env::var_os("ANYGENESIS_LISTING").expect("ANYGENESIS_LISTING is not set");
     let rom = Rom::load(&rom_path).expect("ANYGENESIS_ROM loads");
-    assert_eq!(
-        rom.sha1().to_string(),
-        SONIC1_REV00_SHA1,
-        "this test needs Sonic 1 REV00"
-    );
     let analysis = analyze(&rom);
-    let listing_text = std::fs::read(&listing_path).expect("ANYGENESIS_S1_LISTING is readable");
+    let listing_text = std::fs::read(&listing_path).expect("ANYGENESIS_LISTING is readable");
     let listing = match listing::parse(&listing_text) {
         Ok(listing) => listing,
         Err(error) => panic!("listing: {error}"),
     };
 
     let validation = Validation::run(rom.bytes(), &analysis, &listing);
-    let report_path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("s1-validation-report.md");
+    let report_path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("listing-validation-report.md");
     let report = format!("{ROM_MARKER}\n\n{}", validation.report(&analysis, &listing));
     std::fs::write(&report_path, report).expect("report written");
     println!("report                  {}", report_path.display());
@@ -59,6 +54,17 @@ fn test_sonic1_discovery_matches_s1disasm_listing() {
         validation.precision_failures.is_empty(),
         "data decoded as code"
     );
+    assert!(
+        validation.missing.is_empty(),
+        "listed instructions without native code"
+    );
+}
+
+/// A listed instruction the superset gave no stepped function.
+struct Missing {
+    address: u32,
+    mnemonic: String,
+    why: &'static str,
 }
 
 /// The listing and our decoder disagree about one listed instruction.
@@ -97,6 +103,8 @@ struct Validation {
     reached: usize,
     gaps: Vec<Gap>,
     unresolved: Vec<String>,
+    superset: SteppedStats,
+    missing: Vec<Missing>,
 }
 
 impl Validation {
@@ -155,6 +163,17 @@ impl Validation {
             })
             .collect();
 
+        let (kept, superset) = superset(rom, analysis);
+        let missing = in_rom
+            .iter()
+            .filter(|(address, _)| !is_kept(&kept, *address))
+            .map(|&(address, listed)| Missing {
+                address,
+                mnemonic: listed.mnemonic.clone(),
+                why: why_dropped(rom, address, &kept),
+            })
+            .collect();
+
         Self {
             listed: in_rom.len(),
             mismatches,
@@ -164,6 +183,8 @@ impl Validation {
             reached,
             gaps,
             unresolved: unresolved_sites(analysis, listing),
+            superset,
+            missing,
         }
     }
 
@@ -189,14 +210,37 @@ impl Validation {
             ("unreached", unreached.to_string()),
             ("gap runs", self.gaps.len().to_string()),
             ("unresolved sites", self.unresolved.len().to_string()),
+            (
+                "native",
+                format!(
+                    "{} ({:.2}%)",
+                    self.listed - self.missing.len(),
+                    100.0 * (self.listed - self.missing.len()) as f64 / self.listed.max(1) as f64
+                ),
+            ),
+            ("missing native code", self.missing.len().to_string()),
+            ("even addresses", self.superset.even_addresses.to_string()),
+            ("decodable", self.superset.decodable.to_string()),
+            ("superset kept", self.superset.kept.to_string()),
+            ("superset pruned", self.superset.pruned.to_string()),
+            ("superset forced", self.superset.forced.to_string()),
         ]
     }
 
     fn report(&self, analysis: &Analysis, listing: &Listing) -> String {
-        let mut out = String::from("# Sonic 1 against the s1disasm listing\n\n");
+        let mut out = String::from("# The ROM against its listing\n\n");
         out.push_str("| Check | Count |\n|-------|------:|\n");
         for (name, value) in self.summary() {
             let _ = writeln!(out, "| {name} | {value} |");
+        }
+
+        out.push_str("\n## Listed instructions without native code\n\n");
+        for missing in &self.missing {
+            let _ = writeln!(
+                out,
+                "- {:06X}: `{}`, {}",
+                missing.address, missing.mnemonic, missing.why
+            );
         }
 
         out.push_str("\n## Decoder mismatches\n\n");
@@ -349,6 +393,23 @@ fn has_one_size(mnemonic: Mnemonic) -> bool {
             | Mnemonic::Bset
             | Mnemonic::Btst
     )
+}
+
+fn is_kept(kept: &[bool], address: u32) -> bool {
+    address.is_multiple_of(2) && kept.get(address as usize / 2).copied().unwrap_or(false)
+}
+
+/// Why the superset dropped the instruction at `address`, as far as the outside shows: an
+/// instruction whose successor is kept would be kept itself, so then it cannot be lifted.
+fn why_dropped(rom: &[u8], address: u32, kept: &[bool]) -> &'static str {
+    if !address.is_multiple_of(2) {
+        return "odd address";
+    }
+    match anygenesis_m68k::decode_at(rom, address as usize) {
+        Err(_) => "does not decode",
+        Ok(instruction) if is_kept(kept, address + instruction.length()) => "does not lift",
+        Ok(_) => "pruned: its straight-line run reaches undecodable bytes or the ROM end",
+    }
 }
 
 /// Splits the listed instructions into runs the analysis does not reach.

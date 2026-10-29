@@ -26,7 +26,7 @@ use std::path::Path;
 use anygenesis_analysis::{Analysis, FlagLiveness};
 use anygenesis_shared::Address;
 
-pub use stepped::{SteppedStats, emit_stepped_instruction, step_name};
+pub use stepped::{SteppedStats, emit_stepped_instruction, step_name, superset};
 
 /// Where interrupt check points go: `AG_CHECK` at the start of the chosen blocks, which
 /// calls the runtime's `ag_check` once the cycle budget is spent (policy: M3.2).

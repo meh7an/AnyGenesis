@@ -134,15 +134,9 @@ fn raises_or_resets(lifted: &Lifted) -> bool {
     })
 }
 
-/// Emits the stepped functions of `image`, their table and the interrupt entry. `rows` maps
-/// every table row to the translated function that holds it.
-pub fn emit(
-    image: &[u8],
-    analysis: &Analysis,
-    rows: &BTreeMap<Address, Address>,
-    options: &EmitOptions,
-) -> Stepped {
-    let prefix = options.symbol_prefix.as_str();
+/// Which even addresses of `image` get a stepped function, indexed by address / 2, and the
+/// counts behind it (`fast` stays 0: only emitting decides it).
+pub fn superset(image: &[u8], analysis: &Analysis) -> (Vec<bool>, SteppedStats) {
     let even = image.len() / 2;
     let mut stats = SteppedStats {
         even_addresses: even,
@@ -170,6 +164,20 @@ pub fn emit(
             stats.forced += 1;
         }
     }
+    (kept, stats)
+}
+
+/// Emits the stepped functions of `image`, their table and the interrupt entry. `rows` maps
+/// every table row to the translated function that holds it.
+pub fn emit(
+    image: &[u8],
+    analysis: &Analysis,
+    rows: &BTreeMap<Address, Address>,
+    options: &EmitOptions,
+) -> Stepped {
+    let prefix = options.symbol_prefix.as_str();
+    let (kept, mut stats) = superset(image, analysis);
+    let even = kept.len();
 
     let mut chunks = Vec::new();
     let mut text = String::new();

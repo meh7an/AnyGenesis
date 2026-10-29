@@ -1,8 +1,9 @@
-//! The game exe anygenesis builds from Sonic 1 REV00, run from a folder of its own with no
-//! ROM in it. Ignored: needs `ANYGENESIS_ROM` and the player library next to anygenesis,
-//! built in the same profile (`cargo build -p anygenesis-player-lib`, `--release` for a
-//! release run). The build goes to a cache folder under the system temp folder, not the
-//! per-user one, and is made once for all the tests here.
+//! The game exe anygenesis builds from the ROM `ANYGENESIS_ROM` names: any ROM must build
+//! into one exe with warnings as errors; Sonic 1 REV00's exe is also run from a folder of
+//! its own with no ROM in it. Ignored: needs `ANYGENESIS_ROM` and the player library next to
+//! anygenesis, built in the same profile (`cargo build -p anygenesis-player-lib`,
+//! `--release` for a release run). The build goes to a cache folder under the system temp
+//! folder, not the per-user one, and is made once for all the tests here.
 
 use std::{
     env, fs,
@@ -98,6 +99,15 @@ fn run_game(arguments: &[&str]) -> Output {
         .current_dir(game_folder())
         .output()
         .expect("the game runs")
+}
+
+#[test]
+#[ignore = "needs ANYGENESIS_ROM pointing at a ROM image and the player library"]
+fn test_any_rom_builds_into_a_lone_game_exe() {
+    let exe = game_exe();
+    let size = fs::metadata(&exe).expect("the exe has metadata").len();
+    println!("game exe        {} ({size} bytes)", exe.display());
+    assert!(size > 0);
 }
 
 #[test]

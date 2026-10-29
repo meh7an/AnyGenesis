@@ -1,22 +1,28 @@
 //! Loads the real ROM named by `ANYGENESIS_ROM` and prints its header and vectors for a
-//! manual check. Run with
+//! manual check; the title is asserted for the ROMs the project tests with. Run with
 //! `cargo test -p anygenesis-rom --test real_rom -- --ignored --nocapture`.
 
 use anygenesis_rom::{Rom, VectorTable, vector_name};
 
-/// Sega Retro, "Sonic the Hedgehog (Mega Drive)/Technical information", Revision 00.
-const SONIC1_REV00_SHA1: &str = "6ddb7de1e17e7f6cdb88927bd906352030daa194";
+/// SHA-1 and expected title of the ROMs the project tests with. Sega Retro, "Sonic the
+/// Hedgehog (Mega Drive)/Technical information" (Revision 00) and "Sonic the Hedgehog 2
+/// (Mega Drive)" (Revision 01).
+const KNOWN_TITLES: [(&str, &str); 2] = [
+    (
+        "6ddb7de1e17e7f6cdb88927bd906352030daa194",
+        "SONIC THE HEDGEHOG",
+    ),
+    (
+        "8bca5dcef1af3e00098666fd892dc1c2a76333f9",
+        "SONIC THE HEDGEHOG 2",
+    ),
+];
 
 #[test]
-#[ignore = "needs ANYGENESIS_ROM pointing at the Sonic 1 REV00 .bin"]
-fn test_load_real_rom_sonic1_rev00_identified() {
+#[ignore = "needs ANYGENESIS_ROM pointing at a ROM image"]
+fn test_load_real_rom_header_and_vectors_read() {
     let path = std::env::var_os("ANYGENESIS_ROM").expect("ANYGENESIS_ROM is not set");
     let rom = Rom::load(&path).expect("ANYGENESIS_ROM loads");
-    assert_eq!(
-        rom.sha1().to_string(),
-        SONIC1_REV00_SHA1,
-        "this test needs Sonic 1 REV00"
-    );
     let header = rom.header();
 
     println!("file            {}", path.to_string_lossy());
@@ -56,5 +62,9 @@ fn test_load_real_rom_sonic1_rev00_identified() {
 
     assert_eq!(rom.vectors().entries().len(), VectorTable::LEN);
     assert_eq!(rom.warnings(), []);
-    assert_eq!(rom.title(), "SONIC THE HEDGEHOG");
+    let sha1 = rom.sha1().to_string();
+    match KNOWN_TITLES.iter().find(|(known, _)| *known == sha1) {
+        Some((_, title)) => assert_eq!(rom.title(), *title),
+        None => println!("title           {} (not a known ROM)", rom.title()),
+    }
 }

@@ -1,4 +1,5 @@
-//! Reader for the assembler listing (`sonic.lst`) of a local s1disasm build.
+//! Reader for the AS assembler listing of a local disassembly build (s1disasm's `sonic.lst`,
+//! s2disasm's `s2.lst`).
 //!
 //! Only addresses, lengths, mnemonics, directive names and the presence of labels are kept.
 //! The listing's text never leaves the test process, and nothing here names a label.
