@@ -6,13 +6,24 @@
 //! length registers read 0 and the source registers hold the address after the last word
 //! (fill and copy too), inside the same 128 KiB block: register 23 never changes.
 //!
-//! Durations come from the access slots a line offers the 68000 side, by mode and by
-//! whether the line is drawn: H40 18 drawn, 205 blanked; H32 16 and 167 (Eke on the
-//! SpritesMind forum, matching Sega's software manual as quoted there). A slot moves a VRAM
-//! byte or a CRAM/VSRAM word (Kabuto's DMA costs: 2.4 68000 cycles per word to CRAM and
-//! VSRAM, 4.7 to VRAM). A copy needs two slots per byte (a read, then a write). Chosen: the
-//! slots of a line are spread evenly over it, a line counts as blanked by its number and
-//! the display bit when the DMA starts, and a fill's first line is not one byte short.
+//! Durations come from the access slots a line offers the 68000 side ([`end`]). A slot
+//! moves a VRAM byte or a CRAM/VSRAM word (Kabuto's DMA costs: 2.4 68000 cycles per word
+//! to CRAM and VSRAM, 4.7 to VRAM). A copy needs two slots per byte (a read, then a write).
+//! Chosen: a fill's first line is not one byte short.
+//!
+//! The slots: the VDP makes one memory access every two pixels, 210 a line in H40 and 171
+//! in H32, in the order Kabuto's hardware notes give (Mask of Destiny's H32 capture on
+//! SpritesMind agrees but for one sprite slot near the end). A drawn line leaves 18 (H40)
+//! or 16 (H32) of them to the 68000 side, with 5 or 4 refresh slots among the rest; a
+//! blanked line (vertical blanking or the display off) leaves it every slot but refresh,
+//! 6 or 5 of them, 204 and 166 (Mask of Destiny's measurement; Sega's manual says 205 and
+//! 167). Chosen, unverified: where the pattern sits on the H counter (no source says; the
+//! H-scroll read, slot 0, is put at pixel counter 0x1E7 in H40 and 0x1E9 in H32, which
+//! fits the largest gap measured, 26 accesses across a line's end, and the slots Kabuto saw
+//! on screen), the H40 blanked
+//! refresh slots (Mask of Destiny's positions, read as counting from the first sprite
+//! slot), the H32 blanked ones (the drawn ones and one more 32 slots on), and the slots of
+//! a line following its own line number's drawn or blanked state.
 //!
 //! A fill writes its data word as a normal write first; then, for each of its length steps,
 //! the data's high byte goes to the address with bit 0 flipped, after the address moved on
@@ -26,43 +37,128 @@ use crate::{
     timing::{HMode, LINE_CLOCKS, LINES, Timing},
 };
 
-/// Access slots a line offers: drawn, blanked.
-fn slots_per_line(mode: HMode) -> (u64, u64) {
+/// One access slot of the 68000 side: where it starts and ends, in master clocks from the
+/// start of its line (where the H counter reads 0). The last one of an H32 line ends a
+/// little into the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Slot {
+    start: u64,
+    end: u64,
+}
+
+/// The VDP's memory accesses a line, of every kind.
+const fn accesses(mode: HMode) -> u64 {
     match mode {
-        HMode::H32 => (16, 167),
-        HMode::H40 => (18, 205),
+        HMode::H32 => 171,
+        HMode::H40 => 210,
     }
 }
 
-/// The master clock where `slots` access slots from master clock `from` on have been used.
-/// The one place the slot layout lives: real per-line slot positions would replace it.
+/// The 32-access blocks of plane and sprite fetches a drawn line has.
+const fn blocks(mode: HMode) -> u64 {
+    match mode {
+        HMode::H32 => 4,
+        HMode::H40 => 5,
+    }
+}
+
+/// The access (in Kabuto's order, 0 the H-scroll read) that starts at pixel 1 of the line,
+/// the first after the H counter reads 0: access n starts at pixel 2n - 23 (H32) or
+/// 2n - 25 (H40), counted round the line.
+const fn first_access(mode: HMode) -> u64 {
+    match mode {
+        HMode::H32 => 12,
+        HMode::H40 => 13,
+    }
+}
+
+/// Whether access `n` of a drawn line is the 68000 side's. After the H-scroll read, four
+/// sprite reads and a group of eight come the blocks, each of four groups of eight whose
+/// second access is the 68000's in the first three and refresh in the fourth; then two of
+/// the 68000's, and the sprite reads with one more of its slots in them (two in H32).
+const fn drawn_external(mode: HMode, n: u64) -> bool {
+    let tail = 13 + 32 * blocks(mode);
+    if n >= 13 && n < tail {
+        return (n - 13) % 8 == 1 && (n - 13) % 32 != 25;
+    }
+    match mode {
+        HMode::H32 => n == tail || n == tail + 1 || n == tail + 15 || n == tail + 29,
+        HMode::H40 => n == tail || n == tail + 1 || n == tail + 25,
+    }
+}
+
+/// Whether access `n` of a blanked line is refresh, the only kind left there.
+const fn blanked_refresh(mode: HMode, n: u64) -> bool {
+    match mode {
+        HMode::H32 => matches!(n, 38 | 70 | 102 | 134 | 166),
+        HMode::H40 => matches!(n, 38 | 70 | 103 | 134 | 166 | 198),
+    }
+}
+
+/// The 68000 side's slots of a line in `mode`, drawn or blanked, in line order.
+const fn layout<const N: usize>(mode: HMode, blanked: bool) -> [Slot; N] {
+    let mut slots = [Slot { start: 0, end: 0 }; N];
+    let total = accesses(mode);
+    let mut count = 0;
+    let mut k = 0;
+    while k < total {
+        let n = (k + first_access(mode)) % total;
+        let external = if blanked {
+            !blanked_refresh(mode, n)
+        } else {
+            drawn_external(mode, n)
+        };
+        if external {
+            slots[count] = Slot {
+                start: mode.pixel_clock(1 + 2 * k),
+                end: mode.pixel_clock(3 + 2 * k),
+            };
+            count += 1;
+        }
+        k += 1;
+    }
+    assert!(count == N, "the slot count of the layout");
+    slots
+}
+
+const H32_DRAWN: [Slot; 16] = layout(HMode::H32, false);
+const H32_BLANKED: [Slot; 166] = layout(HMode::H32, true);
+const H40_DRAWN: [Slot; 18] = layout(HMode::H40, false);
+const H40_BLANKED: [Slot; 204] = layout(HMode::H40, true);
+
+fn slots_of(mode: HMode, blanked: bool) -> &'static [Slot] {
+    match (mode, blanked) {
+        (HMode::H32, false) => &H32_DRAWN,
+        (HMode::H32, true) => &H32_BLANKED,
+        (HMode::H40, false) => &H40_DRAWN,
+        (HMode::H40, true) => &H40_BLANKED,
+    }
+}
+
+/// The master clock where the last of `slots` access slots from master clock `from` on
+/// ends: the slots that start at or after `from`, in the current mode, on drawn or blanked
+/// lines as their line numbers and the display bit say now. The one place the slot layout
+/// is used.
 pub(super) fn end(timing: &Timing, from: u64, slots: u64) -> u64 {
-    let (drawn, blanked) = slots_per_line(timing.mode());
-    let mut clock = from;
+    let mut line = from - from % LINE_CLOCKS;
+    let mut position = from % LINE_CLOCKS;
     let mut left = slots;
-    loop {
-        let position = clock % LINE_CLOCKS;
-        let start = clock - position;
-        let rate = if timing.line_blanked(start / LINE_CLOCKS % LINES) {
-            blanked
-        } else {
-            drawn
-        };
-        // Slot k of the line starts at ceil(k * LINE_CLOCKS / rate): the first one starting at
-        // or after the position, and how many the line still has. A run of slots ends where
-        // the next one starts, so the next run takes that one.
-        let first = if position == 0 {
-            0
-        } else {
-            (position - 1) * rate / LINE_CLOCKS + 1
-        };
-        let free = rate - first;
+    while left > 0 {
+        let layout = slots_of(
+            timing.mode(),
+            timing.line_blanked(line / LINE_CLOCKS % LINES),
+        );
+        let first = layout.partition_point(|slot| slot.start < position);
+        // A layout holds at most a few hundred slots.
+        let free = (layout.len() - first) as u64;
         if left <= free {
-            return start + ((first + left) * LINE_CLOCKS).div_ceil(rate);
+            return line + layout[first + left as usize - 1].end;
         }
         left -= free;
-        clock = start + LINE_CLOCKS;
+        line += LINE_CLOCKS;
+        position = 0;
     }
+    from
 }
 
 impl Vdp {
@@ -187,6 +283,12 @@ mod tests {
         },
     };
 
+    /// Where `slots` slots from master clock 0 end on a blanked H32 line, before its first
+    /// refresh: one every two pixels of 10 master clocks, from pixel 1.
+    fn blanked_h32_end(slots: u64) -> u64 {
+        10 * (2 * slots + 1)
+    }
+
     /// Register words for a DMA of `length` from `source` (a word address for transfers, a
     /// byte address for copies) of type `mode` (register 23 bits 7-6, or the source's top
     /// bits for a transfer).
@@ -213,8 +315,8 @@ mod tests {
         assert_eq!(fault, None);
         assert_eq!(vdp.vram()[0x100..0x108], sources.rom[0x10..0x18]);
         assert_eq!(vdp.registers()[19..23], [0, 0, 12, 0]);
-        // Display off: 167 slots a line in H32, two per VRAM word.
-        let clocks = (8 * LINE_CLOCKS).div_ceil(167);
+        // Display off: two slots per VRAM word, the eighth ending at pixel 17.
+        let clocks = blanked_h32_end(8);
         assert_eq!(vdp.take_stall(), clocks.div_ceil(7) as u32);
         assert_eq!(vdp.take_stall(), 0);
         assert_eq!(vdp.counts().transfers, 1);
@@ -284,7 +386,7 @@ mod tests {
         assert_eq!(vdp.registers()[19..22], [0, 0, 7]);
         assert_eq!(vdp.take_stall(), 0);
         // The data write's two slots in the FIFO, then the fill's seven.
-        let end = (9 * LINE_CLOCKS).div_ceil(167);
+        let end = blanked_h32_end(9);
         assert_ne!(read(&mut vdp, port::CONTROL) & status::DMA_BUSY, 0);
         vdp.advance((end / 7) as u32);
         assert_ne!(vdp.status() & status::DMA_BUSY, 0);
@@ -323,22 +425,43 @@ mod tests {
     }
 
     #[test]
-    fn test_end_spreads_slots_over_drawn_and_blanked_lines() {
+    fn test_end_uses_the_slots_of_drawn_and_blanked_lines() {
         let mut timing = Timing::default();
         timing.set_register(12, 0x81);
         timing.set_register(1, 0x44);
-        // 18 slots a drawn H40 line: 36 take two whole lines.
-        assert_eq!(end(&timing, 0, 36), 2 * LINE_CLOCKS);
+        // A drawn H40 line: the first slot is the fourth access after the counter's 0,
+        // pixels 3-4; the 18th is in the sprite reads, pixels 371-372, in the slow stretch.
+        assert_eq!(end(&timing, 0, 1), 5 * 8);
+        assert_eq!(end(&timing, 0, 18), 373 * 8 + 29 * 2);
+        assert_eq!(end(&timing, 0, 36), LINE_CLOCKS + 373 * 8 + 29 * 2);
+        // A slot that started before `from` is gone.
+        assert_eq!(end(&timing, 3 * 8 + 1, 1), 21 * 8);
+        // Blanked: every access but refresh, the first from pixel 1; 204 fill the line.
         timing.set_register(1, 0x04);
-        assert_eq!(end(&timing, 0, 36), (36 * LINE_CLOCKS).div_ceil(205));
+        assert_eq!(end(&timing, 0, 1), 3 * 8);
+        assert_eq!(end(&timing, 0, 204), 421 * 8 + 30 * 2);
+        assert_eq!(end(&timing, 0, 205), LINE_CLOCKS + 3 * 8);
         assert_eq!(end(&timing, 0, 0), 0);
-        // From inside a line, the slots left in it come first.
-        timing.set_register(1, 0x44);
-        let half = LINE_CLOCKS / 2;
-        assert_eq!(end(&timing, half, 9), LINE_CLOCKS);
-        assert_eq!(
-            end(&timing, half, 10),
-            LINE_CLOCKS + LINE_CLOCKS.div_ceil(18)
-        );
+    }
+
+    #[test]
+    fn test_drawn_slots_leave_the_measured_gaps() {
+        for (mode, slots) in [(HMode::H32, 16), (HMode::H40, 18)] {
+            let total = accesses(mode);
+            let mine: Vec<u64> = (0..total)
+                .filter(|k| drawn_external(mode, (k + first_access(mode)) % total))
+                .collect();
+            assert_eq!(mine.len(), slots);
+            let inside = mine.windows(2).map(|pair| pair[1] - pair[0]).max();
+            let across = mine[0] + total - mine[slots - 1];
+            if mode == HMode::H40 {
+                // Across the line's end 26 accesses, the largest gap TascoDLX measured (on
+                // SpritesMind); inside it the 24 sprite reads after the pair that follows
+                // the blocks.
+                assert_eq!((inside, across), (Some(24), 26));
+            }
+        }
+        assert_eq!(H40_DRAWN.len(), 18);
+        assert_eq!(H32_BLANKED.len(), 166);
     }
 }

@@ -18,14 +18,14 @@ const SONIC1_REV00_SHA1: &str = "6ddb7de1e17e7f6cdb88927bd906352030daa194";
 /// The signed-off VDP hashes after 600 frames and BMP hashes of frames 240 and 600, as the
 /// game crate's tests hold them (re-signing changes both places).
 const HASHES_AT_600: [(&str, &str); 4] = [
-    ("VRAM", "af90156571d5d2313cb701d0568ffa7552674efa"),
-    ("CRAM", "2ab1aba063597f9054b94bbf379bda288be40369"),
+    ("VRAM", "bd567c0e7e1284df2bcccd28e2fd803f42453893"),
+    ("CRAM", "cfb39dfc175a8a1b73f031801c50a194778752e5"),
     ("VSRAM", "9faab1c6fb9abfc6d5a3c2a3d3149f0f3f7e4f4d"),
     ("registers", "6f90e45454834c6814184810aa3cd4d03cc6e8c4"),
 ];
 const PICTURES: [(u64, &str); 2] = [
     (240, "87e9a8f99cee2471fa47e8d853165035cfbd9d39"),
-    (600, "58274d550398349f85b1745ff30870605aa13f11"),
+    (600, "aa2a2bf3b06befd407053e2b43971e8fb630e6d6"),
 ];
 /// The game mode byte in work RAM (offset in the RAM dump) and its value in a level.
 const GAME_MODE: usize = 0xF600;

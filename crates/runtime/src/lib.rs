@@ -1,5 +1,5 @@
 //! The runtime recompiled code links against: the 68000 memory map, the I/O chip and pad,
-//! the Z80 and TMSS stand-ins, the `ag_*` externs, and the loop that runs translated code,
+//! the Z80 side with its own Z80, TMSS, the `ag_*` externs, and the loop that runs translated code,
 //! with the program's stepped code for addresses no function covers. With the default
 //! `interpreter` feature the IR interpreter is the last fallback; without it (games) a
 //! fetch from an address with no native code ends the run.
@@ -17,6 +17,7 @@ pub mod io;
 pub mod log;
 mod machine;
 pub mod refresh;
+pub mod sound;
 pub mod timing;
 pub mod vdp;
 mod ym2612;
@@ -31,6 +32,7 @@ pub use hardware::{Hardware, Memory};
 pub use io::Buttons;
 pub use log::{Access, AccessKind, Log, Miss};
 pub use machine::{Exit, InterruptStop, Options, RUN_STACK, Runtime, UNWIND};
+pub use sound::{Chip, Cpu, SoundCounts, SoundWrite};
 pub use vdp::Vdp;
 
 /// Whether this build of the runtime has the IR interpreter (the `interpreter` feature).

@@ -14,6 +14,9 @@ mod execute;
 /// `at` is the T-state of the current step, counted from 0, at which the read or write
 /// strobe of the access falls: the second T-state of a memory cycle and the third of an
 /// I/O cycle.
+///
+/// [`Bus::wait`] is asked after every memory and I/O access for wait states, which stretch
+/// that access's cycle and so move every later access of the step.
 pub trait Bus {
     /// Reads a byte of memory, opcode fetches included.
     fn read(&mut self, address: u16, at: u32) -> u8;
@@ -32,6 +35,11 @@ pub trait Bus {
     fn acknowledge(&mut self, at: u32) -> u8 {
         let _ = at;
         0xFF
+    }
+
+    /// Wait states the /WAIT input adds to the access just made; none by default.
+    fn wait(&mut self) -> u32 {
+        0
     }
 }
 
@@ -423,5 +431,67 @@ mod tests {
         assert!(!cpu.iff1 && !cpu.iff2 && !cpu.halted);
         assert_eq!((cpu.af(), cpu.sp), (0xFFFF, 0xFFFF));
         assert_eq!(cpu.b, 0x56);
+    }
+
+    /// Records each memory access's T-state and stretches the accesses at or above `slow`
+    /// by `waits`.
+    struct Slow {
+        ram: Ram,
+        slow: u16,
+        waits: u32,
+        last_slow: bool,
+        accesses: Vec<u32>,
+    }
+
+    impl Bus for Slow {
+        fn read(&mut self, address: u16, at: u32) -> u8 {
+            self.accesses.push(at);
+            self.last_slow = address >= self.slow;
+            self.ram.read(address, at)
+        }
+
+        fn write(&mut self, address: u16, value: u8, at: u32) {
+            self.accesses.push(at);
+            self.last_slow = address >= self.slow;
+            self.ram.write(address, value, at);
+        }
+
+        fn input(&mut self, port: u16, at: u32) -> u8 {
+            self.last_slow = false;
+            self.ram.input(port, at)
+        }
+
+        fn output(&mut self, port: u16, value: u8, at: u32) {
+            self.last_slow = false;
+            self.ram.output(port, value, at);
+        }
+
+        fn wait(&mut self) -> u32 {
+            if std::mem::take(&mut self.last_slow) {
+                self.waits
+            } else {
+                0
+            }
+        }
+    }
+
+    #[test]
+    fn test_wait_states_stretch_the_access_and_move_later_ones() {
+        // LD A,(0x8000); LD (0x0200),A
+        let program = [0x3A, 0x00, 0x80, 0x32, 0x00, 0x02];
+        let mut bus = Slow {
+            ram: Ram::with_program(0x0100, &program),
+            slow: 0x8000,
+            waits: 3,
+            last_slow: false,
+            accesses: Vec::new(),
+        };
+        bus.ram.memory[0x8000] = 0x5A;
+        let mut cpu = cpu_at(0x0100);
+
+        assert_eq!(cpu.step(&mut bus), 13 + 3);
+        assert_eq!(bus.accesses, [1, 5, 8, 11]);
+        assert_eq!(cpu.step(&mut bus), 13);
+        assert_eq!(bus.ram.memory[0x0200], 0x5A);
     }
 }

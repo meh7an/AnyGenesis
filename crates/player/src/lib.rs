@@ -17,6 +17,8 @@
 //! (window only, `--state` may go with it) writes the buttons the window applied there in
 //! that format. Runs with any of the three use a console without TMSS like the reference
 //! emulator's, so a recording replays to the same machine headless and in the reference.
+//! `--sound-log <file>` (headless) writes every write to the sound chips, from either CPU,
+//! one per line with its master clock.
 //!
 //! The window reads its key and gamepad bindings, hotkeys (fullscreen, scale, pause, reset,
 //! quit) and start-up settings from `--controls <file>`, else from `controls.toml` in SDL's
@@ -30,6 +32,7 @@ mod game;
 use std::{
     cell::RefCell,
     env,
+    fmt::Write as _,
     fs::{self, File},
     path::{Path, PathBuf},
     rc::Rc,
@@ -41,7 +44,8 @@ use anygenesis_framediff::{Dump, Input, Recorder, Region, dump};
 use anygenesis_frontend::{Config, Controls, Pad, Settings, controls, settings};
 use anygenesis_rom::{Rom, Sha1Digest};
 use anygenesis_runtime::{
-    Access, Buttons, Exit, Hardware, InterruptStop, Miss, Options, RUN_STACK, Runtime, Vdp,
+    Access, Buttons, Chip, Cpu, Exit, Hardware, InterruptStop, Miss, Options, RUN_STACK, Runtime,
+    SoundCounts, SoundWrite, Vdp,
     io::{VERSION_NO_EXPANSION, VERSION_OVERSEAS},
     vdp::Frame,
 };
@@ -50,9 +54,10 @@ use anyhow::{Context, Result, anyhow, bail};
 pub use crate::game::Game;
 
 const USAGE: &str = "usage: <game> [<frames>] [--dump <frame>[,<frame>...]] [--state <folder>] \
-                     [--input <file>] [--record <file>] [--controls <file>] (the game carries \
-                     its own ROM image; it runs in a window with no frames and no options but \
-                     --controls, or with --record and at most --state)";
+                     [--input <file>] [--sound-log <file>] [--record <file>] [--controls \
+                     <file>] (the game carries its own ROM image; it runs in a window with no \
+                     frames and no options but --controls, or with --record and at most \
+                     --state)";
 /// Window pixels per picture pixel when the window opens.
 const WINDOW_SCALE: u32 = 3;
 /// The vertical interrupt's level: the frame diff stops at its handler's entry.
@@ -102,6 +107,7 @@ pub fn main(game: Game) -> Result<()> {
         folder: arguments.state.clone(),
         pad,
         record,
+        sound: arguments.sound_log.is_some(),
     };
     let report = match arguments.frames {
         Some(frames) => run_from_reset(game, rom, frames, &arguments.dumps, trace, reference)?,
@@ -131,6 +137,15 @@ pub fn main(game: Game) -> Result<()> {
         let path = save_picture(*frame, picture, Path::new(DUMP_FOLDER))?;
         println!("frame {frame} saved to {}", path.display());
     }
+    if let Some(path) = &arguments.sound_log {
+        fs::write(path, sound_log(&report.sound_writes))
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "{} sound writes saved to {}",
+            report.sound_writes.len(),
+            path.display()
+        );
+    }
     if let Exit::NoNativeCode { pc } = report.exit {
         bail!("the game ran into ${pc:06X}, which has no native code");
     }
@@ -153,6 +168,8 @@ struct Arguments {
     record: Option<PathBuf>,
     /// The window's controls file, instead of the per-user one.
     controls: Option<PathBuf>,
+    /// Where to save the sound writes.
+    sound_log: Option<PathBuf>,
 }
 
 impl Arguments {
@@ -160,6 +177,7 @@ impl Arguments {
         let mut positional = Vec::new();
         let mut dumps = Vec::new();
         let (mut state, mut input, mut record, mut controls) = (None, None, None, None);
+        let mut sound_log = None;
         let mut arguments = env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             let path = match argument.to_str() {
@@ -167,6 +185,7 @@ impl Arguments {
                 Some("--input") => Some(&mut input),
                 Some("--record") => Some(&mut record),
                 Some("--controls") => Some(&mut controls),
+                Some("--sound-log") => Some(&mut sound_log),
                 _ => None,
             };
             if let Some(path) = path {
@@ -204,6 +223,7 @@ impl Arguments {
             }
             None if dumps.is_empty()
                 && input.is_none()
+                && sound_log.is_none()
                 && (state.is_none() || record.is_some()) =>
             {
                 None
@@ -211,7 +231,10 @@ impl Arguments {
             None => Some(DEFAULT_FRAMES),
         };
         let window_only = record.is_some() || controls.is_some();
-        if positional.next().is_some() || window_only && frames.is_some() {
+        if positional.next().is_some()
+            || window_only && frames.is_some()
+            || window_only && sound_log.is_some()
+        {
             bail!(USAGE);
         }
         let last = frames.unwrap_or(0);
@@ -227,6 +250,7 @@ impl Arguments {
             input,
             record,
             controls,
+            sound_log,
         })
     }
 }
@@ -238,7 +262,7 @@ pub type Failure = Rc<RefCell<Option<anyhow::Error>>>;
 pub type Recording = Rc<RefCell<Recorder<File>>>;
 
 /// What a run does at every vertical interrupt handler entry: save the state for the frame
-/// diff, apply the pad and record what it applied.
+/// diff, apply the pad and record what it applied; and whether it keeps its sound writes.
 #[derive(Debug, Default)]
 pub struct Trace {
     /// Where to save the machine state.
@@ -246,6 +270,8 @@ pub struct Trace {
     pub pad: PadSource,
     /// Where to record the buttons applied.
     pub record: Option<Recorder<File>>,
+    /// Keep every write to the sound chips, for the report (headless runs only).
+    pub sound: bool,
 }
 
 /// Where the pad's buttons at a stop come from.
@@ -273,6 +299,7 @@ impl Trace {
             folder,
             pad,
             record,
+            sound: _,
         } = self;
         let recording = record.map(|recorder| Rc::new(RefCell::new(recorder)));
         let recorder = recording.clone();
@@ -377,6 +404,29 @@ fn word(state: &AgState, address: u32) -> u16 {
     ])
 }
 
+/// The text of a sound log: a comment line, then one write per line: master clock, CPU,
+/// chip (`ym1`, `ym2` or `psg`), YM2612 register (`-` for the PSG) and value, in hex.
+pub fn sound_log(writes: &[SoundWrite]) -> String {
+    let mut text = String::from("# sound writes: master clock, CPU, chip, register, value\n");
+    for write in writes {
+        let cpu = match write.cpu {
+            Cpu::M68000 => "68k",
+            Cpu::Z80 => "z80",
+        };
+        let (chip, register) = match write.chip {
+            Chip::Ym2612 { part, register } => (format!("ym{part}"), format!("{register:02X}")),
+            Chip::Psg => ("psg".to_owned(), "-".to_owned()),
+        };
+        // Writing to a String cannot fail.
+        let _ = writeln!(
+            text,
+            "{} {cpu} {chip} {register} {:02X}",
+            write.clock, write.value
+        );
+    }
+    text
+}
+
 /// Saves `picture`, frame `frame`, as a BMP file in `folder`; returns its path.
 ///
 /// # Errors
@@ -410,6 +460,12 @@ pub struct Report {
     pub tmss_unlocked: bool,
     /// Z80 RAM bytes that are not zero.
     pub z80_bytes: usize,
+    /// Where the Z80 is, and its lines: `None` while in reset.
+    pub z80_pc: Option<u16>,
+    pub z80_bank: u16,
+    pub sound: SoundCounts,
+    /// Every sound write, when the run kept them ([`Trace::sound`]).
+    pub sound_writes: Vec<SoundWrite>,
     pub vdp: Vdp,
     /// Work RAM at the end.
     pub ram: Box<[u8; RAM_SIZE]>,
@@ -459,6 +515,10 @@ impl Report {
             unwinds: runtime.log().unwinds(),
             tmss_unlocked: runtime.tmss_unlocked(),
             z80_bytes: runtime.z80_ram().iter().filter(|&&byte| byte != 0).count(),
+            z80_pc: (!runtime.z80().in_reset()).then(|| runtime.z80().cpu().pc),
+            z80_bank: runtime.z80().bank(),
+            sound: runtime.sound_counts(),
+            sound_writes: Vec::new(),
             vdp: runtime.hardware::<Vdp>().cloned().unwrap_or_default(),
             ram: Box::new(state.ram),
             pictures,
@@ -489,6 +549,15 @@ impl Report {
             },
             self.z80_bytes,
             self.unwinds
+        );
+        match self.z80_pc {
+            Some(pc) => println!("Z80: PC ${pc:04X}, bank ${:03X}", self.z80_bank),
+            None => println!("Z80: in reset"),
+        }
+        let sound = &self.sound;
+        println!(
+            "sound writes (68000, Z80): YM2612 {:?} (DAC {:?}, timer runs {:?}), PSG {:?}",
+            sound.ym2612, sound.dac, sound.timers, sound.psg
         );
         let counts = self.vdp.counts();
         println!(
@@ -552,6 +621,8 @@ pub fn run_from_reset(
         .spawn(move || {
             let mut runtime = start(rom, game, reference);
             let failure = Failure::default();
+            let sound = trace.sound;
+            runtime.record_sound(sound);
             let recording = if trace.is_empty() {
                 None
             } else {
@@ -559,7 +630,11 @@ pub fn run_from_reset(
             };
             let (exit, pictures) = run_frames(&mut runtime, frames, &dumps);
             let recording = recording.as_ref();
-            conclude(&runtime, exit, pictures, &failure, recording)
+            let mut report = conclude(&runtime, exit, pictures, &failure, recording)?;
+            if sound {
+                report.sound_writes = runtime.take_sound_writes();
+            }
+            Ok(report)
         })
         .context("starting the 68000 thread")?;
     worker

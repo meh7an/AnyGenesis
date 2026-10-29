@@ -124,7 +124,7 @@ impl<'a, B: Bus + ?Sized> Step<'a, B> {
     /// An opcode fetch: four T-states, the last two refreshing memory.
     fn m1(&mut self, address: u16) -> u8 {
         let value = self.bus.read(address, self.t + 1);
-        self.t += 4;
+        self.t += 4 + self.bus.wait();
         self.increment_r();
         value
     }
@@ -137,24 +137,24 @@ impl<'a, B: Bus + ?Sized> Step<'a, B> {
 
     fn read(&mut self, address: u16) -> u8 {
         let value = self.bus.read(address, self.t + 1);
-        self.t += 3;
+        self.t += 3 + self.bus.wait();
         value
     }
 
     fn write(&mut self, address: u16, value: u8) {
         self.bus.write(address, value, self.t + 1);
-        self.t += 3;
+        self.t += 3 + self.bus.wait();
     }
 
     fn input(&mut self, port: u16) -> u8 {
         let value = self.bus.input(port, self.t + 2);
-        self.t += 4;
+        self.t += 4 + self.bus.wait();
         value
     }
 
     fn output(&mut self, port: u16, value: u8) {
         self.bus.output(port, value, self.t + 2);
-        self.t += 4;
+        self.t += 4 + self.bus.wait();
     }
 
     fn fetch_byte(&mut self) -> u8 {

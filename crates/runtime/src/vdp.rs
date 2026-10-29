@@ -506,6 +506,10 @@ impl Hardware for Vdp {
         self.fault.take()
     }
 
+    fn z80_interrupt(&self, clock: u64) -> bool {
+        self.timing.z80_interrupt(clock)
+    }
+
     /// Drops a half-written command only: the 68000's RESET instruction is taken not to
     /// reach the VDP's registers or memories (chosen, unverified).
     fn reset(&mut self) {
@@ -767,13 +771,15 @@ mod tests {
         write(&mut vdp, port::DATA, &[4]);
         assert_eq!(vdp.take_stall(), 0);
         assert_ne!(vdp.status() & status::FIFO_FULL, 0);
-        // A VRAM word takes two slots of 190 master clocks: the first leaves at 380.
+        // A VRAM word takes two slots: the fifth write waits for the first's to end.
+        let slots = |count| dma::end(&vdp.timing().clone(), 0, count);
+        let (first, fifth) = (slots(2), slots(10));
         write(&mut vdp, port::DATA, &[5]);
-        assert_eq!(vdp.take_stall(), cycles_to(380));
+        assert_eq!(vdp.take_stall(), cycles_to(first));
         // Writes reach VRAM when queued.
         assert_eq!(vdp.vram()[8..10], [0, 5]);
         // The fifth leaves after ten slots.
-        vdp.advance(cycles_to(10 * 190) - 1);
+        vdp.advance(cycles_to(fifth) - 1);
         assert_eq!(vdp.status() & status::FIFO_EMPTY, 0);
         vdp.advance(1);
         assert_ne!(vdp.status() & status::FIFO_EMPTY, 0);
@@ -783,17 +789,16 @@ mod tests {
     fn test_fifo_takes_one_slot_per_cram_word_and_drains_fast_when_blanked() {
         let mut vdp = drawing();
         write(&mut vdp, port::CONTROL, &command(0x03, 0));
+        let first = dma::end(vdp.timing(), 0, 1);
         write(&mut vdp, port::DATA, &[1, 2, 3, 4, 5]);
-        assert_eq!(vdp.take_stall(), cycles_to(190));
-        // Display off: 205 slots a line, so two VRAM words leave within 34 master clocks.
+        assert_eq!(vdp.take_stall(), cycles_to(first));
+        // Display off: a slot every two pixels, so a VRAM word leaves within 40 master
+        // clocks.
         let mut vdp = drawing();
         write(&mut vdp, port::CONTROL, &[0x8104]);
         write(&mut vdp, port::CONTROL, &command(0x01, 0));
         write(&mut vdp, port::DATA, &[1, 2, 3, 4, 5]);
-        assert_eq!(
-            vdp.take_stall(),
-            cycles_to((2 * timing::LINE_CLOCKS).div_ceil(205))
-        );
+        assert_eq!(vdp.take_stall(), cycles_to(5 * 8));
     }
 
     #[test]
@@ -805,7 +810,7 @@ mod tests {
         write(&mut vdp, port::CONTROL, &registers);
         write(&mut vdp, port::CONTROL, &command(0x21, 0x0100));
         // Four slots for the queued writes, then two for the transfer.
-        assert_eq!(vdp.take_stall(), cycles_to(6 * 190));
+        assert_eq!(vdp.take_stall(), cycles_to(dma::end(vdp.timing(), 0, 6)));
     }
 
     #[test]
@@ -814,7 +819,7 @@ mod tests {
         write(&mut vdp, port::DATA, &[0x1234]);
         write(&mut vdp, port::CONTROL, &command(0x00, 0));
         assert_eq!(read(&mut vdp, port::DATA), 0x1234);
-        assert_eq!(vdp.take_stall(), cycles_to(3 * 190));
+        assert_eq!(vdp.take_stall(), cycles_to(dma::end(vdp.timing(), 0, 3)));
     }
 
     #[test]

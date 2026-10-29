@@ -71,6 +71,7 @@ use crate::{
     io::{Buttons, VERSION_NO_EXPANSION, VERSION_OVERSEAS},
     log::Log,
     refresh::Refresh,
+    sound::{SoundCounts, SoundWrite},
     timing::CPU_DIVIDER,
     z80,
 };
@@ -486,7 +487,7 @@ impl Context {
     /// which can.
     pub fn after_access(&mut self, state: &mut AgState, address: u32) {
         self.charge_stall(state);
-        if self.devices.hardware.take_rescheduled() {
+        if self.devices.take_rescheduled() {
             self.reschedule(state);
         }
         if self.depth(address) > self.options.soft_depth || self.due(mask(state.sr)).is_some() {
@@ -512,13 +513,13 @@ impl Context {
         }
     }
 
-    /// An access moved the hardware's next interrupt: the budget ends there if that is
-    /// sooner, the cycles used so far still counting.
+    /// An access moved the hardware's next interrupt, or let the Z80 run: the budget ends
+    /// there if that is sooner, the cycles used so far still counting.
     fn reschedule(&mut self, state: &mut AgState) {
         // From the time the count stands at, which is past the access: it holds the rest of
         // the instruction (or, in translated code, of its segment) already.
         let now = self.devices.clock_at(self.clock(state));
-        let horizon = self.horizon(now).unsigned_abs();
+        let horizon = self.horizon(now, state).unsigned_abs();
         let done = self.elapsed(state).saturating_sub(self.waited);
         // A horizon is at most a slice, so it fits.
         let left = self.refresh.until(done, horizon) as i32;
@@ -530,18 +531,28 @@ impl Context {
     }
 
     /// 68000 cycles from master clock `from` to the next point a budget must end at: where
-    /// an enabled interrupt may become pending, and the end of a frame while a frame limit
-    /// is set; a slice at most, at least 1.
-    fn horizon(&self, from: u64) -> i32 {
+    /// an enabled interrupt may become pending, the end of a frame while a frame limit is
+    /// set, and where the Z80 next reaches the 68000's bus (it runs ahead to find it); a
+    /// slice at most, at least 1.
+    fn horizon(&mut self, from: u64, state: &mut AgState) -> i32 {
+        let slice = u64::from(self.options.slice.max(1).unsigned_abs());
         let hardware = &self.devices.hardware;
         let frame = self.frame_limit.map(|_| hardware.next_frame());
-        let event = hardware.next_interrupt().into_iter().chain(frame).min();
-        let until = event.map_or(i64::MAX, |event| {
-            let clocks = event.saturating_sub(from);
-            i64::try_from(clocks.div_ceil(CPU_DIVIDER)).unwrap_or(i64::MAX)
-        });
+        let cap = hardware
+            .next_interrupt()
+            .into_iter()
+            .chain(frame)
+            .min()
+            .unwrap_or(u64::MAX)
+            .min(from + slice * CPU_DIVIDER);
+        let (rom, ram) = memory(state);
+        let event = self
+            .devices
+            .z80_event(rom, ram, cap)
+            .map_or(cap, |z80| z80.min(cap));
+        let until = event.saturating_sub(from).div_ceil(CPU_DIVIDER);
         // At most the slice, so it fits.
-        until.clamp(1, i64::from(self.options.slice.max(1))) as i32
+        until.clamp(1, slice) as i32
     }
 
     /// Takes the cycles a device froze the 68000 for out of the budget, as if the access
@@ -561,16 +572,20 @@ impl Context {
         let used = elapsed + self.refresh.charge(executed);
         self.cycles += u64::from(used);
         self.devices.settle(used);
+        let (rom, ram) = memory(state);
+        self.devices.sync_z80(rom, ram);
         self.budget = 0;
         state.cycles = 0;
     }
 
     /// Starts a budget that lasts until the [`Context::horizon`] or the cycle cap, less the
     /// refresh it will cause; none while an interrupt is due, which the next check point
-    /// then takes, or one instruction when that is the one to take it.
+    /// then takes, or one instruction when that is the one to take it. Cycles the Z80 took
+    /// from the 68000 where the last budget ended come first.
     fn refill(&mut self, state: &mut AgState) {
         self.cut = false;
-        self.budget = if std::mem::take(&mut self.one_more) {
+        let one_more = std::mem::take(&mut self.one_more);
+        self.budget = if one_more {
             1
         } else if self.due(mask(state.sr)).is_some() {
             self.cut = true;
@@ -578,11 +593,19 @@ impl Context {
         } else {
             let left = self.options.max_cycles.saturating_sub(self.cycles);
             let cap = i32::try_from(left).unwrap_or(i32::MAX).max(1);
-            let horizon = self.horizon(self.devices.clock_at(0)).min(cap);
+            let horizon = self.horizon(self.devices.clock_at(0), state).min(cap);
             // At most the horizon, so it fits.
             self.refresh.until(0, horizon.unsigned_abs()) as i32
         };
         state.cycles = self.budget;
+        if one_more {
+            // The instruction still runs to its end: the stall comes on top of it.
+            let stall = self.devices.take_stall();
+            self.budget += stall;
+            self.waited = self.waited.saturating_add(stall.unsigned_abs());
+        } else {
+            self.charge_stall(state);
+        }
     }
 
     /// The limit the run has reached at `pc`, if any.
@@ -982,7 +1005,7 @@ pub(crate) unsafe fn step_end(
         {
             ctx.latched_late = true;
         }
-        if ctx.devices.hardware.take_rescheduled() {
+        if ctx.devices.take_rescheduled() {
             ctx.reschedule(st);
         }
         // One that came after the latch waits for the next instruction's end.
@@ -1039,8 +1062,9 @@ pub(crate) unsafe fn stop(state: *mut AgState, resume: u32) -> u32 {
                 return ctx.end(Exit::Stopped { resume });
             }
             // Nothing runs while stopped, so the wait to the next event is used at once, and
-            // it causes no refresh.
-            let until = ctx.horizon(ctx.devices.clock_at(0));
+            // it causes no refresh; the Z80 takes nothing from a CPU that waits.
+            ctx.devices.take_stall();
+            let until = ctx.horizon(ctx.devices.clock_at(0), st);
             ctx.budget = until;
             ctx.waited = until.unsigned_abs();
         }
@@ -1135,6 +1159,14 @@ fn cached<'a>(lifts: &'a mut HashMap<u32, Lifted>, rom: &[u8], pc: u32) -> Optio
 unsafe fn rom<'a>(state: &AgState) -> &'a [u8] {
     // SAFETY: forwarded from the caller.
     unsafe { slice::from_raw_parts(state.rom, state.rom_size as usize) }
+}
+
+/// The ROM image and work RAM of a run's state, for the Z80.
+fn memory(state: &mut AgState) -> (&[u8], &mut [u8; RAM_SIZE]) {
+    // SAFETY: a context only ever runs with the state its Runtime set up, whose `rom` points
+    // at the Runtime's ROM image for as long as both live.
+    let rom = unsafe { rom(state) };
+    (rom, &mut state.ram)
 }
 
 /// Where the native stack is now, to measure depth against the top-level loop's position.
@@ -1278,7 +1310,7 @@ unsafe fn run_interpreter(state: *mut AgState, start: u32, miss: bool) -> Ending
             if step.outcome.reset_devices {
                 ctx.devices.reset();
             }
-            if ctx.devices.hardware.take_rescheduled() {
+            if ctx.devices.take_rescheduled() {
                 ctx.reschedule(st);
             }
             // One that came after the latch waits for the next instruction's end.
@@ -1528,9 +1560,39 @@ impl Runtime {
         (self.context.devices.hardware.as_ref() as &dyn Any).downcast_ref()
     }
 
-    /// Z80 RAM as the 68000 last wrote it.
+    /// Z80 RAM, as far as the Z80 has run.
     pub fn z80_ram(&self) -> &[u8; z80::RAM_SIZE] {
         self.context.devices.z80.ram()
+    }
+
+    /// The Z80 side: its registers, bank register and lines. The Z80 runs ahead of the
+    /// 68000, up to where the last budget would have ended.
+    pub fn z80(&self) -> &z80::Z80 {
+        &self.context.devices.z80
+    }
+
+    /// Writes to the sound chips so far, by chip and CPU; the Z80's include those it ran
+    /// ahead of the 68000.
+    pub fn sound_counts(&self) -> SoundCounts {
+        let devices = &self.context.devices;
+        devices.sound.counts().sum(&devices.z80.sound().counts())
+    }
+
+    /// Keeps every sound write from now on, for [`Runtime::take_sound_writes`].
+    pub fn record_sound(&mut self, recording: bool) {
+        let devices = &mut self.context.devices;
+        devices.sound.set_recording(recording);
+        devices.z80.sound_mut().set_recording(recording);
+    }
+
+    /// Takes the sound writes kept so far that the 68000 has reached, in time order.
+    pub fn take_sound_writes(&mut self) -> Vec<SoundWrite> {
+        let devices = &mut self.context.devices;
+        let now = devices.clock_at(0);
+        let mut writes = devices.sound.take_before(now);
+        writes.extend(devices.z80.sound_mut().take_before(now));
+        writes.sort_by_key(|write| write.clock);
+        writes
     }
 
     /// Whether TMSS lets the VDP run (always, on a console without TMSS).

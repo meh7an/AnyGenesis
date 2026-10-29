@@ -19,7 +19,9 @@
 //! interrupt flag sets, the slow H40 pixels during horizontal blanking), Nemesis's pixel
 //! counter tables and posts on the SpritesMind forum (the 9-bit counter, 342 and 420 pixels
 //! a line), Charles MacDonald's VDP document and Sega Retro's interrupt page (line counter
-//! reload), and a SpritesMind post on VBlank reading set while the display is off. Where
+//! reload), a SpritesMind post on VBlank reading set while the display is off, and
+//! MacDonald's and Eke's SpritesMind posts on the Z80's interrupt (asserted with the
+//! vertical interrupt flag for one line, enabled or not). Where
 //! the slow H40 stretch starts is chosen: Kabuto measured 32 slow pixels 24 after the right
 //! edge, and a 3420-clock line leaves room for 30.
 
@@ -100,7 +102,7 @@ impl HMode {
     }
 
     /// Master clocks from the start of a line to the start of its pixel `pixel`.
-    const fn pixel_clock(self, pixel: u64) -> u64 {
+    pub(crate) const fn pixel_clock(self, pixel: u64) -> u64 {
         match self {
             Self::H32 => pixel * 10,
             Self::H40 => {
@@ -276,6 +278,15 @@ impl Timing {
         } else {
             start + FRAME_CLOCKS + point
         }
+    }
+
+    /// Whether the VDP holds the Z80's interrupt input at master clock `clock`: for one line
+    /// from the vertical interrupt point of every frame, whatever the enable bits say. The
+    /// point is that of the current horizontal mode, so a mode change moves it for later
+    /// clocks too.
+    pub fn z80_interrupt(&self, clock: u64) -> bool {
+        let point = ACTIVE_LINES * LINE_CLOCKS + self.mode.line_positions().vint;
+        (point..point + LINE_CLOCKS).contains(&(clock % FRAME_CLOCKS))
     }
 
     /// Where the line counter next runs out, stepping it ahead as [`Timing::apply`] does.

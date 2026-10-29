@@ -94,6 +94,13 @@ pub trait Hardware: Any + Debug {
     fn take_fault(&mut self) -> Option<AccessKind> {
         None
     }
+
+    /// Whether the hardware asserts the Z80's interrupt input at master clock `clock`, which
+    /// may lie ahead of the hardware's own time.
+    fn z80_interrupt(&self, clock: u64) -> bool {
+        let _ = clock;
+        false
+    }
 }
 
 #[cfg(test)]

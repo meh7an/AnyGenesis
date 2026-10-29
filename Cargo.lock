@@ -172,6 +172,7 @@ dependencies = [
  "anygenesis-m68k",
  "anygenesis-rom",
  "anygenesis-shared",
+ "anygenesis-z80",
 ]
 
 [[package]]

@@ -18,6 +18,7 @@ fn main() -> Result<()> {
 mod tests {
     use std::{
         fs::{self, File},
+        ops::Range,
         path::Path,
         rc::Rc,
         thread,
@@ -43,26 +44,28 @@ mod tests {
     const LEVEL_MODE: u8 = 0x0C;
     /// The copy of CRAM in work RAM that the vertical interrupt copies to CRAM.
     const PALETTE_COPY: u32 = 0xFF_FB00;
+    /// The colours the title screen rotates by a step every few frames, in the main loop.
+    const CYCLED_COLOURS: Range<usize> = 40..44;
     /// The ROM table of 19 `0x8RVV` words that sets VDP registers 0-18 at boot.
     const VDP_SETUP: u32 = 0x00_129E;
 
     /// The VDP's memories and registers after 600 frames, as Mehran signed them off
-    /// (M3.3, VRAM again at v0.2 M1.1); they change whenever DMA, timing or the translated
-    /// code's cycle counts do.
+    /// (M3.3, VRAM again at v0.2 M1.1, VRAM and CRAM at v0.2 M3.2); they change whenever
+    /// DMA, timing or the translated code's cycle counts do.
     const HASHES_AT_600: [(&str, &str); 4] = [
-        ("VRAM", "af90156571d5d2313cb701d0568ffa7552674efa"),
-        ("CRAM", "2ab1aba063597f9054b94bbf379bda288be40369"),
+        ("VRAM", "bd567c0e7e1284df2bcccd28e2fd803f42453893"),
+        ("CRAM", "cfb39dfc175a8a1b73f031801c50a194778752e5"),
         ("VSRAM", "9faab1c6fb9abfc6d5a3c2a3d3149f0f3f7e4f4d"),
         ("registers", "6f90e45454834c6814184810aa3cd4d03cc6e8c4"),
     ];
     /// A frame showing the SEGA screen.
     const SEGA_FRAME: u64 = 240;
     /// SHA-1s of the BMP files of the SEGA frame and of frame 600 (the title screen), as
-    /// Mehran signed the pictures off (M3.4, frame 600 again at v0.2 M1.1); they change
-    /// whenever the hashes above or the renderer do.
+    /// Mehran signed the pictures off (M3.4, frame 600 again at v0.2 M1.1 and M3.2); they
+    /// change whenever the hashes above or the renderer do.
     const PICTURES: [(u64, &str); 2] = [
         (SEGA_FRAME, "87e9a8f99cee2471fa47e8d853165035cfbd9d39"),
-        (DEFAULT_FRAMES, "58274d550398349f85b1745ff30870605aa13f11"),
+        (DEFAULT_FRAMES, "aa2a2bf3b06befd407053e2b43971e8fb630e6d6"),
     ];
 
     /// The registers the title screen should leave: the setup table at `setup`, read from
@@ -139,14 +142,34 @@ mod tests {
         assert_eq!(game_mode(&report), TITLE_MODE);
 
         // The title screen has faded in, so the last VBlank's DMA left CRAM equal to the
-        // palette buffer.
+        // palette buffer, but for the cycled colours: the main loop may have rotated them
+        // since.
         let palette: Vec<u16> = (0..64)
             .map(|index| {
                 let at = ram_index(PALETTE_COPY) + 2 * index;
                 u16::from_be_bytes([report.ram[at], report.ram[at + 1]]) & CRAM_MASK
             })
             .collect();
-        assert_eq!(report.vdp.cram()[..], palette[..]);
+        let cram = report.vdp.cram();
+        for (index, (&shown, &buffered)) in cram.iter().zip(&palette).enumerate() {
+            if !CYCLED_COLOURS.contains(&index) {
+                assert_eq!(shown, buffered, "colour {index}");
+            }
+        }
+        let cycled = &palette[CYCLED_COLOURS];
+        let rotated = (0..cycled.len()).any(|step| {
+            cycled
+                .iter()
+                .cycle()
+                .skip(step)
+                .zip(&cram[CYCLED_COLOURS])
+                .all(|(buffered, shown)| buffered == shown)
+        });
+        assert!(
+            rotated,
+            "{:?} not a rotation of {cycled:?}",
+            &cram[CYCLED_COLOURS]
+        );
         assert!(palette.iter().any(|&colour| colour != 0));
         assert_eq!(report.vdp.registers()[..19], registers[..]);
 
@@ -305,6 +328,7 @@ mod tests {
                     folder: Some(folder),
                     pad: PadSource::Live(pad.clone()),
                     record: Some(record),
+                    sound: false,
                 };
                 let failure = Failure::default();
                 let recording = trace.hook(&mut runtime, game, Rc::clone(&failure));
@@ -365,6 +389,7 @@ mod tests {
             folder: Some(replay.clone()),
             pad: PadSource::Replay(input),
             record: None,
+            sound: false,
         };
         let replayed =
             run_from_reset(game, rom, PLAY_FRAMES, &[], trace, true).expect("the replay finishes");

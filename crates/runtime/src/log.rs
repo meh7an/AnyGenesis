@@ -23,6 +23,9 @@ pub enum AccessKind {
     Z80WithoutBus,
     /// A word access to the Z80 window, which only takes bytes.
     Z80Word,
+    /// An access that hangs a real console between the two CPUs: the 68000 reaching the
+    /// VDP through the Z80's space, or the Z80's bank window pointing back at its own.
+    Z80Hang,
     /// The VDP touched before TMSS was unlocked, which locks up a console that has TMSS.
     VdpLocked,
     /// A VDP block address that hangs a real console.
@@ -59,6 +62,7 @@ impl fmt::Display for AccessKind {
             Self::RomWrite => "ROM write",
             Self::Z80WithoutBus => "Z80 RAM without the bus",
             Self::Z80Word => "Z80 word access",
+            Self::Z80Hang => "Z80 window hang",
             Self::VdpLocked => "VDP before TMSS",
             Self::VdpHang => "VDP hang address",
             Self::VdpCommand => "VDP access without effect",

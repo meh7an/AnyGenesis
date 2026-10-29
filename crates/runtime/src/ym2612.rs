@@ -1,5 +1,5 @@
-//! The YM2612 as the 68000 sees it before there is any synthesis: the status register's busy
-//! flag after data writes. Writes reach no register file and sound stays silent.
+//! The YM2612 as either CPU sees it before there is any synthesis: the status register's
+//! busy flag after data writes. Writes reach no register file and sound stays silent.
 //!
 //! Source: the busy duration, the status port and register $27's bits follow ymfm (pinned
 //! SHA in PROGRESS.md, read as a reference, nothing copied).
@@ -39,11 +39,28 @@ impl Port {
     }
 }
 
-/// The busy flag's end and the part I address, the one place a timer can be turned on.
-#[derive(Debug, Default)]
+/// What a write did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Written {
+    /// For a data write, the part (1 or 2) and the register it went to.
+    pub data: Option<(u8, u8)>,
+    /// It loads or enables a timer, which this model does not build.
+    pub timer: bool,
+}
+
+impl Written {
+    const NONE: Self = Self {
+        data: None,
+        timer: false,
+    };
+}
+
+/// The busy flag's end and the address each part's data writes go to.
+#[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Ym2612 {
     busy_until: u64,
     address_one: u8,
+    address_two: u8,
 }
 
 impl Ym2612 {
@@ -56,19 +73,24 @@ impl Ym2612 {
         }
     }
 
-    /// A write at master clock `now`. Returns whether it loads or enables a timer, which
-    /// this model does not build.
-    pub fn write(&mut self, offset: u32, value: u8, now: u64) -> bool {
-        match Port::of(offset) {
+    /// A write at master clock `now`.
+    pub fn write(&mut self, offset: u32, value: u8, now: u64) -> Written {
+        let (part, register) = match Port::of(offset) {
             Port::AddressOne => {
                 self.address_one = value;
-                false
+                return Written::NONE;
             }
-            Port::AddressTwo => false,
-            port => {
-                self.busy_until = now + BUSY_CLOCKS;
-                port == Port::DataOne && self.address_one == TIMER_CONTROL && value & TIMER_RUN != 0
+            Port::AddressTwo => {
+                self.address_two = value;
+                return Written::NONE;
             }
+            Port::DataOne => (1, self.address_one),
+            Port::DataTwo => (2, self.address_two),
+        };
+        self.busy_until = now + BUSY_CLOCKS;
+        Written {
+            data: Some((part, register)),
+            timer: part == 1 && register == TIMER_CONTROL && value & TIMER_RUN != 0,
         }
     }
 }
@@ -123,12 +145,21 @@ mod tests {
     fn test_only_timer_load_or_enable_bits_are_reported() {
         let mut ym = Ym2612::default();
         ym.write(0, TIMER_CONTROL, 0);
-        assert!(!ym.write(1, 0x00, 0));
-        assert!(!ym.write(1, 0x70, 0));
-        assert!(ym.write(1, 0x05, 0));
+        assert!(!ym.write(1, 0x00, 0).timer);
+        assert!(!ym.write(1, 0x70, 0).timer);
+        assert!(ym.write(1, 0x05, 0).timer);
         ym.write(2, TIMER_CONTROL, 0);
-        assert!(!ym.write(3, 0x0F, 0));
+        assert!(!ym.write(3, 0x0F, 0).timer);
         ym.write(0, 0x28, 0);
-        assert!(!ym.write(1, 0x0F, 0));
+        assert!(!ym.write(1, 0x0F, 0).timer);
+    }
+
+    #[test]
+    fn test_data_writes_name_their_part_and_register() {
+        let mut ym = Ym2612::default();
+        assert_eq!(ym.write(0, 0x2A, 0), Written::NONE);
+        ym.write(2, 0xB4, 0);
+        assert_eq!(ym.write(1, 0x80, 0).data, Some((1, 0x2A)));
+        assert_eq!(ym.write(3, 0xC0, 0).data, Some((2, 0xB4)));
     }
 }
