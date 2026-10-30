@@ -238,6 +238,12 @@ impl Vdp {
         self.screen.frame()
     }
 
+    /// Whether lines keep the hardware's sprite and pixel limits (on by default). Off, the
+    /// sprites past them are drawn too; the status flags stay the hardware's (M6.2).
+    pub fn set_sprite_limit(&mut self, on: bool) {
+        self.screen.unlimited_sprites = !on;
+    }
+
     /// Draws the line whose pixels start now, if it is a picture line.
     fn draw_line(&mut self) {
         let line = self.timing.line();

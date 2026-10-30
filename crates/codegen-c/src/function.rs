@@ -15,7 +15,7 @@ use anygenesis_m68k::{Dialect, FormatOptions};
 use anygenesis_shared::Address;
 
 use crate::{
-    CheckPoints,
+    CheckPoints, CodePatch,
     printer::{ADDRESS_MASK, Printer, constant, may_reach_bus, used_temps},
     program::Context,
 };
@@ -175,6 +175,10 @@ impl<'a> Emitter<'a> {
             let pc = constant(address.get());
             let bound = self.block_bound(index);
             self.line(4, format!("AG_HCHECK(s, {pc}, {bound});"));
+        }
+        if let Some(patch) = self.context.options.patches.get(&address) {
+            let lines = patch_call(patch, address, self.context.options.cycles);
+            self.lines(4, lines);
         }
         if self.context.options.cycles && self.starts_segment(index) {
             let cost = self.segment_cost(index);
@@ -343,15 +347,21 @@ impl<'a> Emitter<'a> {
     }
 
     /// Whether the instruction at `index` starts a segment, which charges the static cycles
-    /// up to the next one: at a block start, after an instruction that can leave early, and
+    /// up to the next one: at a block start, after an instruction that can leave early,
     /// where an exception taken by the instruction itself resumes (its frame holds the
-    /// instruction's own address: a privilege violation, ILLEGAL, line A and F).
+    /// instruction's own address: a privilege violation, ILLEGAL, line A and F), and where a
+    /// code patch runs first, which may leave before it.
     fn starts_segment(&self, index: usize) -> bool {
         let slot = &self.slots[index];
         index == 0
             || slot.lifted.address == slot.block.start
             || ends_segment(&self.slots[index - 1])
             || resumes_at_itself(&slot.lifted)
+            || self
+                .context
+                .options
+                .patches
+                .contains_key(&slot.lifted.address)
     }
 
     /// Returns the statements for `control`; `next` is the address emitted right after this
@@ -753,6 +763,29 @@ fn check_points(context: &Context<'_>, function: &Function) -> BTreeSet<Address>
             .filter(|target| blocks.contains(target))
             .collect(),
     }
+}
+
+/// The call of `patch` before the instruction at `address`: when it returns another address,
+/// its cycles are charged (with `charging`) and execution leaves through the dispatcher,
+/// whose target takes any interrupt due, so the patch is atomic for interrupts.
+pub(crate) fn patch_call(patch: &CodePatch, address: Address, charging: bool) -> Vec<String> {
+    let a = constant(address.get());
+    let mut lines = vec![
+        "{".to_owned(),
+        format!(
+            "    uint32_t ag_h = {}(s, {a}) & {};",
+            patch.function,
+            constant(ADDRESS_MASK)
+        ),
+        format!("    if (ag_h != {a}) {{"),
+    ];
+    if charging && patch.cycles > 0 {
+        lines.push(format!("        AG_CYCLES(s, {});", patch.cycles));
+    }
+    lines.extend(indented(8, dispatch("ag_h")));
+    lines.push("    }".to_owned());
+    lines.push("}".to_owned());
+    lines
 }
 
 /// A tail call through the dispatcher to the address `target` (a C expression).

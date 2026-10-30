@@ -33,7 +33,7 @@ pub use externs::{
 pub use hardware::{Hardware, Memory};
 pub use io::Buttons;
 pub use log::{Access, AccessKind, Log, Miss};
-pub use machine::{Exit, InterruptStop, Options, RUN_STACK, Runtime, UNWIND};
+pub use machine::{Exit, InterruptStop, Options, RUN_STACK, RamPatch, RamWhen, Runtime, UNWIND};
 pub use sound::{Chip, Cpu, SoundCounts, SoundWrite};
 pub use vdp::Vdp;
 

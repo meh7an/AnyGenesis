@@ -177,3 +177,160 @@ fn test_sonic1_game_exe_replays_input_into_the_level() {
     let ram = fs::read(&last).expect("the last stop's RAM reads");
     assert_eq!(ram[GAME_MODE], LEVEL_MODE, "{}", last.display());
 }
+
+/// The hook block the emitter writes before the instruction at `entry` for the code patch
+/// `function`, in translated and stepped code alike.
+fn hook_block(function: &str, entry: u32) -> String {
+    let a = format!("0x{entry:X}u");
+    format!(
+        "    {{\n        uint32_t ag_h = {function}(s, {a}) & 0xFFFFFFu;\n        \
+         if (ag_h != {a}) {{\n            {{\n                \
+         AgFn *next = ag_lookup(s, ag_h);\n                \
+         AG_TAIL return next(s, ag_h);\n            }}\n        }}\n    }}\n"
+    )
+}
+
+/// The `.c` and `.h` files of a build's C folder, by name.
+fn c_files(folder: &Path) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = fs::read_dir(folder)
+        .expect("the C folder reads")
+        .map(|entry| entry.expect("an entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "c" || ext == "h"))
+        .map(|path| {
+            let name = path
+                .file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned();
+            (name, fs::read_to_string(&path).expect("the C reads"))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// `files` with the stepped chunks (`ag_s` and digits) merged into one entry holding their
+/// functions one after another: the chunks are cut at a line budget, so a few more lines
+/// move the cuts, and with them the declarations each chunk starts with.
+fn merge_stepped_chunks(files: Vec<(String, String)>) -> Vec<(String, String)> {
+    let is_chunk = |name: &str| {
+        name.strip_prefix("ag_s")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    };
+    let mut functions = String::new();
+    let mut merged: Vec<(String, String)> = files
+        .into_iter()
+        .filter_map(|(name, text)| {
+            if !is_chunk(&name) {
+                return Some((name, text));
+            }
+            let start = text.find("\nuint32_t ").unwrap_or(text.len());
+            functions.push_str(&text[start..]);
+            None
+        })
+        .collect();
+    merged.push(("the stepped functions".to_owned(), functions));
+    merged
+}
+
+/// Runs `exe` headless for 600 frames in `folder`, saving frames 240 and 600, and returns
+/// its report and the two pictures.
+fn run_600(exe: &Path, folder: &Path) -> (String, Vec<Vec<u8>>) {
+    fs::create_dir_all(folder).expect("the run folder is created");
+    let output = Command::new(exe)
+        .args(["600", "--dump", "240,600"])
+        .current_dir(folder)
+        .output()
+        .expect("the game runs");
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let pictures = PICTURES
+        .iter()
+        .map(|(frame, _)| {
+            let path = folder.join("dumps").join(format!("frame-{frame:05}.bmp"));
+            fs::read(&path).expect("the picture is saved")
+        })
+        .collect();
+    (text(&output.stdout), pictures)
+}
+
+#[test]
+#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and the player library"]
+fn test_sonic1_with_an_empty_hook_at_reset_runs_as_the_plain_exe() {
+    // The plain build first: it starts the test folder afresh.
+    let plain = game_exe();
+    let root = test_root().join("noop");
+    fs::create_dir_all(&root).expect("the test folder is created");
+    let rom = fs::read(rom_path()).expect("the ROM reads");
+    // The reset entry, from the ROM's own vector, so no address is written down here.
+    let entry = u32::from_be_bytes([rom[4], rom[5], rom[6], rom[7]]) & 0xFF_FFFF;
+    fs::write(
+        root.join("noop.c"),
+        "uint32_t noop(AgState *s, uint32_t pc)\n{\n    (void)s;\n    return pc;\n}\n",
+    )
+    .expect("the C is written");
+    let pack = root.join("noop.toml");
+    let rom_sha1 = Sha1Digest::of(&rom);
+    fs::write(
+        &pack,
+        format!(
+            "name = \"No-op\"\nrom = \"{rom_sha1}\"\n\n\
+             [[hook]]\naddress = {entry:#x}\nfile = \"noop.c\"\nfunction = \"noop\"\n"
+        ),
+    )
+    .expect("the pack is written");
+    let out = root.join("game");
+    let built = anygenesis(&[
+        &rom_path(),
+        Path::new("--patch"),
+        &pack,
+        Path::new("--out"),
+        &out,
+    ]);
+    println!("{}{}", text(&built.stdout), text(&built.stderr));
+    assert!(built.status.success(), "the patched build succeeds");
+    let patched = out.join(format!(
+        "{} (No-op){}",
+        rom_path().file_stem().expect("a stem").to_string_lossy(),
+        env::consts::EXE_SUFFIX
+    ));
+
+    // The C differs only by the hook blocks, the prototype and the patch files.
+    let cache = test_root().join("cache");
+    let plain_c = merge_stepped_chunks(c_files(&cache.join(rom_sha1.to_string()).join("c")));
+    let patched_folder = fs::read_dir(&cache)
+        .expect("the cache reads")
+        .map(|entry| entry.expect("an entry").path())
+        .find(|path| path.to_string_lossy().contains(&format!("{rom_sha1}-")))
+        .expect("the patched build has its own entry");
+    let mut patched_c = merge_stepped_chunks(c_files(&patched_folder.join("c")));
+    patched_c.retain(|(name, _)| !matches!(name.as_str(), "ag_patch.h" | "ag_patch_000.c"));
+    assert_eq!(patched_c.len(), plain_c.len());
+    let block = hook_block("noop", entry);
+    let prototype = "/* The code patches (ag_patch.h). */\n\
+                     uint32_t noop(AgState *s, uint32_t pc);\n\n";
+    let mut blocks = 0;
+    for ((name, plain), (patched_name, patched)) in plain_c.iter().zip(&patched_c) {
+        assert_eq!(name, patched_name);
+        blocks += patched.matches(&block).count();
+        let stripped = patched.replace(&block, "").replacen(prototype, "", 1);
+        assert!(stripped == *plain, "{name} differs by more than the hook");
+    }
+    assert_eq!(
+        blocks, 2,
+        "one hook in the translated code, one in the stepped code"
+    );
+
+    // And the runs are the same.
+    let (plain_report, plain_pictures) = run_600(&plain, &root.join("plain-run"));
+    let (patched_report, patched_pictures) = run_600(&patched, &root.join("patched-run"));
+    println!("{patched_report}");
+    assert!(
+        patched_report.contains(" cycles, 600 frames\n"),
+        "{patched_report}"
+    );
+    assert_eq!(patched_report, plain_report);
+    assert!(patched_pictures == plain_pictures, "the pictures differ");
+    for ((frame, hash), picture) in PICTURES.iter().zip(&patched_pictures) {
+        assert_eq!(Sha1Digest::of(picture).to_string(), *hash, "frame {frame}");
+    }
+}

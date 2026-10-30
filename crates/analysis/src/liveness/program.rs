@@ -46,6 +46,9 @@ pub(super) trait Context {
 
     /// Returns whether every block start reads the whole status register.
     fn check_points_read_sr(&self) -> bool;
+
+    /// Returns whether the instruction at `address` counts as reading every flag first.
+    fn reads_flags(&self, address: Address) -> bool;
 }
 
 impl<'a> Program<'a> {
@@ -100,7 +103,7 @@ impl<'a> Program<'a> {
         let live = flags::live_in(&site.lifted.body, live_out, |control| {
             self.exit(address, site, control, context)
         });
-        if site.block_start && context.check_points_read_sr() {
+        if (site.block_start && context.check_points_read_sr()) || context.reads_flags(address) {
             FlagSet::ALL
         } else {
             live

@@ -19,6 +19,9 @@ typedef uint32_t AgInterrupt(AgState *state, uint32_t level, uint32_t pc);
 
 /* The layout version of AgGame. */
 #define AG_GAME_ABI 1u
+/* The kinds of AgExtra, as the abi crate describes them. */
+#define AG_EXTRA_RAM_PATCH 1u
+#define AG_EXTRA_FLAG 2u
 
 /* The machine state translated code runs on. */
 struct AgState {
@@ -81,8 +84,8 @@ _Static_assert(offsetof(AgEntry, address) == 0, "AgEntry.address moved");
 _Static_assert(offsetof(AgEntry, function) == 8, "AgEntry.function moved");
 _Static_assert(sizeof(AgEntry) == 16, "AgEntry changed size");
 
-/* Something embedded beside the ROM image for the player (overlays, settings
- * defaults); no kind is defined yet. */
+/* Something embedded beside the ROM image for the player, of a kind `EXTRA_*`; a player
+ * skips kinds it does not know. */
 struct AgExtra {
     /* What the extra holds. */
     uint32_t kind;

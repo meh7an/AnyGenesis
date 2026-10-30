@@ -12,7 +12,8 @@
 //! the dispatcher searches: every function entry and resume point). With
 //! [`EmitOptions::stepped`] (Architecture Decision 6, native everywhere) also `ag_sNNN.c`,
 //! one stepped function per kept even ROM address, and `ag_steps.c` with their table,
-//! indexed by address, and the interrupt entry.
+//! indexed by address, and the interrupt entry. With [`EmitOptions::patches`] also
+//! `ag_patch.h`, the header code patches include.
 
 mod function;
 mod printer;
@@ -51,6 +52,17 @@ pub struct LineMap {
     pub lines: BTreeMap<Address, u32>,
 }
 
+/// A C function from a patch pack, run before each execution of the instruction at its
+/// address, in translated and stepped code alike (M6.2). It is declared
+/// `uint32_t function(AgState *s, uint32_t pc)` and returns where execution goes on: the
+/// address it was given runs the instruction there, any other leaves through the dispatcher
+/// with `cycles` charged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodePatch {
+    pub function: String,
+    pub cycles: u32,
+}
+
 /// Choices the emitter leaves to its caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmitOptions {
@@ -73,6 +85,9 @@ pub struct EmitOptions {
     /// `ag_table_size`) and to the `ag_functions.h` include guard, so several outputs can
     /// link into one program. The `ag_*` externs keep their names.
     pub symbol_prefix: String,
+    /// The code patches, by address; each address starts a cycle segment. Liveness should
+    /// treat these addresses as reading every flag (`LivenessOptions::read_flags_at`).
+    pub patches: BTreeMap<Address, CodePatch>,
 }
 
 impl Default for EmitOptions {
@@ -84,6 +99,7 @@ impl Default for EmitOptions {
             lines: None,
             chunk_lines: 20_000,
             symbol_prefix: String::new(),
+            patches: BTreeMap::new(),
         }
     }
 }
@@ -104,6 +120,9 @@ pub struct Output {
     pub table_rows: usize,
     /// What the superset kept, with [`EmitOptions::stepped`].
     pub stepped: Option<SteppedStats>,
+    /// The code patch addresses no emitted code holds: no stepped function, or without
+    /// [`EmitOptions::stepped`] no translated instruction. Their patches would never run.
+    pub unplaced_patches: Vec<Address>,
 }
 
 impl Output {

@@ -11,7 +11,7 @@ mod common;
 
 use anygenesis_rom::Rom;
 use anygenesis_runtime::{
-    Exit, Options, Runtime, Vdp, refresh,
+    Exit, Options, RamPatch, RamWhen, Runtime, Vdp, refresh,
     timing::{CPU_DIVIDER, FRAME_CLOCKS, LINE_CLOCKS},
     vdp::{Frame, render::HEIGHT},
 };
@@ -366,4 +366,38 @@ fn test_fifo_stalls_vram_writes_while_the_display_draws() {
     );
     // Blanked: 205 slots a line, two of them in 34 master clocks, faster than the loop.
     assert_eq!(stall_cycles(0x8104), 0);
+}
+
+#[test]
+fn test_ram_patches_land_at_reset_and_at_every_vblank_point() {
+    // clr.b ($FF00).w over and over: only a patch can leave the byte set.
+    let rom = image(0x200, &[], &[(0x200, &[0x4238, 0xFF00, 0x60FA])]);
+    let patch = |address: u32, byte: u8, when: RamWhen| RamPatch {
+        address,
+        bytes: vec![byte],
+        when,
+    };
+    let options = Options {
+        ram_patches: vec![
+            patch(0xFF_FF00, 0x5A, RamWhen::Vblank),
+            patch(0xFF_FF02, 0x11, RamWhen::Reset),
+            patch(0xFF_FFFF, 0x22, RamWhen::Vblank),
+        ],
+        ..Options::default()
+    };
+    let mut runtime = vdp_runtime(rom, options);
+    let ram = |runtime: &Runtime, at: usize| runtime.state().ram[at];
+    assert_eq!(
+        ram(&runtime, 0xFF02),
+        0x11,
+        "reset, before the first instruction"
+    );
+    assert_eq!(ram(&runtime, 0xFF00), 0);
+    for frame in 1..=3 {
+        assert!(matches!(runtime.run_frames(1), Exit::Frames { .. }));
+        // The run ends at the VBlank point, right after the patch.
+        assert_eq!(ram(&runtime, 0xFF00), 0x5A, "frame {frame}");
+        assert_eq!(ram(&runtime, 0xFFFF), 0x22, "frame {frame}");
+        assert_eq!(runtime.frames(), frame);
+    }
 }

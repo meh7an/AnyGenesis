@@ -1,5 +1,7 @@
 //! Patch packs: a TOML file naming the ROM it is for by SHA-1 and an ordered list of
-//! patches, each a patch file next to the pack, an inline byte run, or Game Genie codes.
+//! patches, each a patch file next to the pack, an inline byte run, or Game Genie codes,
+//! then the code patches (M6.2): C functions run before an instruction, RAM patches and
+//! runtime flags. C files are given relative to the pack.
 //!
 //! ```toml
 //! name = "Example fixes"
@@ -15,9 +17,29 @@
 //!
 //! [[patch]]
 //! genie = ["ABCD-EFGH"]
+//!
+//! [[hook]]
+//! address = 0x000200
+//! file = "hooks.c"
+//! function = "log_lives"
+//!
+//! [[replace]]
+//! address = 0x001000
+//! file = "hooks.c"
+//! function = "fast_copy"
+//! cycles = 120              # optional, 0 by default
+//!
+//! [[ram]]
+//! address = 0xFFFE12
+//! bytes = "09"
+//! when = "vblank"           # or "reset"
+//!
+//! [flags]
+//! sprite_limit = false
 //! ```
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -25,7 +47,14 @@ use std::{
 use anygenesis_rom::Sha1Digest;
 use serde::Deserialize;
 
-use crate::{GenieCode, PatchError, PatchFile, overwrite};
+use crate::{
+    GenieCode, PatchError, PatchFile,
+    code::{
+        CodePatch, CodePatches, Flags, RamPatch, Source, When, check_code_address, check_function,
+        check_ram_range,
+    },
+    overwrite, read,
+};
 
 /// A patch pack as written in its file.
 #[derive(Debug, Deserialize)]
@@ -36,6 +65,33 @@ struct PackText {
     result: Option<String>,
     #[serde(default)]
     patch: Vec<EntryText>,
+    #[serde(default)]
+    hook: Vec<CodeText>,
+    #[serde(default)]
+    replace: Vec<CodeText>,
+    #[serde(default)]
+    ram: Vec<RamText>,
+    #[serde(default)]
+    flags: Flags,
+}
+
+/// One `[[hook]]` or `[[replace]]` table; only a replacement may give `cycles`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeText {
+    address: u32,
+    file: PathBuf,
+    function: String,
+    cycles: Option<u32>,
+}
+
+/// One `[[ram]]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RamText {
+    address: u32,
+    bytes: String,
+    when: When,
 }
 
 /// One `[[patch]]` table: exactly one of `file`, `offset` with `bytes`, or `genie`.
@@ -66,6 +122,8 @@ pub struct Pack {
     /// header checksum fix-up included.
     pub result: Option<Sha1Digest>,
     entries: Vec<Entry>,
+    /// The code patches, which leave the image as it is.
+    pub code: CodePatches,
 }
 
 impl Pack {
@@ -108,11 +166,13 @@ impl Pack {
                 })
             })
             .collect::<Result<_, _>>()?;
+        let code = code_patches(&pack.hook, &pack.replace, &pack.ram, pack.flags, folder)?;
         Ok(Self {
             name: pack.name,
             rom: digest(&pack.rom)?,
             result: pack.result.as_deref().map(digest).transpose()?,
             entries,
+            code,
         })
     }
 
@@ -190,6 +250,80 @@ impl Entry {
         }
         Ok(image)
     }
+}
+
+/// The code patches of a pack's `[[hook]]`, `[[replace]]`, `[[ram]]` and `[flags]` tables,
+/// each C file read once from `folder`.
+fn code_patches(
+    hooks: &[CodeText],
+    replacements: &[CodeText],
+    ram: &[RamText],
+    flags: Flags,
+    folder: &Path,
+) -> Result<CodePatches, PackFault> {
+    let mut code = CodePatches {
+        flags,
+        ..CodePatches::default()
+    };
+    let mut files: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    let mut add = |table: &str, number: usize, text: &CodeText, replace: bool| {
+        let fault = |reason: String| PackFault::Reason(format!("{table} {number}: {reason}"));
+        check_code_address(text.address).map_err(fault)?;
+        check_function(&text.function).map_err(fault)?;
+        if !replace && text.cycles.is_some() {
+            return Err(fault("only a `[[replace]]` charges `cycles`".to_owned()));
+        }
+        let source = match files.get(&text.file) {
+            Some(&index) => index,
+            None => {
+                let index = code.sources.len();
+                code.sources.push(Source {
+                    name: text.file.to_string_lossy().into_owned(),
+                    text: read(&folder.join(&text.file))?,
+                });
+                files.insert(text.file.clone(), index);
+                index
+            }
+        };
+        code.patches.push(CodePatch {
+            address: text.address,
+            function: text.function.clone(),
+            source,
+            cycles: text.cycles.unwrap_or(0),
+        });
+        Ok(())
+    };
+    for (index, text) in hooks.iter().enumerate() {
+        add("hook", index + 1, text, false)?;
+    }
+    for (index, text) in replacements.iter().enumerate() {
+        add("replace", index + 1, text, true)?;
+    }
+    code.patches.sort_by_key(|patch| patch.address);
+    if let Some(pair) = code
+        .patches
+        .windows(2)
+        .find(|pair| pair[0].address == pair[1].address)
+    {
+        return Err(PackFault::Reason(format!(
+            "two code patches at {:#08x}",
+            pair[0].address
+        )));
+    }
+    for (index, text) in ram.iter().enumerate() {
+        let fault = |reason: String| PackFault::Reason(format!("ram {}: {reason}", index + 1));
+        let bytes = parse_hex(&text.bytes).map_err(|error| match error {
+            PackFault::Reason(reason) => fault(reason),
+            other => other,
+        })?;
+        check_ram_range(text.address, bytes.len()).map_err(fault)?;
+        code.ram.push(RamPatch {
+            address: text.address,
+            bytes,
+            when: text.when,
+        });
+    }
+    Ok(code)
 }
 
 /// Why a pack did not parse: a fault in its text, or a patch in it that failed to load.
@@ -335,5 +469,98 @@ mod tests {
         let error = Pack::load(&pack_path).expect_err("unknown format");
         assert!(matches!(error, PatchError::UnknownFormat { .. }), "{error}");
         fs::remove_dir_all(&folder).expect("the test folder is removed");
+    }
+
+    #[test]
+    fn test_pack_code_tables_parse_and_share_their_files() {
+        let folder = env::temp_dir().join(format!("anygenesis-code-test-{}", std::process::id()));
+        fs::create_dir_all(&folder).expect("the test folder is created");
+        fs::write(folder.join("a.c"), "/* a */").expect("written");
+        let text = format!(
+            "name = \"t\"\nrom = \"{}\"\n\
+             [[hook]]\naddress = 0x300\nfile = \"a.c\"\nfunction = \"late\"\n\
+             [[replace]]\naddress = 0x200\nfile = \"a.c\"\nfunction = \"early\"\ncycles = 8\n\
+             [[ram]]\naddress = 0xFFFFFE\nbytes = \"0102\"\nwhen = \"vblank\"\n\
+             [flags]\nsprite_limit = false\n",
+            sha1(ROM)
+        );
+        let pack = Pack::parse(&text, &folder).expect("the pack parses");
+        fs::remove_dir_all(&folder).expect("the test folder is removed");
+        let code = &pack.code;
+        assert_eq!(code.sources.len(), 1);
+        assert_eq!(code.sources[0].text, b"/* a */");
+        let order: Vec<(u32, &str, u32)> = code
+            .patches
+            .iter()
+            .map(|patch| (patch.address, patch.function.as_str(), patch.cycles))
+            .collect();
+        assert_eq!(order, [(0x200, "early", 8), (0x300, "late", 0)]);
+        assert_eq!(
+            code.ram,
+            [RamPatch {
+                address: 0xFF_FFFE,
+                bytes: vec![1, 2],
+                when: When::Vblank
+            }]
+        );
+        assert_eq!(code.flags.sprite_limit, Some(false));
+        // The image is left as it is.
+        let image = pack.apply(Sha1Digest::of(ROM), ROM).expect("applies");
+        assert_eq!(image, ROM);
+    }
+
+    #[test]
+    fn test_pack_bad_code_tables_refused() {
+        let head = format!("name = \"t\"\nrom = \"{}\"\n", sha1(ROM));
+        let hook = |fields: &str| format!("{head}[[hook]]\nfile = \"a.c\"\n{fields}\n");
+        let odd = hook("address = 0x201\nfunction = \"f\"");
+        assert!(reason(&odd).starts_with("hook 1: address 0x201"));
+        let high = hook("address = 0x400000\nfunction = \"f\"");
+        assert!(reason(&high).starts_with("hook 1: address"));
+        for name in ["1st", "a-b", "ag_x", "AG_x", "f_00ABCD", "s_000200", ""] {
+            let text = hook(&format!("address = 0x200\nfunction = {name:?}"));
+            assert!(reason(&text).contains("C identifier"), "{name:?}");
+        }
+        let cycles = hook("address = 0x200\nfunction = \"f\"\ncycles = 4");
+        assert!(reason(&cycles).contains("only a `[[replace]]`"));
+        let ram = |fields: &str| format!("{head}[[ram]]\n{fields}\n");
+        let low = ram("address = 0xFEFFFF\nbytes = \"00\"\nwhen = \"reset\"");
+        assert!(reason(&low).starts_with("ram 1: 1 bytes at 0xfeffff"));
+        let past = ram("address = 0xFFFFFF\nbytes = \"0000\"\nwhen = \"reset\"");
+        assert!(reason(&past).contains("work RAM"));
+        let when = ram("address = 0xFF0000\nbytes = \"00\"\nwhen = \"hblank\"");
+        assert!(reason(&when).contains("hblank"));
+        let flag = format!("{head}[flags]\nturbo = true\n");
+        assert!(reason(&flag).contains("turbo"));
+    }
+
+    #[test]
+    fn test_code_patches_merge_refuses_clashes_and_hash_tracks_content() {
+        let one = |address: u32, cycles: u32| CodePatches {
+            sources: vec![Source {
+                name: "a.c".to_owned(),
+                text: b"x".to_vec(),
+            }],
+            patches: vec![CodePatch {
+                address,
+                function: "f".to_owned(),
+                source: 0,
+                cycles,
+            }],
+            ..CodePatches::default()
+        };
+        let mut all = CodePatches::default();
+        all.add(&one(0x200, 0)).expect("first");
+        all.add(&one(0x100, 0)).expect("second");
+        assert_eq!(all.patches[0].address, 0x100);
+        assert_eq!(all.patches[0].source, 1);
+        let clash = all.add(&one(0x200, 0)).expect_err("same address");
+        assert!(matches!(clash, PatchError::Clash { .. }), "{clash}");
+
+        assert_eq!(one(0x200, 0).hash(), one(0x200, 0).hash());
+        assert_ne!(one(0x200, 0).hash(), one(0x200, 4).hash());
+        assert_ne!(one(0x200, 0).hash(), one(0x202, 0).hash());
+        assert!(CodePatches::default().is_empty());
+        assert!(!one(0x200, 0).is_empty());
     }
 }

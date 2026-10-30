@@ -67,7 +67,7 @@ fn recompile(rom_path: &Path, out: &Path) -> Result<String, String> {
     let failed = |error: build::BuildError| {
         format!("building {name} (SHA-1 {}) failed: {error}", rom.sha1())
     };
-    let sources = build::write_program(&rom, &translation, &directory).map_err(failed)?;
+    let sources = build::write_program(&rom, &translation, &[], &directory).map_err(failed)?;
     build::compile_game(LIBRARY, &directory, &sources, STEPPED_OPTIMIZATION).map_err(failed)?;
     Ok(GAME_ITEMS.to_owned())
 }

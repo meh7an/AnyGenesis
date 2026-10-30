@@ -206,6 +206,9 @@ pub(super) struct Screen {
     /// The line drawn last used all its sprite pixels, which lets an x = 0 sprite mask the
     /// next line from its first sprite on.
     pixels_ran_out: bool,
+    /// Draws the sprites past a line's sprite and pixel limits too, an enhancement flag
+    /// (M6.2); the status flags and the masking stay as the hardware has them.
+    pub unlimited_sprites: bool,
 }
 
 impl Screen {
@@ -240,7 +243,14 @@ impl Screen {
             draw_window(source, &layout, line, window.clone(), plane_a);
             draw_plane(source, &layout, Plane::A, line, window.end..width, plane_a);
             let mut sprites = [0; MAX_WIDTH];
-            let drawn = draw_sprites(source, &layout, line, self.pixels_ran_out, &mut sprites);
+            let drawn = draw_sprites(
+                source,
+                &layout,
+                line,
+                self.pixels_ran_out,
+                self.unlimited_sprites,
+                &mut sprites,
+            );
             self.pixels_ran_out = drawn.pixels_ran_out;
             flags = drawn.flags;
             for (x, pixel) in row.iter_mut().enumerate() {
@@ -524,12 +534,15 @@ fn draw_window(
     }
 }
 
-/// Draws the sprites on `line` into `out`, walking the link list from sprite 0.
+/// Draws the sprites on `line` into `out`, walking the link list from sprite 0. With
+/// `unlimited`, the sprites and pixels past the line's limits are drawn as well, but they
+/// neither collide nor count, so the result is the hardware's.
 fn draw_sprites(
     source: Source<'_>,
     layout: &Layout,
     line: usize,
     pixels_ran_out: bool,
+    unlimited: bool,
     out: &mut [u8; MAX_WIDTH],
 ) -> SpriteLine {
     let (total, per_line) = if layout.h40 { (80, 20) } else { (64, 16) };
@@ -554,9 +567,12 @@ fn draw_sprites(
         let row = target.wrapping_sub(top) & 0x01FF;
         if row < rows * 8 {
             found += 1;
-            if found > per_line {
+            let past_count = found > per_line;
+            if past_count {
                 flags.overflow = true;
-                break;
+                if !unlimited {
+                    break;
+                }
             }
             let pattern = word(source.vram, entry + 4);
             let left = usize::from(word(source.vram, entry + 6) & 0x01FF);
@@ -573,10 +589,13 @@ fn draw_sprites(
             let hflip = pattern & 0x0800 != 0;
             for step in 0..columns {
                 // Out of pixels, the walk goes on only to count sprites.
-                if pixels >= pixel_limit {
+                let extra = past_count || pixels >= pixel_limit;
+                if extra && !unlimited {
                     break;
                 }
-                pixels += 8;
+                if !extra {
+                    pixels += 8;
+                }
                 if masked {
                     continue;
                 }
@@ -596,7 +615,7 @@ fn draw_sprites(
                     }
                     // Sprites earlier in the list stay in front.
                     if opaque(out[x]) {
-                        flags.collision = true;
+                        flags.collision |= !extra;
                     } else {
                         out[x] = colour | attributes(pattern);
                     }

@@ -1,8 +1,10 @@
 //! Builds a game program from a ROM in its cache entry: discover its code (with a profile
-//! run at the furthest stage), translate, write the C, compile it on every core, link it
-//! with the player library into one native program.
+//! run at the furthest stage), translate with the code patches placed, write the C (the
+//! patch packs' own C beside it), compile it on every core, link it with the player library
+//! into one native program.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Output,
@@ -14,8 +16,10 @@ use std::{
     time::Instant,
 };
 
-use anygenesis_recomp::build;
+use anygenesis_patch::{CodePatches, When};
+use anygenesis_recomp::build::{self, Extra};
 use anygenesis_rom::Rom;
+use anygenesis_shared::{Address, c_marker_line};
 use anyhow::{Context, Result, bail};
 
 use crate::{
@@ -35,18 +39,19 @@ pub fn program(entry: &Entry) -> PathBuf {
 }
 
 /// Builds the program for `rom` into `entry` with `toolchain`, discovering code as far as
-/// `discovery` goes and linking the player library at `player`, and marks the entry
-/// finished. Prints what each step took.
+/// `discovery` goes, with the code patches `code`, and linking the player library at
+/// `player`, and marks the entry finished. Prints what each step took.
 ///
 /// # Errors
-/// The profile run, writing the files, a compile or link that fails (with the compiler's
-/// output), or finishing the entry.
+/// The profile run, a code patch at an address no code holds, writing the files, a compile
+/// or link that fails (with the compiler's output), or finishing the entry.
 pub fn build_program(
     rom: &Rom,
     entry: &Entry,
     toolchain: &Toolchain,
     player: &Path,
     discovery: Discovery,
+    code: &CodePatches,
 ) -> Result<()> {
     entry.invalidate()?;
     let (sources, objects) = (entry.folder.join("c"), entry.folder.join("obj"));
@@ -57,14 +62,29 @@ pub fn build_program(
     let started = Instant::now();
     let analysis = profile::analyze(rom, discovery, &entry.folder)?;
     let analysed = started.elapsed();
-    let translation = build::translate_analysis(
-        rom,
-        analysis,
-        build::game_liveness(),
-        &build::game_options(),
-    );
+    let patches: BTreeMap<Address, build::CodePatch> = code
+        .patches
+        .iter()
+        .map(|patch| {
+            let placed = build::CodePatch {
+                function: patch.function.clone(),
+                cycles: patch.cycles,
+            };
+            (Address::new(patch.address), placed)
+        })
+        .collect();
+    let (liveness, options) = build::patched_game(patches);
+    let translation = build::translate_analysis(rom, analysis, liveness, &options);
+    if let Some(address) = translation.output.unplaced_patches.first() {
+        bail!(
+            "no code is at {:#08x} for the code patch there: patch an even address whose bytes \
+             decode to an instruction",
+            address.get()
+        );
+    }
     let translated = started.elapsed();
-    let mut files = build::write_program(rom, &translation, &sources)?;
+    let mut files = build::write_program(rom, &translation, &extras(code), &sources)?;
+    files.extend(write_patch_sources(code, &sources)?);
     let main = sources.join("ag_main.c");
     fs::write(&main, MAIN_SOURCE).with_context(|| format!("writing {}", main.display()))?;
     files.push(main);
@@ -94,6 +114,44 @@ pub fn build_program(
         (linked - compiled).as_secs_f64(),
     );
     Ok(())
+}
+
+/// The RAM patches and flags of `code`, as the program embeds them.
+fn extras(code: &CodePatches) -> Vec<Extra> {
+    let ram = code.ram.iter().map(|patch| Extra::RamPatch {
+        vblank: patch.when == When::Vblank,
+        address: patch.address,
+        bytes: patch.bytes.clone(),
+    });
+    let flags = code
+        .flags
+        .set()
+        .into_iter()
+        .map(|(name, value)| Extra::Flag {
+            name: name.to_owned(),
+            value,
+        });
+    ram.chain(flags).collect()
+}
+
+/// Writes the patch packs' C files into `sources` as `ag_patch_NNN.c`, each including
+/// `ag_patch.h` and keeping its own name and lines for the compiler's messages, and returns
+/// their paths.
+fn write_patch_sources(code: &CodePatches, sources: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::with_capacity(code.sources.len());
+    for (index, source) in code.sources.iter().enumerate() {
+        let path = sources.join(format!("ag_patch_{index:03}.c"));
+        let name = source.name.replace('\\', "/").replace('"', "'");
+        let mut text = format!(
+            "{}#include \"ag_patch.h\"\n#line 1 \"{name}\"\n",
+            c_marker_line()
+        )
+        .into_bytes();
+        text.extend(&source.text);
+        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        files.push(path);
+    }
+    Ok(files)
 }
 
 /// One file to compile.

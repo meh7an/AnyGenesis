@@ -1,5 +1,6 @@
-//! The per-user build cache: one folder per ROM SHA-1, reused while the ROM, anygenesis,
-//! the player library and the discovery stage all stay the same.
+//! The per-user build cache: one folder per ROM SHA-1 (and code patch hash, M6.2), reused
+//! while the ROM, anygenesis, the player library, the discovery stage and the code patches
+//! all stay the same.
 
 use std::{
     env, fs,
@@ -47,7 +48,9 @@ pub struct Entry {
 
 impl Entry {
     /// The entry for the ROM with SHA-1 `rom` in `root`, built by the anygenesis at `tool`
-    /// with the player library at `player`, discovering code up to the stage `discovery`.
+    /// with the player library at `player`, discovering code up to the stage `discovery`,
+    /// with the code patches whose hash is `patches`, if any. A patched build gets a folder
+    /// of its own, so the plain build's stays.
     ///
     /// # Errors
     /// Reading `tool` or `player`.
@@ -57,16 +60,21 @@ impl Entry {
         tool: &Path,
         player: &Path,
         discovery: &str,
+        patches: Option<Sha1Digest>,
     ) -> Result<Self> {
-        let key = format!(
+        let mut key = format!(
             "rom {rom}\nanygenesis {}\nplayer {}\ndiscovery {discovery}\n",
             file_sha1(tool)?,
             file_sha1(player)?
         );
-        Ok(Self {
-            folder: root.join(rom.to_string()),
-            key,
-        })
+        let folder = match patches {
+            Some(patches) => {
+                key.push_str(&format!("patches {patches}\n"));
+                root.join(format!("{rom}-{patches}"))
+            }
+            None => root.join(rom.to_string()),
+        };
+        Ok(Self { folder, key })
     }
 
     /// Whether the folder holds a finished build from the same ROM, anygenesis, player and
@@ -115,17 +123,24 @@ mod tests {
         fs::write(&tool, b"tool 1").expect("written");
         fs::write(&player, b"player 1").expect("written");
         let rom = Sha1Digest::of(b"rom");
-        let entry = Entry::new(&root, rom, &tool, &player, "static").expect("key computed");
+        let entry = Entry::new(&root, rom, &tool, &player, "static", None).expect("key computed");
         assert_eq!(entry.folder, root.join(rom.to_string()));
         fs::create_dir_all(&entry.folder).expect("the entry folder is created");
         assert!(!entry.is_current());
         entry.finish().expect("the key is written");
         assert!(entry.is_current());
 
-        let staged = Entry::new(&root, rom, &tool, &player, "profile").expect("key computed");
+        let staged = Entry::new(&root, rom, &tool, &player, "profile", None).expect("key");
         assert!(!staged.is_current());
+        let hash = Sha1Digest::of(b"patches");
+        let patched = Entry::new(&root, rom, &tool, &player, "static", Some(hash)).expect("key");
+        assert_eq!(patched.folder, root.join(format!("{rom}-{hash}")));
+        fs::create_dir_all(&patched.folder).expect("the entry folder is created");
+        assert!(!patched.is_current());
+        patched.finish().expect("the key is written");
+        assert!(patched.is_current() && entry.is_current());
         fs::write(&player, b"player 2").expect("written");
-        let rebuilt = Entry::new(&root, rom, &tool, &player, "static").expect("key computed");
+        let rebuilt = Entry::new(&root, rom, &tool, &player, "static", None).expect("key");
         assert!(!rebuilt.is_current());
         entry.invalidate().expect("the key is removed");
         assert!(!entry.is_current());

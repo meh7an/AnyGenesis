@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anygenesis_ir::{Control, FlagSet, ReturnKind, flags};
 use anygenesis_shared::Address;
 
+use super::LivenessOptions;
 use super::program::{Context, Program};
 use crate::{Block, Function};
 
@@ -31,7 +32,7 @@ impl Summaries {
 pub(super) fn summaries(
     program: &Program,
     unbalanced: &BTreeSet<Address>,
-    check_points_read_sr: bool,
+    options: &LivenessOptions,
 ) -> Summaries {
     let functions = &program.analysis.functions;
     let mut summaries = Summaries {
@@ -73,7 +74,7 @@ pub(super) fn summaries(
                 reads,
                 defines: &defines,
                 unbalanced,
-                check_points_read_sr,
+                options,
             };
             context.solve(&sites[&function.entry])
         },
@@ -192,7 +193,7 @@ struct Local<'p> {
     reads: &'p BTreeMap<Address, FlagSet>,
     defines: &'p BTreeMap<Address, FlagSet>,
     unbalanced: &'p BTreeSet<Address>,
-    check_points_read_sr: bool,
+    options: &'p LivenessOptions,
 }
 
 impl Local<'_> {
@@ -241,6 +242,10 @@ impl Context for Local<'_> {
     }
 
     fn check_points_read_sr(&self) -> bool {
-        self.check_points_read_sr
+        self.options.check_points_read_sr
+    }
+
+    fn reads_flags(&self, address: Address) -> bool {
+        self.options.read_flags_at.contains(&address)
     }
 }

@@ -395,6 +395,7 @@ fn test_liveness_check_points_keep_every_flag_at_block_starts() {
         &analysis,
         LivenessOptions {
             check_points_read_sr: true,
+            ..LivenessOptions::default()
         },
     );
     let plain = FlagLiveness::new(&analysis, LivenessOptions::default());

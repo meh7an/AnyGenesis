@@ -1,7 +1,8 @@
 use std::fmt::Write;
 
 use crate::{
-    ENTRY, EXTERNS, EXTRA, GAME, GAME_ABI, STATE, Struct, function_typedef, interrupt_typedef,
+    ENTRY, EXTERNS, EXTRA, EXTRA_FLAG, EXTRA_RAM_PATCH, GAME, GAME_ABI, STATE, Struct,
+    function_typedef, interrupt_typedef,
 };
 
 /// The include guard and file name of the generated header.
@@ -49,6 +50,13 @@ fn write_header(out: &mut String) -> std::fmt::Result {
     writeln!(out)?;
     write_comment(out, "", "The layout version of AgGame.\n")?;
     writeln!(out, "#define AG_GAME_ABI {GAME_ABI}u")?;
+    write_comment(
+        out,
+        "",
+        "The kinds of AgExtra, as the abi crate describes them.\n",
+    )?;
+    writeln!(out, "#define AG_EXTRA_RAM_PATCH {EXTRA_RAM_PATCH}u")?;
+    writeln!(out, "#define AG_EXTRA_FLAG {EXTRA_FLAG}u")?;
     for item in [&STATE, &ENTRY, &EXTRA, &GAME] {
         writeln!(out)?;
         write_struct(out, item)?;

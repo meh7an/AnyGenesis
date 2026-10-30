@@ -613,6 +613,7 @@ impl Report {
         for (name, hash) in vdp_hashes(&self.vdp) {
             println!("VDP {name} SHA-1 {hash}");
         }
+        println!("work RAM SHA-1 {}", Sha1Digest::of(&self.ram[..]));
         let registers: Vec<String> = self
             .vdp
             .registers()
@@ -792,9 +793,13 @@ pub fn start(rom: Rom, game: Game, reference: bool) -> Runtime {
     native(rom, game, options)
 }
 
-/// The runtime for `game` at reset on the VDP with `options`, its stepped code attached.
-pub fn native(rom: Rom, game: Game, options: Options) -> Runtime {
-    Runtime::new(rom, game.table, Box::<Vdp>::default(), options).with_stepped(
+/// The runtime for `game` at reset on the VDP with `options`, its stepped code attached and
+/// the RAM patches and flags its patch packs carry applied.
+pub fn native(rom: Rom, game: Game, mut options: Options) -> Runtime {
+    options.ram_patches.extend(game.ram_patches.iter().cloned());
+    let mut vdp = Box::<Vdp>::default();
+    vdp.set_sprite_limit(game.sprite_limit);
+    Runtime::new(rom, game.table, vdp, options).with_stepped(
         game.steps,
         game.step_entry,
         game.interrupt,

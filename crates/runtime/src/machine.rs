@@ -54,7 +54,7 @@ use std::{any::Any, fmt, ptr, slice};
 
 #[cfg(feature = "interpreter")]
 use anygenesis_abi::Region;
-use anygenesis_abi::{AgEntry, AgFn, AgInterrupt, AgState, RAM_SIZE};
+use anygenesis_abi::{AgEntry, AgFn, AgInterrupt, AgState, RAM_SIZE, ram_index};
 #[cfg(feature = "interpreter")]
 use anygenesis_ir::{
     Flag, Lifted,
@@ -112,6 +112,25 @@ const E_PERIOD: u64 = 10;
 /// The level no mask holds back.
 const NON_MASKABLE: u8 = 7;
 
+/// When a [`RamPatch`] is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamWhen {
+    /// Once, before the first instruction.
+    Reset,
+    /// At the first instruction boundary at or after every frame's VBlank point, whether the
+    /// game enabled the interrupt or not; budgets end there, so native and stepped code agree.
+    Vblank,
+}
+
+/// Bytes a patch pack writes to work RAM (M6.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RamPatch {
+    /// A work RAM address; the bytes wrap at the end of its 64 KiB.
+    pub address: u32,
+    pub bytes: Vec<u8>,
+    pub when: RamWhen,
+}
+
 /// Settings for a run.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -129,6 +148,8 @@ pub struct Options {
     pub soft_depth: usize,
     /// Native stack depth past which the process aborts; keep it below the run's stack.
     pub hard_depth: usize,
+    /// RAM patches, written in order.
+    pub ram_patches: Vec<RamPatch>,
 }
 
 impl Default for Options {
@@ -143,6 +164,7 @@ impl Default for Options {
             stop_when_idle: false,
             soft_depth: 8 << 20,
             hard_depth: 56 << 20,
+            ram_patches: Vec::new(),
         }
     }
 }
@@ -286,6 +308,8 @@ pub(crate) struct Context {
     stopped: Option<u32>,
     /// The frame count at which [`Runtime::run_frames`] ends the run.
     frame_limit: Option<u64>,
+    /// The frame count the VBlank RAM patches were last written at.
+    patched_frames: u64,
     /// Interrupts taken, by level.
     interrupts: [u64; 8],
     /// Interrupts taken at a native check point after an instruction boundary had passed.
@@ -540,7 +564,8 @@ impl Context {
     fn horizon(&mut self, from: u64, state: &mut AgState) -> i32 {
         let slice = u64::from(self.options.slice.max(1).unsigned_abs());
         let hardware = &self.devices.hardware;
-        let frame = self.frame_limit.map(|_| hardware.next_frame());
+        let frame = (self.frame_limit.is_some() || self.has_vblank_patches())
+            .then(|| hardware.next_frame());
         let cap = hardware
             .next_interrupt()
             .into_iter()
@@ -579,6 +604,18 @@ impl Context {
         self.devices.sync_z80(rom, ram);
         self.budget = 0;
         state.cycles = 0;
+        let frames = self.devices.hardware.frames();
+        if frames != self.patched_frames {
+            self.patched_frames = frames;
+            write_ram_patches(&self.options.ram_patches, RamWhen::Vblank, &mut state.ram);
+        }
+    }
+
+    fn has_vblank_patches(&self) -> bool {
+        self.options
+            .ram_patches
+            .iter()
+            .any(|patch| patch.when == RamWhen::Vblank)
     }
 
     /// Starts a budget that lasts until the [`Context::horizon`] or the cycle cap, less the
@@ -1187,6 +1224,15 @@ unsafe fn rom<'a>(state: &AgState) -> &'a [u8] {
 }
 
 /// The ROM image and work RAM of a run's state, for the Z80.
+/// Writes the RAM patches of `patches` that apply `when` into `ram`, in order.
+fn write_ram_patches(patches: &[RamPatch], when: RamWhen, ram: &mut [u8; RAM_SIZE]) {
+    for patch in patches.iter().filter(|patch| patch.when == when) {
+        for (offset, &byte) in patch.bytes.iter().enumerate() {
+            ram[ram_index(patch.address.wrapping_add(offset as u32))] = byte;
+        }
+    }
+}
+
 fn memory(state: &mut AgState) -> (&[u8], &mut [u8; RAM_SIZE]) {
     // SAFETY: a context only ever runs with the state its Runtime set up, whose `rom` points
     // at the Runtime's ROM image for as long as both live.
@@ -1428,6 +1474,7 @@ impl Runtime {
         state.a[7] = rom.vectors().initial_ssp();
         state.pc = rom.vectors().reset_pc() & ADDRESS_MASK;
         state.sr = RESET_SR;
+        write_ram_patches(&options.ram_patches, RamWhen::Reset, &mut state.ram);
         let mut context = Box::new(Context {
             devices: Devices::new(hardware, options.version, options.open_bus),
             table,
@@ -1447,6 +1494,7 @@ impl Runtime {
             cycles: 0,
             stopped: None,
             frame_limit: None,
+            patched_frames: 0,
             interrupts: [0; 8],
             late: 0,
             cut: false,

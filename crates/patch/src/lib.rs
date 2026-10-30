@@ -1,9 +1,11 @@
 //! ROM-level patches, applied to a ROM image before analysis, so a patched image builds like
 //! any other ROM: our own IPS, UPS and BPS appliers, inline byte runs, Game Genie codes, and
-//! patch packs that list them for one ROM. The appliers and the Game Genie decoder follow the
-//! public format specifications recorded in plan/PROGRESS.md (M6.1).
+//! patch packs that list them for one ROM, with the code patches they carry (M6.2). The
+//! appliers and the Game Genie decoder follow the public format specifications recorded in
+//! plan/PROGRESS.md (M6.1).
 
 mod bps;
+mod code;
 mod crc32;
 mod genie;
 mod ips;
@@ -18,6 +20,7 @@ use std::{
 
 use anygenesis_rom::{MAX_ROM_SIZE, Rom, RomError, Sha1Digest};
 
+pub use code::{CodePatch, CodePatches, Flags, RAM_START, RamPatch, Source, When};
 pub use genie::GenieCode;
 pub use pack::Pack;
 
@@ -121,6 +124,8 @@ pub enum PatchError {
         number: usize,
         source: Box<PatchError>,
     },
+    #[error("the patches clash: {what}")]
+    Clash { what: String },
     #[error("the patched image does not load: {0}")]
     Rom(#[from] RomError),
 }

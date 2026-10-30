@@ -714,6 +714,41 @@ fn test_a_line_takes_320_sprite_pixels_in_h40_and_cuts_the_sprite_that_overruns(
 }
 
 #[test]
+fn test_sprite_limit_off_draws_past_both_limits_with_the_hardware_status() {
+    // The count: the 21st sprite on the line shows, and one more on top of the first
+    // visible one stays behind it without a collision.
+    let mut scene = Scene::new(true);
+    scene.vdp.set_sprite_limit(false);
+    scene.sprite_at(0, 1, 0, (1, 1), 1, name(SOLID, PAL_S));
+    for index in 1..=20 {
+        scene.sprite(
+            index,
+            (index - 1) * 8,
+            0,
+            (1, 1),
+            index + 1,
+            name(SOLID, PAL_S),
+        );
+    }
+    scene.sprite(21, 0, 0, (1, 1), 0, name(QUAD + 1, PAL_S));
+    let frame = scene.frame();
+    assert_rows(frame, "count", 0, 0, &rows(&cells(&"s".repeat(20)), 8));
+    assert_eq!(scene.sprite_status(), status::SPRITE_OVERFLOW);
+
+    // The pixels: the sprite that overruns shows whole, and so do the ones after it.
+    let mut scene = Scene::new(true);
+    scene.vdp.set_sprite_limit(false);
+    for index in 0..9 {
+        scene.sprite_at(index, 1, 0, (4, 1), index + 1, name(SOLID, PAL_S));
+    }
+    scene.sprite_at(9, 1, 0, (1, 1), 10, name(SOLID, PAL_S));
+    scene.sprite(10, 0, 0, (4, 1), 11, name(QUAD, PAL_S));
+    scene.sprite(11, 64, 0, (1, 1), 0, name(SOLID, PAL_S));
+    assert_rows(scene.frame(), "pixels", 0, 0, &rows(&cells("sStu....s"), 8));
+    assert_eq!(scene.sprite_status(), 0);
+}
+
+#[test]
 fn test_an_x_0_sprite_masks_later_sprites_after_one_at_another_x() {
     let mut scene = Scene::new(true);
     // Lines 0-7: a sprite off the picture, then the mask, then a hidden sprite.

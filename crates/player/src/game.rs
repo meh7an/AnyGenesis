@@ -2,8 +2,11 @@
 
 use std::{ffi::CStr, slice};
 
-use anygenesis_abi::{AgEntry, AgFn, AgGame, AgInterrupt, GAME_ABI};
+use anygenesis_abi::{
+    AgEntry, AgExtra, AgFn, AgGame, AgInterrupt, EXTRA_FLAG, EXTRA_RAM_PATCH, GAME_ABI,
+};
 use anygenesis_rom::{Rom, Sha1Digest};
+use anygenesis_runtime::{RamPatch, RamWhen};
 use anyhow::{Context, Result, bail};
 
 /// A translated game linked into the program, with the ROM image it was translated from.
@@ -27,6 +30,10 @@ pub struct Game {
     pub vector_handlers: &'static [u32],
     /// Entries of every analysed function, ascending.
     pub function_entries: &'static [u32],
+    /// The RAM patches the program's patch packs write, in order (M6.2).
+    pub ram_patches: &'static [RamPatch],
+    /// Whether lines keep the hardware's sprite limits: off by the `sprite_limit` flag.
+    pub sprite_limit: bool,
 }
 
 impl Game {
@@ -60,7 +67,18 @@ impl Game {
                 interrupt: table.interrupt,
                 vector_handlers: elements(table.vector_handlers, table.vector_handler_count),
                 function_entries: elements(table.function_entries, table.function_entry_count),
+                ram_patches: &[],
+                sprite_limit: true,
             }
+        };
+        // SAFETY: as above.
+        let extras = unsafe { elements(table.extras, table.extra_count) };
+        let (ram_patches, sprite_limit) = read_extras(extras)?;
+        // Read once per program and kept for its life, as the rest of the table is.
+        let game = Self {
+            ram_patches: Box::leak(ram_patches.into_boxed_slice()),
+            sprite_limit,
+            ..game
         };
         if game.sha1.bytes() != &table.sha1 {
             let recorded: String = table
@@ -143,6 +161,45 @@ impl Game {
 /// # Safety
 /// Unless `count` is 0, `start` points to `count` initialised elements that stay unchanged
 /// for the rest of the program.
+/// The RAM patches and the sprite limit `extras` give; kinds this player does not know are
+/// skipped.
+fn read_extras(extras: &'static [AgExtra]) -> Result<(Vec<RamPatch>, bool)> {
+    let mut patches = Vec::new();
+    let mut sprite_limit = true;
+    for extra in extras {
+        // SAFETY: the build wrote each extra's name NUL-terminated and its data with its
+        // size, in the program's read-only data.
+        let (name, data) = unsafe {
+            (
+                CStr::from_ptr(extra.name).to_str().unwrap_or_default(),
+                elements(extra.data, extra.size),
+            )
+        };
+        match (extra.kind, name, data) {
+            (EXTRA_RAM_PATCH, "reset" | "vblank", [high, middle, low, bytes @ ..]) => {
+                patches.push(RamPatch {
+                    address: u32::from_be_bytes([0, *high, *middle, *low]),
+                    bytes: bytes.to_vec(),
+                    when: if name == "reset" {
+                        RamWhen::Reset
+                    } else {
+                        RamWhen::Vblank
+                    },
+                });
+            }
+            (EXTRA_FLAG, "sprite_limit", [value @ (0 | 1)]) => sprite_limit = *value == 1,
+            (EXTRA_RAM_PATCH | EXTRA_FLAG, _, _) => {
+                bail!(
+                    "the game carries a malformed extra of kind {} named {name:?}: rebuild it                      with this player",
+                    extra.kind
+                )
+            }
+            _ => {}
+        }
+    }
+    Ok((patches, sprite_limit))
+}
+
 unsafe fn elements<T>(start: *const T, count: u32) -> &'static [T] {
     if count == 0 {
         return &[];

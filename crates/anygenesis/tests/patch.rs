@@ -1,8 +1,9 @@
 //! A synthetic ROM patched by a pack that holds every ROM-level patch kind (an IPS file,
 //! inline bytes, a Game Genie code) builds like any other ROM, with no hints: its analysis
-//! finds the code only the patches make reachable. The whole-program build is ignored: it
-//! needs the player library next to anygenesis, built in the same profile (`cargo build -p
-//! anygenesis-player-lib`).
+//! finds the code only the patches make reachable. A pack's code patches (M6.2), a C hook, a
+//! C replacement and RAM patches at reset and at VBlank, run in the built game. The
+//! whole-program builds are ignored: they need the player library next to anygenesis, built
+//! in the same profile (`cargo build -p anygenesis-player-lib`).
 
 use std::{
     env, fs,
@@ -23,9 +24,9 @@ const PATCHED: u32 = 0x300;
 /// The Game Genie code for the word 0x60FC (`bra.s $300`) at 0x302.
 const GENIE: &str = "9TBT-AA2C";
 
-/// A well-formed image: every vector but the stack pointer at `RESET`, a made-up header
-/// and a correct checksum.
-fn synthetic_rom() -> Vec<u8> {
+/// A well-formed image: every vector but the stack pointer at `RESET`, where `code` is, a
+/// made-up header and a correct checksum.
+fn synthetic_rom(code: &[u16]) -> Vec<u8> {
     let mut rom = vec![0; SIZE];
     for vector in rom[..0x100].chunks_mut(4) {
         vector.copy_from_slice(&(RESET as u32).to_be_bytes());
@@ -46,7 +47,10 @@ fn synthetic_rom() -> Vec<u8> {
         rom[offset..offset + 4].copy_from_slice(&u32::to_be_bytes(value));
     }
     rom[0x1AC..0x1B0].copy_from_slice(&0x00FF_FFFFu32.to_be_bytes());
-    rom[RESET..RESET + 2].copy_from_slice(&[0x60, 0xFE]);
+    for (index, word) in code.iter().enumerate() {
+        let at = RESET + 2 * index;
+        rom[at..at + 2].copy_from_slice(&word.to_be_bytes());
+    }
     let rom = Rom::from_bytes(rom).expect("the image loads");
     assert!(
         !rom.has_valid_checksum(),
@@ -66,7 +70,8 @@ fn folder(name: &str) -> PathBuf {
 /// Writes the ROM, an IPS file and the pack for it into `folder`, `result` naming the
 /// patched image's SHA-1 when given, and returns the ROM's and the pack's paths.
 fn write_pack(folder: &Path, result: Option<Sha1Digest>) -> (PathBuf, PathBuf) {
-    let rom = synthetic_rom();
+    // bra.s *
+    let rom = synthetic_rom(&[0x60FE]);
     let rom_path = folder.join("synthetic.bin");
     fs::write(&rom_path, &rom).expect("the ROM is written");
     let ips = [
@@ -162,5 +167,108 @@ fn test_patched_synthetic_rom_builds_into_a_game_exe_of_its_own() {
     );
     let exe = out.join(format!("synthetic (Test pack){}", env::consts::EXE_SUFFIX));
     assert!(exe.is_file(), "{} is written", exe.display());
+    fs::remove_dir_all(&folder).expect("the test folder is removed");
+}
+
+/// The program the code patches act on: `move.b #$11,($FF0020).l` at reset, then a loop of
+/// `clr.b ($FF0040).l`. The replacement at reset stores 0x22 at $FF0021 instead and goes on
+/// at the loop, the hook at the loop stores 0xAB at $FF0010 every time round, and the RAM
+/// patches store 0x33 at $FF0030 at reset and 0x44 at $FF0040 at every VBlank point.
+const CODE_PROGRAM: [u16; 8] = [
+    0x13FC, 0x0011, 0x00FF, 0x0020, 0x4239, 0x00FF, 0x0040, 0x60F8,
+];
+const LOOP: usize = RESET + 8;
+const HOOKS: &str = "uint32_t mark_loop(AgState *s, uint32_t pc)\n{\n    \
+                     ag_ram_write8(s, 0xFF0010u, 0xABu);\n    return pc;\n}\n\n\
+                     uint32_t skip_store(AgState *s, uint32_t pc)\n{\n    \
+                     ag_ram_write8(s, 0xFF0021u, 0x22u);\n    return pc + 8u;\n}\n";
+
+/// Writes the code program's ROM, `hooks.c` and a pack of code patches into `folder`, the
+/// hook at `hook`, and returns the ROM's and the pack's paths.
+fn write_code_pack(folder: &Path, hook: usize) -> (PathBuf, PathBuf) {
+    let rom = synthetic_rom(&CODE_PROGRAM);
+    let rom_path = folder.join("synthetic.bin");
+    fs::write(&rom_path, &rom).expect("the ROM is written");
+    fs::write(folder.join("hooks.c"), HOOKS).expect("the C is written");
+    let pack = format!(
+        "name = \"Code pack\"\nrom = \"{}\"\n\n\
+         [[hook]]\naddress = {hook:#x}\nfile = \"hooks.c\"\nfunction = \"mark_loop\"\n\n\
+         [[replace]]\naddress = {RESET:#x}\nfile = \"hooks.c\"\nfunction = \"skip_store\"\n\
+         cycles = 20\n\n\
+         [[ram]]\naddress = 0xFF0030\nbytes = \"33\"\nwhen = \"reset\"\n\n\
+         [[ram]]\naddress = 0xFF0040\nbytes = \"44\"\nwhen = \"vblank\"\n\n\
+         [flags]\nsprite_limit = false\n",
+        Sha1Digest::of(&rom)
+    );
+    let pack_path = folder.join("code.toml");
+    fs::write(&pack_path, pack).expect("the pack is written");
+    (rom_path, pack_path)
+}
+
+/// Builds the ROM at `rom_path` with the pack at `pack_path` into `out` on the cache in
+/// `folder`, returning what anygenesis printed and whether it succeeded.
+fn build_with(folder: &Path, rom_path: &Path, pack_path: &Path, out: &Path) -> (String, bool) {
+    let built = Command::new(env!("CARGO_BIN_EXE_anygenesis"))
+        .arg(rom_path)
+        .args([Path::new("--patch"), pack_path, Path::new("--out"), out])
+        .env("ANYGENESIS_CACHE", folder.join("cache"))
+        .output()
+        .expect("anygenesis runs");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    println!("{text}");
+    (text, built.status.success())
+}
+
+#[test]
+#[ignore = "needs the player library next to anygenesis"]
+fn test_code_patches_run_in_the_built_game() {
+    let folder = folder("code");
+    let (rom_path, pack_path) = write_code_pack(&folder, LOOP);
+    let out = folder.join("out");
+    let (text, built) = build_with(&folder, &rom_path, &pack_path, &out);
+    assert!(built, "the build succeeds");
+    assert!(
+        text.contains("code patches: 2 in C, 2 RAM, 1 flags"),
+        "{text}"
+    );
+    let pack = Patch::load(&pack_path).expect("the pack loads");
+    let hash = anygenesis_patch::CodePatches::of(&[pack])
+        .expect("no clash")
+        .hash();
+    let sha1 = Sha1Digest::of(&fs::read(&rom_path).expect("the ROM reads"));
+    let entry = folder.join("cache").join(format!("{sha1}-{hash}"));
+    let key = fs::read_to_string(entry.join("key")).expect("the entry is finished");
+    assert!(key.ends_with(&format!("patches {hash}\n")), "{key}");
+
+    let exe = out.join(format!("synthetic (Code pack){}", env::consts::EXE_SUFFIX));
+    let run = Command::new(&exe)
+        .arg("3")
+        .current_dir(&out)
+        .output()
+        .expect("the game runs");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    println!("{stdout}{}", String::from_utf8_lossy(&run.stderr));
+    assert!(run.status.success());
+    assert!(stdout.contains(" cycles, 3 frames\n"), "{stdout}");
+    // The run ends at the third VBlank point, right after the VBlank patch.
+    let mut ram = vec![0; 0x1_0000];
+    for (offset, byte) in [(0x10, 0xAB), (0x21, 0x22), (0x30, 0x33), (0x40, 0x44)] {
+        ram[offset] = byte;
+    }
+    let expected = Sha1Digest::of(&ram);
+    assert!(
+        stdout.contains(&format!("work RAM SHA-1 {expected}\n")),
+        "{stdout}"
+    );
+
+    // A hook where no code is refuses the build.
+    let (rom_path, pack_path) = write_code_pack(&folder, 0x300);
+    let (text, built) = build_with(&folder, &rom_path, &pack_path, &out);
+    assert!(!built);
+    assert!(text.contains("no code is at 0x000300"), "{text}");
     fs::remove_dir_all(&folder).expect("the test folder is removed");
 }

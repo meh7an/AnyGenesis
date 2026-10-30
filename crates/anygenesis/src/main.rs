@@ -5,7 +5,7 @@
 //! image embedded, named after the ROM file, in that folder. `anygenesis <rom> [<options>]`
 //! builds the same program into the per-user cache and runs it with the game's options (see
 //! anygenesis-player); a cached build is reused while the ROM, anygenesis, the player
-//! library and the discovery stage stay the same. Before translating, the build runs the game
+//! library, the discovery stage and the patch packs' code patches stay the same. Before translating, the build runs the game
 //! headless on the interpreter (`--discovery profile`, the default) so the code it runs
 //! becomes optimised functions; `--discovery static` or `vectors` stops earlier.
 //! anygenesis itself holds no game: the player library sits next to it
@@ -26,7 +26,7 @@ use std::{
     process::{Command, ExitCode},
 };
 
-use anygenesis_patch::Patch;
+use anygenesis_patch::{CodePatches, Patch};
 use anygenesis_recomp::build;
 use anygenesis_rom::Rom;
 use anyhow::{Context, Result, bail};
@@ -47,7 +47,8 @@ const USAGE: &str = "usage:
                                     (default profile: a headless run of the game finds it)
   anygenesis <rom> --patch <file> ...
                                     either one, with the ROM patched first by a patch pack
-                                    (.toml) or an IPS, UPS or BPS file; repeat it to apply
+                                    (.toml, which may also carry C hooks, RAM patches and
+                                    flags) or an IPS, UPS or BPS file; repeat it to apply
                                     several in order";
 
 /// Names the player library instead of the one next to anygenesis.
@@ -80,7 +81,16 @@ fn main() -> Result<ExitCode> {
     for warning in rom.warnings() {
         eprintln!("warning: {warning}");
     }
-    let program = cached_program(&rom, build_options.discovery)?;
+    let code = CodePatches::of(&patches)?;
+    if !code.is_empty() {
+        println!(
+            "code patches: {} in C, {} RAM, {} flags",
+            code.patches.len(),
+            code.ram.len(),
+            code.flags.set().len()
+        );
+    }
+    let program = cached_program(&rom, build_options.discovery, &code)?;
     match out {
         Some(folder) => {
             let names: Vec<&str> = patches.iter().map(Patch::name).collect();
@@ -165,9 +175,9 @@ fn patched(rom: Rom, patches: &[Patch]) -> Result<Rom> {
     Ok(patched)
 }
 
-/// The program for `rom` in the cache, discovering code up to `discovery`, built first
-/// unless a current build is there.
-fn cached_program(rom: &Rom, discovery: Discovery) -> Result<PathBuf> {
+/// The program for `rom` in the cache, discovering code up to `discovery`, with the code
+/// patches `code`, built first unless a current build is there.
+fn cached_program(rom: &Rom, discovery: Discovery, code: &CodePatches) -> Result<PathBuf> {
     let tool = env::current_exe().context("finding anygenesis's own program")?;
     let player = player_library(&tool)?;
     let entry = Entry::new(
@@ -176,6 +186,7 @@ fn cached_program(rom: &Rom, discovery: Discovery) -> Result<PathBuf> {
         &tool,
         &player,
         discovery.name(),
+        (!code.is_empty()).then(|| code.hash()),
     )?;
     let program = builder::program(&entry);
     if entry.is_current() && program.is_file() {
@@ -194,7 +205,7 @@ fn cached_program(rom: &Rom, discovery: Discovery) -> Result<PathBuf> {
         entry.folder.display(),
         toolchain.compiler().display()
     );
-    builder::build_program(rom, &entry, &toolchain, &player, discovery)
+    builder::build_program(rom, &entry, &toolchain, &player, discovery, code)
         .with_context(|| format!("building {} (SHA-1 {})", rom.title(), rom.sha1()))?;
     Ok(program)
 }

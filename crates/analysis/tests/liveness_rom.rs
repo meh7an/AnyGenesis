@@ -31,6 +31,7 @@ fn test_liveness_real_rom_is_equivalent_and_reports_removals() {
         &analysis,
         LivenessOptions {
             check_points_read_sr: true,
+            ..LivenessOptions::default()
         },
     );
 

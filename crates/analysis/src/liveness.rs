@@ -25,12 +25,15 @@ use program::{Context, Program};
 use summary::Summaries;
 
 /// Choices the pass leaves to its caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LivenessOptions {
     /// Treats every block start as a read of the whole status register, as an interrupt
     /// check point there would push it. Off by default: an interrupt frame may then hold
     /// stale values for flags nothing reads (PROGRESS.md, M2.3).
     pub check_points_read_sr: bool,
+    /// Addresses whose instruction is treated as reading every flag first, as a code patch
+    /// run before it may (M6.2).
+    pub read_flags_at: BTreeSet<Address>,
 }
 
 /// What a function does with the flags, as seen from its callers.
@@ -116,6 +119,7 @@ struct Facts {
     live: BTreeMap<Address, FlagSet>,
     return_live: BTreeMap<Address, FlagSet>,
     check_points_read_sr: bool,
+    read_flags_at: BTreeSet<Address>,
 }
 
 impl<'a> FlagLiveness<'a> {
@@ -123,7 +127,7 @@ impl<'a> FlagLiveness<'a> {
     pub fn new(analysis: &'a Analysis, options: LivenessOptions) -> Self {
         let program = Program::new(analysis);
         let unbalanced = stack::unbalanced_exits(&program);
-        let summaries = summary::summaries(&program, &unbalanced, options.check_points_read_sr);
+        let summaries = summary::summaries(&program, &unbalanced, &options);
         let unknown_callers: BTreeSet<Address> = analysis
             .functions
             .values()
@@ -152,6 +156,7 @@ impl<'a> FlagLiveness<'a> {
                 .collect(),
             unknown_callers,
             check_points_read_sr: options.check_points_read_sr,
+            read_flags_at: options.read_flags_at.clone(),
         };
         while facts.update(&program) {}
         Self {
@@ -161,8 +166,8 @@ impl<'a> FlagLiveness<'a> {
         }
     }
 
-    pub fn options(&self) -> LivenessOptions {
-        self.options
+    pub fn options(&self) -> &LivenessOptions {
+        &self.options
     }
 
     /// Returns the flags live before the instruction at `address`, `None` when it is not
@@ -285,6 +290,10 @@ impl Context for Facts {
 
     fn check_points_read_sr(&self) -> bool {
         self.check_points_read_sr
+    }
+
+    fn reads_flags(&self, address: Address) -> bool {
+        self.read_flags_at.contains(&address)
     }
 }
 

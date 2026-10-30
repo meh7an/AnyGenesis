@@ -278,9 +278,17 @@ c_struct! {
 /// linked against a player from a different build fails at start instead of misreading it.
 pub const GAME_ABI: u32 = 1;
 
+/// [`AgExtra::kind`] of a RAM patch (M6.2): `name` is `reset` or `vblank`, when it is
+/// written; `data` the work RAM address as 3 bytes, most significant first, then the bytes.
+pub const EXTRA_RAM_PATCH: u32 = 1;
+
+/// [`AgExtra::kind`] of a runtime enhancement flag (M6.2): `name` is the flag's, `data` one
+/// byte, 0 or 1.
+pub const EXTRA_FLAG: u32 = 2;
+
 c_struct! {
-    /// Something embedded beside the ROM image for the player (overlays, settings
-    /// defaults); no kind is defined yet.
+    /// Something embedded beside the ROM image for the player, of a kind `EXTRA_*`; a player
+    /// skips kinds it does not know.
     pub struct AgExtra as EXTRA {
         /// What the extra holds.
         pub kind: u32,

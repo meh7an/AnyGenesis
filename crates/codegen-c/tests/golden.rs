@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use anygenesis_analysis::{Analysis, EntryKind, FlagLiveness, Hints, LivenessOptions};
 use anygenesis_codegen_c::{
-    CheckPoints, EmitOptions, LineMap, Output, OutputFile, emit, emit_stepped_instruction,
+    CheckPoints, CodePatch, EmitOptions, LineMap, Output, OutputFile, emit,
+    emit_stepped_instruction,
 };
 use anygenesis_shared::Address;
 
@@ -242,6 +243,7 @@ fn test_golden_stepped_instructions() {
         files,
         table_rows: 0,
         stepped: None,
+        unplaced_patches: Vec::new(),
     };
     compile(&output, &scratch("stepped"), Optimization::Debug);
 }
@@ -314,6 +316,7 @@ fn test_compile_check_rejects_warnings() {
         }],
         table_rows: 0,
         stepped: None,
+        unplaced_patches: Vec::new(),
     };
     compile(&output, &scratch("warning"), Optimization::Debug);
 }
@@ -342,4 +345,117 @@ fn test_emission_is_deterministic() {
     let first = emit_program(tables(), &EmitOptions::default());
     let second = emit_program(tables(), &EmitOptions::default());
     assert_eq!(first, second);
+}
+
+/// Code patches: a hook at f's loop start (a block start with a check point) and a
+/// replacement in the middle of g's block, both run after the check point and before the
+/// segment's cycles in the translated code, and after the hand-over in the stepped code; an
+/// address in the zero padding has no code.
+#[test]
+fn test_code_patches_run_after_the_check_point_and_the_hand_over() {
+    let (image, hints) = calls();
+    let analysis: Analysis = image.analyze(&hints);
+    let patch = |function: &str, cycles: u32| CodePatch {
+        function: function.to_owned(),
+        cycles,
+    };
+    let patches = BTreeMap::from([
+        (Address::new(F + 2), patch("count_loop", 0)),
+        (Address::new(G + 4), patch("skip_read", 12)),
+        (Address::new(0xF00), patch("nowhere", 0)),
+    ]);
+    let liveness = FlagLiveness::new(
+        &analysis,
+        LivenessOptions {
+            check_points_read_sr: true,
+            read_flags_at: patches.keys().copied().collect(),
+        },
+    );
+    let options = EmitOptions {
+        cycles: true,
+        check_points: CheckPoints::BlockStarts,
+        stepped: true,
+        patches,
+        ..EmitOptions::default()
+    };
+    let mut output = emit(&analysis, &liveness, &options, &image.bytes);
+    assert_eq!(output.unplaced_patches, [Address::new(0xF00)]);
+    let file = |name: &str| {
+        let file = output.files.iter().find(|file| file.name == name);
+        file.unwrap_or_else(|| panic!("{name} is emitted"))
+            .text
+            .clone()
+    };
+    let functions = file("ag_functions.h");
+    assert!(functions.contains("uint32_t count_loop(AgState *s, uint32_t pc);\n"));
+    assert!(functions.contains("uint32_t skip_read(AgState *s, uint32_t pc);\n"));
+    assert!(file("ag_patch.h").contains("ag_patch_rts"));
+
+    let translated = file("ag_000.c");
+    let at = |text: &str, from: usize| {
+        from + translated[from..]
+            .find(text)
+            .unwrap_or_else(|| panic!("{text:?} follows"))
+    };
+    let check = at("AG_HCHECK(s, 0x402u", 0);
+    let call = at("uint32_t ag_h = count_loop(s, 0x402u) & 0xFFFFFFu;", check);
+    let leave = at("if (ag_h != 0x402u) {", call);
+    let lookup = at("AgFn *next = ag_lookup(s, ag_h);", leave);
+    let segment = at("AG_CYCLES(s, ", lookup);
+    assert!(translated[call..segment].contains("AG_TAIL return next(s, ag_h);"));
+    assert!(
+        !translated[leave..lookup].contains("AG_CYCLES"),
+        "a hook charges 0"
+    );
+    let call = at("uint32_t ag_h = skip_read(s, 0x504u) & 0xFFFFFFu;", 0);
+    let charged = at("AG_CYCLES(s, 12);", call);
+    assert!(charged < at("ag_lookup(s, ag_h)", call));
+    // The instruction before the replacement ends its segment there.
+    assert!(at("/* 000504", call) > at("AG_CYCLES(s, ", charged + 1));
+
+    let stepped: String = output
+        .files
+        .iter()
+        .filter(|file| file.name.starts_with("ag_s") && file.name != "ag_steps.c")
+        .map(|file| file.text.as_str())
+        .collect();
+    let start = stepped
+        .find("uint32_t s_000504(")
+        .expect("g's read has a stepped function");
+    let function = &stepped[start..start + stepped[start..].find("\n}\n").expect("it ends")];
+    let call = function
+        .find("skip_read(s, 0x504u)")
+        .expect("the patch runs");
+    assert!(function.find("(void)pc;").expect("no hand-over at 504") < call);
+    assert!(
+        call < function
+            .find("ag_c0 = s->cycles")
+            .expect("the instruction follows")
+    );
+    let start = stepped
+        .find("uint32_t s_000402(")
+        .expect("f's loop has a stepped function");
+    let function = &stepped[start..];
+    let hand_over = function
+        .find("AG_TAIL return f_000400(s, 0x402u);")
+        .expect("a row");
+    assert!(
+        hand_over
+            < function
+                .find("count_loop(s, 0x402u)")
+                .expect("the patch runs")
+    );
+
+    // Patch C including ag_patch.h compiles beside the program with warnings as errors.
+    output.files.push(OutputFile {
+        name: "patches.c".to_owned(),
+        text: "#include \"ag_patch.h\"\n\n\
+               uint32_t count_loop(AgState *s, uint32_t pc)\n{\n    \
+               ag_ram_write16(s, 0xFFFF00u, ag_ram_read16(s, 0xFFFF00u) + s->z);\n    \
+               return pc;\n}\n\n\
+               uint32_t skip_read(AgState *s, uint32_t pc)\n{\n    \
+               (void)pc;\n    return ag_patch_rts(s);\n}\n"
+            .to_owned(),
+    });
+    compile(&output, &scratch("patches"), Optimization::Debug);
 }

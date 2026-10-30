@@ -25,8 +25,8 @@ use anygenesis_ir::{Control, Lifted, Op, Value, exception_entry, interrupt_entry
 use anygenesis_shared::Address;
 
 use crate::{
-    EmitOptions,
-    function::{function_name, leaving_ahead, static_cost},
+    CodePatch, EmitOptions,
+    function::{function_name, leaving_ahead, patch_call, static_cost},
     printer::{ADDRESS_MASK, Printer, constant, may_reach_bus, used_temps},
 };
 
@@ -53,13 +53,14 @@ pub struct SteppedStats {
     pub fast: usize,
 }
 
-/// The stepped C: function files, the file with the `ag_steps` table and `ag_interrupt`, and
-/// what was kept.
+/// The stepped C: function files, the file with the `ag_steps` table and `ag_interrupt`, what
+/// was kept, and the code patch addresses with no stepped function.
 #[derive(Debug)]
 pub struct Stepped {
     pub chunks: Vec<String>,
     pub table: String,
     pub stats: SteppedStats,
+    pub unplaced: Vec<Address>,
 }
 
 /// The C name of the stepped function at `address`, after the symbol prefix.
@@ -80,7 +81,7 @@ pub fn emit_stepped_instruction(lifted: &Lifted, image_size: u32, prefix: &str) 
         fast: is_fast(lifted, image_size),
         latch: lifted.latch,
     };
-    emitter.function(lifted, None)
+    emitter.function(lifted, None, None)
 }
 
 fn step_prototype(prefix: &str, address: u32) -> String {
@@ -194,7 +195,11 @@ pub fn emit(
             fast: is_fast(&lifted, image.len() as u32),
             latch: lifted.latch,
         };
-        let function = emitter.function(&lifted, rows.get(&lifted.address).copied());
+        let function = emitter.function(
+            &lifted,
+            rows.get(&lifted.address).copied(),
+            options.patches.get(&lifted.address),
+        );
         if emitter.fast {
             stats.fast += 1;
         }
@@ -210,10 +215,20 @@ pub fn emit(
     if !text.is_empty() {
         chunks.push(chunk(prefix, &text, &called));
     }
+    let unplaced = options
+        .patches
+        .keys()
+        .copied()
+        .filter(|address| {
+            let index = (address.get() / 2) as usize;
+            !address.get().is_multiple_of(2) || !kept.get(index).copied().unwrap_or(false)
+        })
+        .collect();
     Stepped {
         chunks,
         table: table_file(prefix, &kept, image.len() as u32),
         stats,
+        unplaced,
     }
 }
 
@@ -329,8 +344,14 @@ struct StepEmitter<'a> {
 
 impl StepEmitter<'_> {
     /// The stepped function of `lifted`; `owner` is the translated function that holds its
-    /// address as a table row, if any.
-    fn function(&mut self, lifted: &Lifted, owner: Option<Address>) -> String {
+    /// address as a table row, if any, and `patch` the code patch run before it. The patch
+    /// runs after the hand-over, so it runs once whichever code reaches the address.
+    fn function(
+        &mut self,
+        lifted: &Lifted,
+        owner: Option<Address>,
+        patch: Option<&CodePatch>,
+    ) -> String {
         let address = lifted.address.get();
         let body = &lifted.body;
         let a = constant(address);
@@ -344,6 +365,9 @@ impl StepEmitter<'_> {
                 ));
             }
             None => out.push("    (void)pc;".to_owned()),
+        }
+        if let Some(patch) = patch {
+            out.extend(indented(4, patch_call(patch, lifted.address, true)));
         }
         if self.fast {
             out.push("    int32_t ag_c0 = s->cycles;".to_owned());
