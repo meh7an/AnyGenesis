@@ -63,7 +63,7 @@ use anygenesis_ir::{
 };
 use anygenesis_rom::Rom;
 #[cfg(feature = "interpreter")]
-use anygenesis_shared::Address;
+use anygenesis_shared::{Address, Profile};
 
 use crate::{
     bus::{Devices, SystemBus},
@@ -316,6 +316,9 @@ pub(crate) struct Context {
     /// counting a miss.
     #[cfg(feature = "interpreter")]
     between: HashSet<u32>,
+    /// What the interpreter ran, while [`Runtime::record_profile`] keeps it.
+    #[cfg(feature = "interpreter")]
+    profile: Option<Box<Profile>>,
     idle: Option<Snapshot>,
     hook: Option<InterruptHook>,
 }
@@ -1161,6 +1164,19 @@ fn cached<'a>(lifts: &'a mut HashMap<u32, Lifted>, rom: &[u8], pc: u32) -> Optio
     }
 }
 
+/// Whether the instruction at `pc` is a JMP or JSR whose target comes from a register or a
+/// table: `(An)`, `d16(An)`, `d8(An,Xn)` or `d8(PC,Xn)`.
+#[cfg(feature = "interpreter")]
+fn is_computed(rom: &[u8], pc: u32) -> bool {
+    let Some(&[high, low]) = rom.get(pc as usize..pc as usize + 2) else {
+        return false;
+    };
+    let opcode = u16::from_be_bytes([high, low]);
+    let (mode, register) = ((opcode >> 3) & 7, opcode & 7);
+    // JSR is 0x4E80-0x4EBF and JMP 0x4EC0-0x4EFF.
+    opcode & 0xFF80 == 0x4E80 && (matches!(mode, 2 | 5 | 6) || (mode == 7 && register == 3))
+}
+
 /// The ROM a state points at.
 ///
 /// # Safety
@@ -1306,6 +1322,15 @@ unsafe fn run_interpreter(state: *mut AgState, start: u32, miss: bool) -> Ending
             let event = ctx.devices.hardware.next_interrupt();
             let waiting = ctx.due(mask(cpu.sr())).is_some();
             let step = ctx.step(st, &mut cpu);
+            if let Some(profile) = ctx.profile.as_deref_mut() {
+                profile.instruction(pc);
+                if let Some(Transfer::Jump(target) | Transfer::Call { target, .. }) =
+                    step.outcome.transfer
+                    && is_computed(rom(st), pc)
+                {
+                    profile.computed(pc, target.get());
+                }
+            }
             st.cycles -= i32::from(step.cycles);
             ctx.charge_stall(st);
             let latched = began + u64::from(step.latch) * CPU_DIVIDER;
@@ -1434,6 +1459,8 @@ impl Runtime {
             recheck: None,
             #[cfg(feature = "interpreter")]
             between: HashSet::new(),
+            #[cfg(feature = "interpreter")]
+            profile: None,
             idle: None,
             hook: None,
         });
@@ -1585,6 +1612,26 @@ impl Runtime {
     pub fn sound_counts(&self) -> SoundCounts {
         let devices = &self.context.devices;
         devices.sound.counts().sum(&devices.z80.sound().counts())
+    }
+
+    /// Keeps a profile of what the interpreter runs from now on, for [`Runtime::profile`]: in
+    /// a runtime with no native code, every instruction of the run.
+    #[cfg(feature = "interpreter")]
+    pub fn record_profile(&mut self) {
+        let size = self.rom.bytes().len() as u32;
+        self.context.profile = Some(Box::new(Profile::new(size)));
+    }
+
+    /// The profile kept since [`Runtime::record_profile`], if any.
+    #[cfg(feature = "interpreter")]
+    pub fn profile(&self) -> Option<&Profile> {
+        self.context.profile.as_deref()
+    }
+
+    /// Takes the profile kept since [`Runtime::record_profile`] and stops keeping one.
+    #[cfg(feature = "interpreter")]
+    pub fn take_profile(&mut self) -> Option<Profile> {
+        self.context.profile.take().map(|profile| *profile)
     }
 
     /// Keeps every sound write from now on, for [`Runtime::take_sound_writes`].

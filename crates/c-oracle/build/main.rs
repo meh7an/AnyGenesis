@@ -2,7 +2,8 @@
 //! that reach them (`programs.rs` in OUT_DIR, included by src/programs.rs):
 //! - the synthetic program (src/synthetic.rs), always;
 //! - a SingleStepTests sample, when testdata/ holds the suite (`cargo xtask fetch-sst`);
-//! - the ROM `ANYGENESIS_ROM` names, when it is set.
+//! - the ROM `ANYGENESIS_ROM` names, when it is set; analysed with the profile
+//!   `ANYGENESIS_PROFILE` names (a build's profile.txt) when that is set too.
 //!
 //! Function programs are emitted with cycle accounting and a check point at every block
 //! start: the hook is how the tests cap runs that never end.
@@ -18,10 +19,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anygenesis_analysis::{Analysis, LivenessOptions, analyze};
+use anygenesis_analysis::{Analysis, LivenessOptions, analyze, analyze_profiled};
 use anygenesis_codegen_c::{CheckPoints, EmitOptions};
 use anygenesis_recomp::build;
 use anygenesis_rom::Rom;
+use anygenesis_shared::Profile;
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
@@ -85,10 +87,11 @@ fn table_items(prefix: &str, name: &str) -> String {
     )
 }
 
-/// Translates the ROM `ANYGENESIS_ROM` names, analysed from its vectors as game builds do,
-/// when it is set.
+/// Translates the ROM `ANYGENESIS_ROM` names, analysed from its vectors as game builds do
+/// (following the profile `ANYGENESIS_PROFILE` names, if any), when it is set.
 fn rom(out: &Path) -> String {
     println!("cargo::rerun-if-env-changed=ANYGENESIS_ROM");
+    println!("cargo::rerun-if-env-changed=ANYGENESIS_PROFILE");
     let Some(path) = env::var_os("ANYGENESIS_ROM") else {
         return "/// The SHA-1 of the translated ROM; `None` without `ANYGENESIS_ROM`.\n\
                 pub const ROM_SHA1: Option<&str> = None;\n\n\
@@ -100,7 +103,18 @@ fn rom(out: &Path) -> String {
     println!("cargo::rerun-if-changed={}", Path::new(&path).display());
     let rom =
         build::load_rom(Path::new(&path)).unwrap_or_else(|error| panic!("ANYGENESIS_ROM: {error}"));
-    compile_program(&analyze(&rom), &rom, "", &out.join("rom"), "ag_rom");
+    let analysis = match env::var_os("ANYGENESIS_PROFILE") {
+        Some(path) => {
+            println!("cargo::rerun-if-changed={}", Path::new(&path).display());
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("ANYGENESIS_PROFILE: {error}"));
+            let (profile, _) = Profile::parse(&text, rom.bytes().len() as u32)
+                .unwrap_or_else(|error| panic!("ANYGENESIS_PROFILE: {error}"));
+            analyze_profiled(&rom, &profile)
+        }
+        None => analyze(&rom),
+    };
+    compile_program(&analysis, &rom, "", &out.join("rom"), "ag_rom");
     let table = table_items("", "rom_table_rows");
     format!(
         "{table}/// The SHA-1 of the translated ROM; `None` without `ANYGENESIS_ROM`.\n\

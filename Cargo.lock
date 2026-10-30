@@ -6,8 +6,11 @@ version = 4
 name = "anygenesis"
 version = "0.1.0"
 dependencies = [
+ "anygenesis-analysis",
+ "anygenesis-framediff",
  "anygenesis-recomp",
  "anygenesis-rom",
+ "anygenesis-runtime",
  "anygenesis-shared",
  "anyhow",
  "cc",

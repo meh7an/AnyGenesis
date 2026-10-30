@@ -87,7 +87,16 @@ pub fn emit_program(
 
 /// Analyses `rom` from its vectors and translates it.
 pub fn translate(rom: &Rom, liveness: LivenessOptions, options: &EmitOptions) -> Translation {
-    let analysis = analyze(rom);
+    translate_analysis(rom, analyze(rom), liveness, options)
+}
+
+/// Translates `rom` as `analysis`, made from it, found its code.
+pub fn translate_analysis(
+    rom: &Rom,
+    analysis: Analysis,
+    liveness: LivenessOptions,
+    options: &EmitOptions,
+) -> Translation {
     let output = emit_program(&analysis, rom, liveness, options);
     Translation { analysis, output }
 }

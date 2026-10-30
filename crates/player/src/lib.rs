@@ -55,6 +55,8 @@ use anygenesis_runtime::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 
+pub use anygenesis_runtime::has_interpreter;
+
 pub use crate::game::Game;
 
 const USAGE: &str = "usage: <game> [<frames>] [--dump <frame>[,<frame>...]] [--state <folder>] \

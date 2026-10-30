@@ -1,5 +1,6 @@
-//! Builds a game program from a ROM in its cache entry: translate, write the C, compile it
-//! on every core, link it with the player library into one native program.
+//! Builds a game program from a ROM in its cache entry: discover its code (with a profile
+//! run at the furthest stage), translate, write the C, compile it on every core, link it
+//! with the player library into one native program.
 
 use std::{
     fs,
@@ -19,6 +20,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     cache::Entry,
+    profile::{self, Discovery},
     toolchain::{EXE_SUFFIX, Toolchain},
 };
 
@@ -32,13 +34,20 @@ pub fn program(entry: &Entry) -> PathBuf {
     entry.folder.join(format!("game{EXE_SUFFIX}"))
 }
 
-/// Builds the program for `rom` into `entry` with `toolchain`, linking the player library
-/// at `player`, and marks the entry finished. Prints what each step took.
+/// Builds the program for `rom` into `entry` with `toolchain`, discovering code as far as
+/// `discovery` goes and linking the player library at `player`, and marks the entry
+/// finished. Prints what each step took.
 ///
 /// # Errors
-/// Writing the files, a compile or link that fails (with the compiler's output), or
-/// finishing the entry.
-pub fn build_program(rom: &Rom, entry: &Entry, toolchain: &Toolchain, player: &Path) -> Result<()> {
+/// The profile run, writing the files, a compile or link that fails (with the compiler's
+/// output), or finishing the entry.
+pub fn build_program(
+    rom: &Rom,
+    entry: &Entry,
+    toolchain: &Toolchain,
+    player: &Path,
+    discovery: Discovery,
+) -> Result<()> {
     entry.invalidate()?;
     let (sources, objects) = (entry.folder.join("c"), entry.folder.join("obj"));
     for folder in [&sources, &objects] {
@@ -46,7 +55,14 @@ pub fn build_program(rom: &Rom, entry: &Entry, toolchain: &Toolchain, player: &P
         fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
     }
     let started = Instant::now();
-    let translation = build::translate(rom, build::game_liveness(), &build::game_options());
+    let analysis = profile::analyze(rom, discovery, &entry.folder)?;
+    let analysed = started.elapsed();
+    let translation = build::translate_analysis(
+        rom,
+        analysis,
+        build::game_liveness(),
+        &build::game_options(),
+    );
     let translated = started.elapsed();
     let mut files = build::write_program(rom, &translation, &sources)?;
     let main = sources.join("ag_main.c");
@@ -66,10 +82,12 @@ pub fn build_program(rom: &Rom, entry: &Entry, toolchain: &Toolchain, player: &P
     let linked = started.elapsed();
     entry.finish()?;
     println!(
-        "built in {:.1} s: translated {:.1} s, C written {:.1} s, {} files compiled {:.1} s, \
-         linked {:.1} s",
+        "built in {:.1} s: discovered ({}) {:.1} s, translated {:.1} s, C written {:.1} s, {} \
+         files compiled {:.1} s, linked {:.1} s",
         linked.as_secs_f64(),
-        translated.as_secs_f64(),
+        discovery.name(),
+        analysed.as_secs_f64(),
+        (translated - analysed).as_secs_f64(),
         (written - translated).as_secs_f64(),
         objects.len(),
         (compiled - written).as_secs_f64(),

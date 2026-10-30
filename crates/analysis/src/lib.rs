@@ -3,8 +3,8 @@
 //! [`analyze`] descends from the reset and exception vectors, decoding every reachable
 //! instruction, recognises the jump tables its indirect jumps read and descends again until
 //! none is new, then cuts the code into blocks and assigns them to functions.
-//! [`analyze_stage`] can stop at the vectors; [`analyze_with`] follows [`Hints`] and nothing
-//! else. What it cannot follow is reported, never guessed. [`FlagLiveness`] then finds the
+//! [`analyze_stage`] can stop at the vectors; [`analyze_profiled`] also follows the computed
+//! jumps a profile run took; [`analyze_with`] follows [`Hints`] and nothing else. What it cannot follow is reported, never guessed. [`FlagLiveness`] then finds the
 //! flags something reads at every instruction of the result.
 
 mod blocks;
@@ -16,7 +16,10 @@ mod recognise;
 mod report;
 mod tables;
 
+use std::collections::BTreeMap;
+
 use anygenesis_rom::Rom;
+use anygenesis_shared::Profile;
 
 pub use hints::{DataRegion, EntryKind, FunctionHint, Hints, IndirectHint, JumpTable, TargetKind};
 pub use liveness::{FlagLiveness, FlagStats, FlagSummary, LivenessOptions};
@@ -46,8 +49,22 @@ pub fn analyze(rom: &Rom) -> Analysis {
 pub fn analyze_stage(rom: &Rom, stage: DiscoveryStage) -> Analysis {
     let hints = match stage {
         DiscoveryStage::Vectors => Hints::default(),
-        DiscoveryStage::Static => recognise::fixpoint(rom.bytes(), rom.vectors().entries()),
+        DiscoveryStage::Static => {
+            recognise::fixpoint(rom.bytes(), rom.vectors().entries(), &BTreeMap::new())
+        }
     };
+    analyze_with(rom, &hints)
+}
+
+/// Discovers the code of `rom` as [`analyze`] does, and also follows where `profile`, a run
+/// of it, saw computed jumps and calls go: the code the run reached that way becomes
+/// functions too.
+pub fn analyze_profiled(rom: &Rom, profile: &Profile) -> Analysis {
+    let hints = recognise::fixpoint(
+        rom.bytes(),
+        rom.vectors().entries(),
+        profile.computed_targets(),
+    );
     analyze_with(rom, &hints)
 }
 

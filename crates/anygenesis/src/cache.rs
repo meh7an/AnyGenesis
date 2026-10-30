@@ -1,5 +1,5 @@
-//! The per-user build cache: one folder per ROM SHA-1, reused while the ROM, anygenesis and
-//! the player library all stay the same.
+//! The per-user build cache: one folder per ROM SHA-1, reused while the ROM, anygenesis,
+//! the player library and the discovery stage all stay the same.
 
 use std::{
     env, fs,
@@ -47,13 +47,19 @@ pub struct Entry {
 
 impl Entry {
     /// The entry for the ROM with SHA-1 `rom` in `root`, built by the anygenesis at `tool`
-    /// with the player library at `player`.
+    /// with the player library at `player`, discovering code up to the stage `discovery`.
     ///
     /// # Errors
     /// Reading `tool` or `player`.
-    pub fn new(root: &Path, rom: Sha1Digest, tool: &Path, player: &Path) -> Result<Self> {
+    pub fn new(
+        root: &Path,
+        rom: Sha1Digest,
+        tool: &Path,
+        player: &Path,
+        discovery: &str,
+    ) -> Result<Self> {
         let key = format!(
-            "rom {rom}\nanygenesis {}\nplayer {}\n",
+            "rom {rom}\nanygenesis {}\nplayer {}\ndiscovery {discovery}\n",
             file_sha1(tool)?,
             file_sha1(player)?
         );
@@ -63,7 +69,8 @@ impl Entry {
         })
     }
 
-    /// Whether the folder holds a finished build from the same ROM, anygenesis and player.
+    /// Whether the folder holds a finished build from the same ROM, anygenesis, player and
+    /// stage.
     pub fn is_current(&self) -> bool {
         fs::read_to_string(self.folder.join(KEY_FILE)).is_ok_and(|key| key == self.key)
     }
@@ -108,15 +115,17 @@ mod tests {
         fs::write(&tool, b"tool 1").expect("written");
         fs::write(&player, b"player 1").expect("written");
         let rom = Sha1Digest::of(b"rom");
-        let entry = Entry::new(&root, rom, &tool, &player).expect("the key is computed");
+        let entry = Entry::new(&root, rom, &tool, &player, "static").expect("key computed");
         assert_eq!(entry.folder, root.join(rom.to_string()));
         fs::create_dir_all(&entry.folder).expect("the entry folder is created");
         assert!(!entry.is_current());
         entry.finish().expect("the key is written");
         assert!(entry.is_current());
 
+        let staged = Entry::new(&root, rom, &tool, &player, "profile").expect("key computed");
+        assert!(!staged.is_current());
         fs::write(&player, b"player 2").expect("written");
-        let rebuilt = Entry::new(&root, rom, &tool, &player).expect("the key is computed");
+        let rebuilt = Entry::new(&root, rom, &tool, &player, "static").expect("key computed");
         assert!(!rebuilt.is_current());
         entry.invalidate().expect("the key is removed");
         assert!(!entry.is_current());

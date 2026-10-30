@@ -4,14 +4,18 @@
 //! clang and links it with the player library into one self-contained program, the whole ROM
 //! image embedded, named after the ROM file, in that folder. `anygenesis <rom> [<options>]`
 //! builds the same program into the per-user cache and runs it with the game's options (see
-//! anygenesis-player); a cached build is reused while the ROM, anygenesis and the player
-//! library stay the same. anygenesis itself holds no game: the player library sits next to
-//! it (`ANYGENESIS_PLAYER` names another), built with `cargo build --release -p
-//! anygenesis-player-lib`. Built games are for the user who built them: never distribute
-//! one.
+//! anygenesis-player); a cached build is reused while the ROM, anygenesis, the player
+//! library and the discovery stage stay the same. Before translating, the build runs the game
+//! headless on the interpreter (`--discovery profile`, the default) so the code it runs
+//! becomes optimised functions; `--discovery static` or `vectors` stops earlier.
+//! anygenesis itself holds no game: the player library sits next to it
+//! (`ANYGENESIS_PLAYER` names another), built on its own with `cargo build --release -p
+//! anygenesis-player-lib`, since building it with anygenesis would give it anygenesis's
+//! interpreter. Built games are for the user who built them: never distribute one.
 
 mod builder;
 mod cache;
+mod profile;
 mod toolchain;
 
 use std::{
@@ -28,6 +32,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     cache::Entry,
+    profile::Discovery,
     toolchain::{EXE_SUFFIX, PLAYER_LIBRARY, Toolchain},
 };
 
@@ -35,7 +40,10 @@ const USAGE: &str = "usage:
   anygenesis <rom> --out <folder>   build the game program into <folder>
   anygenesis <rom> [<options>]      build it into the cache and run it with the game's options:
                                     [<frames>] [--dump <frame>[,<frame>...]] [--state <folder>]
-                                    [--input <file>] [--record <file>] [--controls <file>]";
+                                    [--input <file>] [--record <file>] [--controls <file>]
+  anygenesis <rom> --discovery profile|static|vectors ...
+                                    either one, with how far the build discovers code
+                                    (default profile: a headless run of the game finds it)";
 
 /// Names the player library instead of the one next to anygenesis.
 const PLAYER_VAR: &str = "ANYGENESIS_PLAYER";
@@ -45,7 +53,8 @@ fn main() -> Result<ExitCode> {
     let Some(rom_path) = arguments.next().filter(|argument| argument != "--out") else {
         bail!(USAGE);
     };
-    let options: Vec<OsString> = arguments.collect();
+    let mut options: Vec<OsString> = arguments.collect();
+    let discovery = take_discovery(&mut options)?;
     let out = match options.first() {
         Some(flag) if flag == "--out" => match &options[1..] {
             [folder] => Some(PathBuf::from(folder)),
@@ -59,7 +68,7 @@ fn main() -> Result<ExitCode> {
     for warning in rom.warnings() {
         eprintln!("warning: {warning}");
     }
-    let program = cached_program(&rom)?;
+    let program = cached_program(&rom, discovery)?;
     match out {
         Some(folder) => {
             let exe = folder.join(exe_name(&rom_path));
@@ -83,11 +92,34 @@ fn main() -> Result<ExitCode> {
     }
 }
 
-/// The program for `rom` in the cache, built first unless a current build is there.
-fn cached_program(rom: &Rom) -> Result<PathBuf> {
+/// Takes `--discovery <stage>` from the front of `options`; the default stage without it.
+fn take_discovery(options: &mut Vec<OsString>) -> Result<Discovery> {
+    if options.first().is_none_or(|option| option != "--discovery") {
+        return Ok(Discovery::default());
+    }
+    let Some(discovery) = options
+        .get(1)
+        .and_then(|name| name.to_str())
+        .and_then(Discovery::parse)
+    else {
+        bail!(USAGE);
+    };
+    options.drain(..2);
+    Ok(discovery)
+}
+
+/// The program for `rom` in the cache, discovering code up to `discovery`, built first
+/// unless a current build is there.
+fn cached_program(rom: &Rom, discovery: Discovery) -> Result<PathBuf> {
     let tool = env::current_exe().context("finding anygenesis's own program")?;
     let player = player_library(&tool)?;
-    let entry = Entry::new(&cache::root()?, rom.sha1(), &tool, &player)?;
+    let entry = Entry::new(
+        &cache::root()?,
+        rom.sha1(),
+        &tool,
+        &player,
+        discovery.name(),
+    )?;
     let program = builder::program(&entry);
     if entry.is_current() && program.is_file() {
         println!(
@@ -105,7 +137,7 @@ fn cached_program(rom: &Rom) -> Result<PathBuf> {
         entry.folder.display(),
         toolchain.compiler().display()
     );
-    builder::build_program(rom, &entry, &toolchain, &player)
+    builder::build_program(rom, &entry, &toolchain, &player, discovery)
         .with_context(|| format!("building {} (SHA-1 {})", rom.title(), rom.sha1()))?;
     Ok(program)
 }
@@ -122,7 +154,8 @@ fn player_library(tool: &Path) -> Result<PathBuf> {
     if !path.is_file() {
         bail!(
             "the player library {} is missing: build it next to anygenesis with `cargo build \
-             --release -p anygenesis -p anygenesis-player-lib`, or name one with {PLAYER_VAR}",
+             --release -p anygenesis-player-lib` on its own (built together with anygenesis it \
+             gets the interpreter), or name one with {PLAYER_VAR}",
             path.display()
         );
     }
@@ -171,5 +204,25 @@ mod tests {
         assert_eq!(name("a<b*c.bin"), "a_b_c");
         assert_eq!(name(".bin"), ".bin");
         assert_eq!(name(""), "game");
+    }
+
+    #[test]
+    fn test_discovery_comes_off_the_front_of_the_options_only() {
+        let mut options: Vec<OsString> = ["--discovery", "static", "--out", "folder"]
+            .map(OsString::from)
+            .into();
+        assert_eq!(
+            take_discovery(&mut options).expect("a stage"),
+            Discovery::Static
+        );
+        assert_eq!(options, ["--out", "folder"]);
+        let mut options: Vec<OsString> = vec!["600".into()];
+        assert_eq!(
+            take_discovery(&mut options).expect("the default"),
+            Discovery::Profile
+        );
+        assert_eq!(options, ["600"]);
+        let mut options: Vec<OsString> = ["--discovery", "fast"].map(OsString::from).into();
+        assert!(take_discovery(&mut options).is_err());
     }
 }

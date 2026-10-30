@@ -3,12 +3,13 @@
 //! states and from each resume point with 2.
 //!
 //! Needs `ANYGENESIS_ROM` set when the crate is built (the build script translates the ROM)
-//! and when the test runs. Run with `cargo test -p anygenesis-c-oracle --test rom --
+//! and when the test runs; `ANYGENESIS_PROFILE` (a build's profile.txt), when set for both,
+//! analyses it as a profiled build does. Run with `cargo test -p anygenesis-c-oracle --test rom --
 //! --ignored --nocapture`; the report lands in target/tmp/rom-c-report.md.
 
 use std::{collections::BTreeMap, fmt::Write as _, fs, path::Path};
 
-use anygenesis_analysis::{FlagLiveness, LivenessOptions, analyze};
+use anygenesis_analysis::{FlagLiveness, LivenessOptions, analyze, analyze_profiled};
 use anygenesis_c_oracle::{
     differential::{Differential, Table},
     lockstep::Lockstep,
@@ -16,7 +17,7 @@ use anygenesis_c_oracle::{
     reference::Stop,
 };
 use anygenesis_rom::Rom;
-use anygenesis_shared::{Address, ROM_MARKER};
+use anygenesis_shared::{Address, Profile, ROM_MARKER};
 
 const ENTRY_SEEDS: u64 = 8;
 const RESUME_SEEDS: u64 = 2;
@@ -53,7 +54,15 @@ fn run() {
         rom.sha1().to_string(),
         "the ROM differs from the one the crate was built with"
     );
-    let analysis = analyze(&rom);
+    let analysis = match std::env::var_os("ANYGENESIS_PROFILE") {
+        Some(path) => {
+            let text = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{error}"));
+            let (profile, _) = Profile::parse(&text, rom.bytes().len() as u32)
+                .unwrap_or_else(|error| panic!("ANYGENESIS_PROFILE: {error}"));
+            analyze_profiled(&rom, &profile)
+        }
+        None => analyze(&rom),
+    };
     let liveness = FlagLiveness::new(&analysis, LivenessOptions::default());
     let rows = programs::rom_table().expect("the ROM was translated");
     let table = Table::new(rows, &analysis);

@@ -18,6 +18,15 @@ pub extern "C" fn ag_player_main() -> c_int {
     // SAFETY: every program that links this library defines `ag_game` in its read-only
     // data, where it never changes.
     let table = unsafe { &ag_game };
+    // Games never run interpreted code (Architecture Decision 6); a library built in one
+    // cargo command with anygenesis would have its interpreter.
+    if anygenesis_player::has_interpreter() {
+        eprintln!(
+            "Error: this player library was built with the interpreter; build it on its own \
+             with `cargo build --release -p anygenesis-player-lib`"
+        );
+        return 1;
+    }
     match Game::from_table(table).and_then(anygenesis_player::main) {
         Ok(()) => 0,
         Err(error) => {

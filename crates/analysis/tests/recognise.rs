@@ -1,11 +1,13 @@
 //! The jump-table recogniser over synthetic images, one per dispatch idiom, hand-assembled
-//! word by word. Every image is analysed from its vectors alone, as game builds do.
+//! word by word. Every image is analysed from its vectors alone, as game builds do, and
+//! the last ones also with a profile of where a run's computed jumps went.
 
 use anygenesis_analysis::{
-    Analysis, DiscoveryStage, EntryKind, ResolvedTable, TargetKind, analyze, analyze_stage,
+    Analysis, DiscoveryStage, EntryKind, ResolvedTable, TargetKind, analyze, analyze_profiled,
+    analyze_stage,
 };
 use anygenesis_rom::Rom;
-use anygenesis_shared::Address;
+use anygenesis_shared::{Address, Profile};
 
 const ROM_SIZE: usize = 0x1000;
 /// Every handler vector points at an `rte` here.
@@ -271,4 +273,37 @@ fn test_recognise_odd_first_target_declines_table() {
     let analysis = image.analyze();
     assert!(analysis.jump_tables.is_empty());
     assert_eq!(analysis.unresolved.len(), 1);
+}
+
+/// `jsr (a0)` then `rts` at 0x300, and an `rts` at 0x500 that nothing in the ROM names.
+fn register_call_image() -> Image {
+    Image::new()
+        .words(RESET, &[0x4E90, RTS])
+        .words(0x500, &[RTS])
+}
+
+#[test]
+fn test_profile_targets_resolve_a_register_call_no_table_explains() {
+    let image = register_call_image();
+    let alone = image.analyze();
+    assert_eq!(alone.unresolved.len(), 1);
+    assert!(!alone.functions.contains_key(&a(0x500)));
+
+    let mut profile = Profile::new(ROM_SIZE as u32);
+    profile.computed(RESET, 0x500);
+    let analysis = analyze_profiled(&image.rom(), &profile);
+    assert!(analysis.unresolved.is_empty(), "{:?}", analysis.unresolved);
+    assert!(analysis.functions.contains_key(&a(0x500)));
+}
+
+#[test]
+fn test_profile_target_a_table_leaves_out_becomes_a_function() {
+    let image = word_table_image().words(0x320, &[RTS]);
+    let mut profile = Profile::new(ROM_SIZE as u32);
+    profile.computed(0x304, 0x30C);
+    profile.computed(0x304, 0x320);
+    let analysis = analyze_profiled(&image.rom(), &profile);
+    assert_eq!(only_table(&analysis).count, 2);
+    assert!(analysis.functions.contains_key(&a(0x320)));
+    assert!(!image.analyze().functions.contains_key(&a(0x320)));
 }

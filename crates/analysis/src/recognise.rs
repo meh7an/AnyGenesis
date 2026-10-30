@@ -13,7 +13,7 @@ use anygenesis_m68k::{Condition, Ea, Instruction, Mnemonic, Operand, Register, d
 use anygenesis_shared::{Address, Size};
 
 use crate::{
-    EntryKind, Hints, JumpTable,
+    EntryKind, FunctionHint, Hints, IndirectHint, JumpTable,
     discover::Discovery,
     tables::{self, BRA_W, MAX_ENTRIES},
 };
@@ -27,9 +27,15 @@ const RUN: usize = 8;
 /// Below this no entry points: the vectors and the header fill it.
 const FIRST_CODE: u32 = 0x200;
 
-/// Runs discovery and the recogniser in turns until no table is added or shrunk, and
-/// returns the tables found as hints.
-pub(crate) fn fixpoint(bytes: &[u8], vectors: &[u32; 64]) -> Hints {
+/// Runs discovery and the recogniser in turns until no hint is added or table shrunk, and
+/// returns the tables found as hints. `computed` holds the targets a profile run saw
+/// computed jumps and calls take, by site: a site no table explains follows those, and a
+/// target its table leaves out becomes a function entry.
+pub(crate) fn fixpoint(
+    bytes: &[u8],
+    vectors: &[u32; 64],
+    computed: &BTreeMap<Address, BTreeSet<Address>>,
+) -> Hints {
     let mut hints = Hints::default();
     let mut tried = BTreeSet::new();
     for _ in 0..MAX_ROUNDS {
@@ -49,11 +55,18 @@ pub(crate) fn fixpoint(bytes: &[u8], vectors: &[u32; 64]) -> Hints {
             })
             .collect();
         let mut added = Vec::new();
+        let mut indirect = Vec::new();
         for site in &discovery.unresolved {
             if !tried.insert(site.site) {
                 continue;
             }
             let Some(table) = recogniser.recognise(site.site) else {
+                if let Some(targets) = computed.get(&site.site) {
+                    indirect.push(IndirectHint {
+                        site: site.site,
+                        targets: targets.iter().copied().collect(),
+                    });
+                }
                 continue;
             };
             // A second site reading a known table resolves through the first one's hint.
@@ -65,10 +78,32 @@ pub(crate) fn fixpoint(bytes: &[u8], vectors: &[u32; 64]) -> Hints {
                 added.push(table);
             }
         }
+        // A table sized short of an entry the run took: that target gets code of its own.
+        // Sites still unresolved this round wait for the hints just made.
+        let unresolved: BTreeSet<Address> =
+            discovery.unresolved.iter().map(|site| site.site).collect();
+        let entries: BTreeSet<Address> = computed
+            .iter()
+            .filter(|&(site, _)| {
+                discovery.instructions.contains_key(site) && !unresolved.contains(site)
+            })
+            .flat_map(|(_, targets)| targets)
+            .filter(|&target| {
+                !discovery.instructions.contains_key(target) && hints.function(*target).is_none()
+            })
+            .copied()
+            .collect();
         drop(discovery);
-        if shrunk.is_empty() && added.is_empty() {
+        if shrunk.is_empty() && added.is_empty() && indirect.is_empty() && entries.is_empty() {
             break;
         }
+        hints.indirect.extend(indirect);
+        hints
+            .functions
+            .extend(entries.into_iter().map(|address| FunctionHint {
+                address,
+                noreturn: false,
+            }));
         for (position, count) in shrunk {
             hints.jump_tables[position].count = count;
         }

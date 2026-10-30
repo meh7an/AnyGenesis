@@ -1,8 +1,9 @@
 //! The runtime recompiled code links against: the 68000 memory map, the I/O chip and pad,
 //! the Z80 side with its own Z80, TMSS, the `ag_*` externs, and the loop that runs translated code,
 //! with the program's stepped code for addresses no function covers. With the default
-//! `interpreter` feature the IR interpreter is the last fallback; without it (games) a
-//! fetch from an address with no native code ends the run.
+//! `interpreter` feature the IR interpreter is the last fallback, and it can keep a profile
+//! of what it runs ([`profile`], the build's profile run); without it (games) a fetch from
+//! an address with no native code ends the run.
 //!
 //! The VDP and everything that keeps time sit behind [`Hardware`]: [`Vdp`] with its ports,
 //! memories and DMA, keeping NTSC time through [`timing`]. The scheduler delivers its
@@ -16,6 +17,8 @@ pub mod hardware;
 pub mod io;
 pub mod log;
 mod machine;
+#[cfg(feature = "interpreter")]
+pub mod profile;
 pub mod refresh;
 pub mod sound;
 pub mod timing;
