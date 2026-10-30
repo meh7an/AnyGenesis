@@ -8,7 +8,8 @@
 //! flag counts as live wherever control goes somewhere the analysis cannot follow:
 //! unresolved jumps and calls, targets without a block, RTE and RTR, exception entries and
 //! STOP (which push the status register), the returns of functions with callers the
-//! analysis does not know, and RTS instructions reached with an unbalanced stack.
+//! analysis does not know, and RTS instructions and exits into other functions reached with
+//! an unbalanced stack.
 
 mod program;
 mod stack;
@@ -121,7 +122,7 @@ impl<'a> FlagLiveness<'a> {
     /// Lifts every instruction of `analysis` and solves flag liveness over it.
     pub fn new(analysis: &'a Analysis, options: LivenessOptions) -> Self {
         let program = Program::new(analysis);
-        let unbalanced = stack::unbalanced_returns(&program);
+        let unbalanced = stack::unbalanced_exits(&program);
         let summaries = summary::summaries(&program, &unbalanced, options.check_points_read_sr);
         let unknown_callers: BTreeSet<Address> = analysis
             .functions
@@ -188,9 +189,9 @@ impl<'a> FlagLiveness<'a> {
         })
     }
 
-    /// Returns the RTS instructions reached with an unbalanced stack, where every flag is
-    /// live.
-    pub fn unbalanced_returns(&self) -> impl Iterator<Item = Address> + '_ {
+    /// Returns the RTS instructions and the exits into other functions reached with an
+    /// unbalanced stack, where every flag is live.
+    pub fn unbalanced_exits(&self) -> impl Iterator<Item = Address> + '_ {
         self.facts.unbalanced.iter().copied()
     }
 

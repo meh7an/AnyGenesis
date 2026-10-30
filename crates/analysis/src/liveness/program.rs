@@ -40,7 +40,8 @@ pub(super) trait Context {
     /// Returns `(reads, defines)` of the function at `entry`, `None` if there is none.
     fn summary(&self, entry: Address) -> Option<(FlagSet, FlagSet)>;
 
-    /// Returns whether the RTS at `site` is reached with an unbalanced stack.
+    /// Returns whether the RTS at `site`, or the instruction there that leads into another
+    /// function, is reached with an unbalanced stack.
     fn unbalanced(&self, site: Address) -> bool;
 
     /// Returns whether every block start reads the whole status register.
@@ -107,10 +108,14 @@ impl<'a> Program<'a> {
     }
 
     /// Returns the flags live when the instruction falls through. After a write to SR an
-    /// interrupt may be taken at once, so with check points reading SR its frame needs all.
+    /// interrupt may be taken at once, so with check points reading SR its frame needs all;
+    /// falling into another function after a popped caller returns past the return point.
     pub fn live_out(&self, site: &Site, context: &impl Context) -> FlagSet {
         let body = &site.lifted.body;
-        if body.falls_through() && body.writes_sr() && context.check_points_read_sr() {
+        let unbalanced = context.unbalanced(site.lifted.address);
+        if body.falls_through()
+            && (unbalanced || (body.writes_sr() && context.check_points_read_sr()))
+        {
             FlagSet::ALL
         } else if body.falls_through() {
             context.target(site.lifted.next())
@@ -129,6 +134,10 @@ impl<'a> Program<'a> {
     ) -> FlagSet {
         let block = self.block(site);
         match *control {
+            // Another function entered after a popped caller returns past the return point.
+            Control::Jump(_) | Control::JumpIndirect(_) if context.unbalanced(address) => {
+                FlagSet::ALL
+            }
             Control::Jump(target) => context.target(target),
             Control::JumpIndirect(_) => {
                 if block.successors.is_empty() {

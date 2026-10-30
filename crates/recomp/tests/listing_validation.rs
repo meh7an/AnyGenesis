@@ -1,9 +1,11 @@
 //! Validates a ROM against the assembler listing of a local disassembly build (s1disasm,
-//! s2disasm), analysed from its vectors alone as game builds do: every listed instruction must
+//! s2disasm), analysed from the ROM alone as game builds do: every listed instruction must
 //! decode as the listing has it and have native code (a stepped function at least), and
-//! nothing discovery finds may be data, while discovery's coverage is reported, not asserted
-//! (stepped code covers what discovery misses). The decoder comparison also proves that the
-//! listing belongs to the ROM. Run with
+//! nothing the descent from the vectors finds may be data, while discovery's coverage is
+//! reported, not asserted (stepped code covers what discovery misses). The jump-table
+//! recogniser is measured against the listing: dispatch sites resolved, table sizes against
+//! the listing's, and the bytes of data its tables led discovery to decode as code. The
+//! decoder comparison also proves that the listing belongs to the ROM. Run with
 //! `cargo test -p anygenesis-recomp --test listing_validation -- --ignored --nocapture`
 //! with `ANYGENESIS_ROM` and `ANYGENESIS_LISTING` set. The report quotes listing mnemonics,
 //! so it goes to `target/tmp/listing-validation-report.md` and never into the repo.
@@ -15,7 +17,9 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anygenesis_analysis::{Analysis, EntryKind, Suggestion, analyze};
+use anygenesis_analysis::{
+    Analysis, DiscoveryStage, EntryKind, Suggestion, analyze, analyze_stage,
+};
 use anygenesis_codegen_c::{SteppedStats, superset};
 use anygenesis_m68k::{Dialect, Ea, FormatOptions, Instruction, Labels, Mnemonic, Operand};
 use anygenesis_rom::Rom;
@@ -34,13 +38,14 @@ fn test_listing_instructions_decode_and_have_native_code() {
         std::env::var_os("ANYGENESIS_LISTING").expect("ANYGENESIS_LISTING is not set");
     let rom = Rom::load(&rom_path).expect("ANYGENESIS_ROM loads");
     let analysis = analyze(&rom);
+    let vectors_only = analyze_stage(&rom, DiscoveryStage::Vectors);
     let listing_text = std::fs::read(&listing_path).expect("ANYGENESIS_LISTING is readable");
     let listing = match listing::parse(&listing_text) {
         Ok(listing) => listing,
         Err(error) => panic!("listing: {error}"),
     };
 
-    let validation = Validation::run(rom.bytes(), &analysis, &listing);
+    let validation = Validation::run(rom.bytes(), &analysis, &vectors_only, &listing);
     let report_path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("listing-validation-report.md");
     let report = format!("{ROM_MARKER}\n\n{}", validation.report(&analysis, &listing));
     std::fs::write(&report_path, report).expect("report written");
@@ -50,9 +55,15 @@ fn test_listing_instructions_decode_and_have_native_code() {
     }
 
     assert!(validation.mismatches.is_empty(), "decoder mismatches");
-    assert!(
-        validation.precision_failures.is_empty(),
-        "data decoded as code"
+    assert_eq!(
+        validation.vectors_precision_failures, 0,
+        "data decoded as code from the vectors alone"
+    );
+    // Both Sonic games reach 0 with the recogniser; a false table entry would only
+    // cost size, but the count is kept where it was reached.
+    assert_eq!(
+        validation.false_positive_bytes, 0,
+        "data decoded as code through recognised tables"
     );
     assert!(
         validation.missing.is_empty(),
@@ -98,7 +109,13 @@ struct Validation {
     listed: usize,
     mismatches: Vec<Mismatch>,
     found: usize,
+    /// Precision failures of the build's analysis, recogniser tables included.
     precision_failures: Vec<Find>,
+    /// Their bytes: the recogniser's false positives, since the vectors' own count is 0.
+    false_positive_bytes: u32,
+    vectors_precision_failures: usize,
+    vectors_reached: usize,
+    recognition: Recognition,
     explain: Vec<Find>,
     reached: usize,
     gaps: Vec<Gap>,
@@ -108,7 +125,7 @@ struct Validation {
 }
 
 impl Validation {
-    fn run(rom: &[u8], analysis: &Analysis, listing: &Listing) -> Self {
+    fn run(rom: &[u8], analysis: &Analysis, vectors_only: &Analysis, listing: &Listing) -> Self {
         let rom_size = rom.len() as u32;
         let in_rom: Vec<(u32, &ListedInstruction)> = listing
             .instructions
@@ -122,34 +139,15 @@ impl Validation {
             .filter_map(|&(address, listed)| compare(rom, address, listed))
             .collect();
 
-        let mut precision_failures = Vec::new();
-        let mut explain = Vec::new();
-        for address in analysis.instructions.keys().map(|address| address.get()) {
-            match listing.coverage(address) {
-                Coverage::InstructionStart => {}
-                Coverage::InsideInstruction(start) => precision_failures.push(Find {
-                    address,
-                    what: format!("inside the listed instruction at {start:06X}"),
-                }),
-                Coverage::Data(data) if data.directive.starts_with("dc.w") => explain.push(Find {
-                    address,
-                    what: format!("{} run at {:06X}", data.directive, data.address),
-                }),
-                Coverage::Data(data) => precision_failures.push(Find {
-                    address,
-                    what: format!("{} run at {:06X}", data.directive, data.address),
-                }),
-                Coverage::Unlisted => explain.push(Find {
-                    address,
-                    what: String::from("bytes the listing does not print"),
-                }),
-            }
-        }
-
-        let reached = in_rom
+        let (precision_failures, explain) = classify(analysis, listing);
+        let false_positive_bytes = precision_failures
             .iter()
-            .filter(|(address, _)| analysis.instructions.contains_key(&Address::new(*address)))
-            .count();
+            .map(|find| analysis.instructions[&Address::new(find.address)].length())
+            .sum();
+        let vectors_precision_failures = classify(vectors_only, listing).0.len();
+
+        let reached = count_reached(&in_rom, analysis);
+        let vectors_reached = count_reached(&in_rom, vectors_only);
         let references = References::new(rom, analysis);
         let gaps = gaps(&in_rom, analysis)
             .into_iter()
@@ -179,6 +177,10 @@ impl Validation {
             mismatches,
             found: analysis.instructions.len(),
             precision_failures,
+            false_positive_bytes,
+            vectors_precision_failures,
+            vectors_reached,
+            recognition: Recognition::new(rom, analysis, listing, &in_rom),
             explain,
             reached,
             gaps,
@@ -195,18 +197,23 @@ impl Validation {
             ("decoder mismatches", self.mismatches.len().to_string()),
             ("found instructions", self.found.to_string()),
             (
+                "vectors precision",
+                self.vectors_precision_failures.to_string(),
+            ),
+            (
+                "vectors reached",
+                percent(self.vectors_reached, self.listed),
+            ),
+            (
                 "precision failures",
                 self.precision_failures.len().to_string(),
             ),
-            ("explain items", self.explain.len().to_string()),
             (
-                "reached",
-                format!(
-                    "{} ({:.2}%)",
-                    self.reached,
-                    100.0 * self.reached as f64 / self.listed.max(1) as f64
-                ),
+                "false-positive bytes",
+                self.false_positive_bytes.to_string(),
             ),
+            ("explain items", self.explain.len().to_string()),
+            ("reached", percent(self.reached, self.listed)),
             ("unreached", unreached.to_string()),
             ("gap runs", self.gaps.len().to_string()),
             ("unresolved sites", self.unresolved.len().to_string()),
@@ -225,6 +232,9 @@ impl Validation {
             ("superset pruned", self.superset.pruned.to_string()),
             ("superset forced", self.superset.forced.to_string()),
         ]
+        .into_iter()
+        .chain(self.recognition.summary())
+        .collect()
     }
 
     fn report(&self, analysis: &Analysis, listing: &Listing) -> String {
@@ -260,6 +270,23 @@ impl Validation {
         out.push_str("\n## Explain items\n\n");
         write_finds(&mut out, &self.explain);
 
+        out.push_str("\n## Recognised tables\n\n");
+        out.push_str("| Site | Table | Kind | Count | Listing |\n");
+        out.push_str("|------|-------|------|------:|--------:|\n");
+        for table in &self.recognition.tables {
+            let listed = table
+                .listed
+                .map_or_else(|| String::from("?"), |count| count.to_string());
+            let _ = writeln!(
+                out,
+                "| {:06X} | {:06X} | {} | {} | {listed} |",
+                table.site,
+                table.address,
+                table.kind.name(),
+                table.count
+            );
+        }
+
         out.push_str("\n## Unresolved sites\n\n");
         for site in &self.unresolved {
             let _ = writeln!(out, "{site}");
@@ -293,6 +320,177 @@ impl Validation {
         );
         out
     }
+}
+
+/// Sorts the analysis's instructions the listing does not start an instruction at: precision
+/// failures (inside a listed instruction, or data) and items to explain (`dc.w` runs, which
+/// the listing also uses for code rows, and bytes it does not print).
+fn classify(analysis: &Analysis, listing: &Listing) -> (Vec<Find>, Vec<Find>) {
+    let mut precision_failures = Vec::new();
+    let mut explain = Vec::new();
+    for address in analysis.instructions.keys().map(|address| address.get()) {
+        match listing.coverage(address) {
+            Coverage::InstructionStart => {}
+            Coverage::InsideInstruction(start) => precision_failures.push(Find {
+                address,
+                what: format!("inside the listed instruction at {start:06X}"),
+            }),
+            Coverage::Data(data) if data.directive.starts_with("dc.w") => explain.push(Find {
+                address,
+                what: format!("{} run at {:06X}", data.directive, data.address),
+            }),
+            Coverage::Data(data) => precision_failures.push(Find {
+                address,
+                what: format!("{} run at {:06X}", data.directive, data.address),
+            }),
+            Coverage::Unlisted => explain.push(Find {
+                address,
+                what: String::from("bytes the listing does not print"),
+            }),
+        }
+    }
+    (precision_failures, explain)
+}
+
+/// Counts the listed instructions the analysis decoded.
+fn count_reached(in_rom: &[(u32, &ListedInstruction)], analysis: &Analysis) -> usize {
+    in_rom
+        .iter()
+        .filter(|(address, _)| analysis.instructions.contains_key(&Address::new(*address)))
+        .count()
+}
+
+fn percent(part: usize, whole: usize) -> String {
+    format!("{part} ({:.2}%)", 100.0 * part as f64 / whole.max(1) as f64)
+}
+
+/// The recogniser against the listing.
+struct Recognition {
+    tables: Vec<RecognisedTable>,
+    /// Listed `jmp`/`jsr` instructions through a register or a table.
+    sites: usize,
+    /// Of those, the ones a recognised table resolves.
+    resolved: usize,
+    /// Reached by discovery but left unresolved.
+    reached_unresolved: usize,
+}
+
+/// One recognised table, with the count the listing gives it.
+struct RecognisedTable {
+    site: u32,
+    address: u32,
+    kind: EntryKind,
+    count: u32,
+    listed: Option<u32>,
+}
+
+impl Recognition {
+    fn new(
+        rom: &[u8],
+        analysis: &Analysis,
+        listing: &Listing,
+        in_rom: &[(u32, &ListedInstruction)],
+    ) -> Self {
+        let tables = analysis
+            .jump_tables
+            .iter()
+            .filter_map(|table| {
+                Some(RecognisedTable {
+                    site: table.site?.get(),
+                    address: table.address.get(),
+                    kind: table.kind,
+                    count: table.count,
+                    listed: listed_table_count(listing, table.address.get(), table.kind),
+                })
+            })
+            .collect();
+        let sites: Vec<Address> = in_rom
+            .iter()
+            .map(|&(address, _)| Address::new(address))
+            .filter(|address| {
+                anygenesis_m68k::decode_at(rom, address.get() as usize)
+                    .is_ok_and(|instruction| is_dispatch(&instruction))
+            })
+            .collect();
+        let resolved = sites
+            .iter()
+            .filter(|&&site| {
+                analysis
+                    .jump_tables
+                    .iter()
+                    .any(|table| table.site == Some(site))
+            })
+            .count();
+        let reached_unresolved = sites
+            .iter()
+            .filter(|&&site| analysis.unresolved.iter().any(|left| left.site == site))
+            .count();
+        Self {
+            tables,
+            sites: sites.len(),
+            resolved,
+            reached_unresolved,
+        }
+    }
+
+    fn summary(&self) -> Vec<(&'static str, String)> {
+        let mut by_kind = [0usize; 3];
+        let (mut equal, mut over, mut under, mut unknown) = (0usize, 0, 0, 0);
+        for table in &self.tables {
+            by_kind[kind_slot(table.kind)] += 1;
+            match table.listed {
+                Some(listed) if listed == table.count => equal += 1,
+                Some(listed) if listed < table.count => over += 1,
+                Some(_) => under += 1,
+                None => unknown += 1,
+            }
+        }
+        let unreached = self.sites - self.resolved - self.reached_unresolved;
+        vec![
+            (
+                "recognised tables",
+                format!(
+                    "{} ({} word_offset, {} bra_w, {} long)",
+                    self.tables.len(),
+                    by_kind[0],
+                    by_kind[1],
+                    by_kind[2]
+                ),
+            ),
+            (
+                "table size vs listing",
+                format!(
+                    "{} equal, {over} over, {under} under, {unknown} unknown",
+                    percent(equal, self.tables.len())
+                ),
+            ),
+            ("dispatch sites", self.sites.to_string()),
+            ("sites resolved", percent(self.resolved, self.sites)),
+            (
+                "sites unresolved",
+                format!("{} reached, {unreached} unreached", self.reached_unresolved),
+            ),
+        ]
+    }
+}
+
+fn kind_slot(kind: EntryKind) -> usize {
+    match kind {
+        EntryKind::WordOffset => 0,
+        EntryKind::BraW => 1,
+        _ => 2,
+    }
+}
+
+/// Whether `instruction` is a `jmp` or `jsr` whose target a table or a register decides.
+fn is_dispatch(instruction: &Instruction) -> bool {
+    matches!(instruction.mnemonic, Mnemonic::Jmp | Mnemonic::Jsr)
+        && matches!(
+            instruction.operands[0],
+            Some(Operand::Ea(
+                Ea::PcIndex { .. } | Ea::Indirect(_) | Ea::Index { .. } | Ea::Displacement { .. }
+            ))
+        )
 }
 
 /// Decodes the ROM at a listed instruction and compares length, mnemonic and size.

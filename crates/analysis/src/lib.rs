@@ -1,15 +1,18 @@
 //! Control-flow discovery: functions, basic blocks and jump tables.
 //!
 //! [`analyze`] descends from the reset and exception vectors, decoding every reachable
-//! instruction, then cuts the code into blocks and assigns them to functions; [`analyze_with`]
-//! also follows [`Hints`]. What it cannot follow is reported, never guessed. [`FlagLiveness`]
-//! then finds the flags something reads at every instruction of the result.
+//! instruction, recognises the jump tables its indirect jumps read and descends again until
+//! none is new, then cuts the code into blocks and assigns them to functions.
+//! [`analyze_stage`] can stop at the vectors; [`analyze_with`] follows [`Hints`] and nothing
+//! else. What it cannot follow is reported, never guessed. [`FlagLiveness`] then finds the
+//! flags something reads at every instruction of the result.
 
 mod blocks;
 mod discover;
 mod hints;
 mod liveness;
 mod model;
+mod recognise;
 mod report;
 mod tables;
 
@@ -23,12 +26,32 @@ pub use model::{
 };
 pub use report::Report;
 
-/// Discovers the code of `rom` from its vectors alone, as game builds do.
-pub fn analyze(rom: &Rom) -> Analysis {
-    analyze_with(rom, &Hints::default())
+/// How far discovery goes beyond the vectors.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DiscoveryStage {
+    /// The descent from the vectors alone.
+    Vectors,
+    /// The descent, plus every jump table the recogniser finds behind an indirect jump.
+    #[default]
+    Static,
 }
 
-/// Discovers the code of `rom` from its vectors and `hints`.
+/// Discovers the code of `rom` from the ROM alone, as game builds do.
+pub fn analyze(rom: &Rom) -> Analysis {
+    analyze_stage(rom, DiscoveryStage::default())
+}
+
+/// Discovers the code of `rom` from the ROM alone, going as far as `stage`.
+pub fn analyze_stage(rom: &Rom, stage: DiscoveryStage) -> Analysis {
+    let hints = match stage {
+        DiscoveryStage::Vectors => Hints::default(),
+        DiscoveryStage::Static => recognise::fixpoint(rom.bytes(), rom.vectors().entries()),
+    };
+    analyze_with(rom, &hints)
+}
+
+/// Discovers the code of `rom` from its vectors and `hints`, with no recogniser.
 pub fn analyze_with(rom: &Rom, hints: &Hints) -> Analysis {
     let mut discovery = discover::Discovery::new(rom.bytes(), rom.vectors().entries(), hints);
     discovery.run();

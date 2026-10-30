@@ -278,11 +278,56 @@ fn test_liveness_popped_caller_keeps_the_grandcaller_flags() {
     let analysis = image.analyze();
     let liveness = FlagLiveness::new(&analysis, LivenessOptions::default());
 
-    assert_eq!(
-        liveness.unbalanced_returns().collect::<Vec<_>>(),
-        [a(G + 2)]
-    );
+    assert_eq!(liveness.unbalanced_exits().collect::<Vec<_>>(), [a(G + 2)]);
     let live = liveness.live_out(a(RESET)).expect("tst is analysed");
+    assert!(live.contains(Flag::Z));
+    assert_equivalent(&image, &analysis, &liveness);
+}
+
+#[test]
+fn test_liveness_popped_caller_tail_jump_keeps_the_grandcaller_flags() {
+    // reset: bsr h; tst.w d0; bsr f; beq skip; moveq #1,d2; skip: move.w d3,ccr; rts
+    // f: bsr g; addq.w #1,d0; rts      g: addq.l #4,sp; bra h (h's rts returns past f)
+    let mut reset = bsr(RESET, H).to_vec();
+    reset.push(TST_D0);
+    reset.extend(bsr(RESET + 6, F));
+    reset.extend([BEQ_SKIP, MOVEQ_D2, MOVE_D3_CCR, RTS]);
+    let mut f = bsr(F, G).to_vec();
+    f.extend([ADDQ_D0, RTS]);
+    let mut g = vec![0x588F];
+    g.extend(bra(G + 2, H));
+    let image = Image::new()
+        .words(RESET, &reset)
+        .words(F, &f)
+        .words(G, &g)
+        .words(H, &[RTS]);
+    let analysis = image.analyze();
+    let liveness = FlagLiveness::new(&analysis, LivenessOptions::default());
+
+    assert_eq!(liveness.unbalanced_exits().collect::<Vec<_>>(), [a(G + 2)]);
+    let live = liveness.live_out(a(RESET + 4)).expect("tst is analysed");
+    assert!(live.contains(Flag::Z));
+    assert_equivalent(&image, &analysis, &liveness);
+}
+
+#[test]
+fn test_liveness_popped_caller_falling_into_function_keeps_the_grandcaller_flags() {
+    // As above, but g: addq.l #4,sp falls into h, which reset also calls.
+    let mut reset = bsr(RESET, G + 2).to_vec();
+    reset.push(TST_D0);
+    reset.extend(bsr(RESET + 6, F));
+    reset.extend([BEQ_SKIP, MOVEQ_D2, MOVE_D3_CCR, RTS]);
+    let mut f = bsr(F, G).to_vec();
+    f.extend([ADDQ_D0, RTS]);
+    let image = Image::new()
+        .words(RESET, &reset)
+        .words(F, &f)
+        .words(G, &[0x588F, RTS]);
+    let analysis = image.analyze();
+    let liveness = FlagLiveness::new(&analysis, LivenessOptions::default());
+
+    assert_eq!(liveness.unbalanced_exits().collect::<Vec<_>>(), [a(G)]);
+    let live = liveness.live_out(a(RESET + 4)).expect("tst is analysed");
     assert!(live.contains(Flag::Z));
     assert_equivalent(&image, &analysis, &liveness);
 }

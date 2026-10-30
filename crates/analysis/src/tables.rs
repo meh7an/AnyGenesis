@@ -5,8 +5,8 @@ use crate::EntryKind;
 /// The opcode word of `bra.w`; its displacement follows in the next word.
 pub(crate) const BRA_W: u16 = 0x6000;
 
-/// The most entries a count guess proposes; real tables are far smaller.
-const MAX_GUESS: u32 = 256;
+/// The most entries a count guess or a recognised table holds; real tables are far smaller.
+pub(crate) const MAX_ENTRIES: u32 = 256;
 
 /// Returns the target of entry `index` of a table at `table`, or `None` when the entry
 /// lies past the end of `bytes`.
@@ -38,17 +38,12 @@ pub(crate) fn guess_count(bytes: &[u8], table: Address, kind: EntryKind) -> Opti
     let rom_end = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
     let mut limit = rom_end;
     let mut count = 0;
-    while count < MAX_GUESS {
+    while count < MAX_ENTRIES {
         let entry = table.wrapping_add(count * kind.entry_bytes());
         if entry.get() >= limit {
             break;
         }
-        if kind == EntryKind::BraW
-            && usize::try_from(entry.get())
-                .ok()
-                .and_then(|offset| read_u16_be(bytes, offset).ok())
-                != Some(BRA_W)
-        {
+        if kind == EntryKind::BraW && word_at(bytes, entry) != Some(BRA_W) {
             break;
         }
         let Some(target) = entry_target(bytes, table, kind, count) else {
@@ -73,10 +68,14 @@ pub(crate) fn guess_count(bytes: &[u8], table: Address, kind: EntryKind) -> Opti
 }
 
 /// Returns where the `bra.w` at `entry` leads.
-fn bra_w_target(bytes: &[u8], entry: Address) -> Option<Address> {
-    let offset = usize::try_from(entry.get()).ok()?.checked_add(2)?;
-    let displacement = read_u16_be(bytes, offset).ok()? as i16;
+pub(crate) fn bra_w_target(bytes: &[u8], entry: Address) -> Option<Address> {
+    let displacement = word_at(bytes, entry.wrapping_add(2))? as i16;
     Some(entry.wrapping_add(2).offset(i32::from(displacement)))
+}
+
+/// Returns the word at `address`, or `None` past the end of `bytes`.
+pub(crate) fn word_at(bytes: &[u8], address: Address) -> Option<u16> {
+    read_u16_be(bytes, usize::try_from(address.get()).ok()?).ok()
 }
 
 #[cfg(test)]

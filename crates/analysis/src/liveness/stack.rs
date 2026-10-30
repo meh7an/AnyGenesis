@@ -1,13 +1,13 @@
-//! Finds the RTS instructions that may not return to the function's caller: those reached
-//! with the stack pointer away from where it was on entry (a popped caller, `pea` + `rts`)
-//! or at an unknown place.
+//! Finds the exits that may not return to the function's caller: RTS instructions, and
+//! instructions leading into another function, reached with the stack pointer away from where
+//! it was on entry (a popped caller, `pea` + `rts`) or at an unknown place.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anygenesis_ir::{BinaryOp, Body, Control, Expr, Op, Reg, ReturnKind, Value, Width};
 use anygenesis_shared::{Address, Size};
 
-use super::program::Program;
+use super::program::{Program, Site};
 use crate::Function;
 
 /// A0-A7 as offsets from the stack pointer on function entry, `None` when unknown.
@@ -15,29 +15,63 @@ type Frame = [Option<i64>; 8];
 
 const SP: usize = 7;
 
-/// Returns every RTS that some function containing it reaches with an unbalanced stack.
-pub(super) fn unbalanced_returns(program: &Program) -> BTreeSet<Address> {
+/// Returns every RTS, and every instruction leading into another function, that some
+/// function containing it reaches with an unbalanced stack. Another function entered after a
+/// popped caller ends in an RTS that returns past this function's return point.
+pub(super) fn unbalanced_exits(program: &Program) -> BTreeSet<Address> {
     let mut unbalanced = BTreeSet::new();
     for function in program.analysis.functions.values() {
         let frames = frames(program, function);
         for address in program.function_sites(function) {
+            let site = &program.sites[&address];
             let returns = matches!(
-                program.sites[&address].lifted.body.ops.last(),
+                site.lifted.body.ops.last(),
                 Some(Op::Exit(Control::Return {
                     kind: ReturnKind::Rts,
                     ..
                 }))
             );
-            if returns
-                && frames
-                    .get(&address)
-                    .is_none_or(|frame| frame[SP] != Some(0))
-            {
+            let balanced = |frame: &Frame| frame[SP] == Some(0);
+            let unbalanced_here = match frames.get(&address) {
+                Some(frame) if returns => !balanced(frame),
+                Some(frame) => leaves(program, function, site, *frame)
+                    .iter()
+                    .any(|frame| !balanced(frame)),
+                // Not reached from the entry: any exit may be unbalanced.
+                None => returns || !leaves(program, function, site, [None; 8]).is_empty(),
+            };
+            if unbalanced_here {
                 unbalanced.insert(address);
             }
         }
     }
     unbalanced
+}
+
+/// Returns the frame at every point where the instruction at `site`, entered with `frame`,
+/// goes on to another function's entry: by a jump, a table, or falling through into it.
+fn leaves(program: &Program, function: &Function, site: &Site, frame: Frame) -> Vec<Frame> {
+    let other = |target: Address| program.analysis.is_tail_jump(function.entry, target);
+    let mut found = Vec::new();
+    let body = &site.lifted.body;
+    let end = evaluate(body, frame, |control, frame| {
+        let leaves = match *control {
+            Control::Jump(target) => other(target),
+            Control::JumpIndirect(_) => program
+                .block(site)
+                .successors
+                .iter()
+                .any(|edge| other(edge.target)),
+            _ => false,
+        };
+        if leaves {
+            found.push(frame);
+        }
+    });
+    if body.falls_through() && other(site.lifted.next()) {
+        found.push(end);
+    }
+    found
 }
 
 /// Returns the frame on arrival at each instruction of `function` reached from its entry.

@@ -75,8 +75,8 @@ fn test_liveness_real_rom_is_equivalent_and_reports_removals() {
     .unwrap();
     writeln!(
         report,
-        "| Unbalanced RTS | {} |",
-        liveness.unbalanced_returns().count()
+        "| Unbalanced exits | {} |",
+        liveness.unbalanced_exits().count()
     )
     .unwrap();
     writeln!(report).unwrap();

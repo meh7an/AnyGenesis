@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 
 use anygenesis_analysis::{
-    Analysis, Call, CallKind, DataRegion, Diagnostic, Edge, EdgeKind, EntryKind, FunctionHint,
-    Hints, IndirectHint, JumpTable, Origin, Source, Suggestion, TailJump, TargetKind, Terminator,
-    UnresolvedSite, analyze, analyze_with,
+    Analysis, Call, CallKind, DataRegion, Diagnostic, DiscoveryStage, Edge, EdgeKind, EntryKind,
+    FunctionHint, Hints, IndirectHint, JumpTable, Origin, Source, Suggestion, TailJump, TargetKind,
+    Terminator, UnresolvedSite, analyze_stage, analyze_with,
 };
 use anygenesis_m68k::DecodeError;
 use anygenesis_rom::Rom;
@@ -51,9 +51,9 @@ impl Image {
         Rom::from_bytes(self.bytes.clone()).expect("synthetic image loads")
     }
 
-    /// Analyses the image from its vectors alone.
+    /// Analyses the image from its vectors alone, without the recogniser.
     fn analyze(&self) -> Analysis {
-        analyze(&self.rom())
+        analyze_stage(&self.rom(), DiscoveryStage::Vectors)
     }
 
     /// Analyses the image from its vectors and `hints`.

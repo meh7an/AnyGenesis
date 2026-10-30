@@ -2,9 +2,9 @@ use anygenesis_shared::Address;
 
 /// Facts about a ROM the descent from its vectors cannot find on its own.
 ///
-/// Game builds pass none: they find code from the vectors and translate every other address
-/// as stepped code. Hints exist for synthetic tests and for later discovery passes that
-/// produce them from the ROM itself.
+/// Game builds write none: the recogniser derives jump tables from the ROM itself, and every
+/// address discovery misses is translated as stepped code. Written hints exist for synthetic
+/// tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hints {
     /// Extra function entries, each also a root of the descent.
