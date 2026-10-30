@@ -14,10 +14,10 @@ use std::{fmt, fs, io, path::Path};
 use anygenesis_shared::{BoundsError, read_u16_be};
 
 pub use header::{Header, Regions};
-pub use identify::Sha1Digest;
+pub use identify::{ParseSha1Error, Sha1Digest};
 pub use vectors::{VectorTable, vector_name};
 
-use crate::header::{HEADER_END, HEADER_START};
+use crate::header::{CHECKSUM, HEADER_END, HEADER_START};
 
 /// The 68000 maps cartridge ROM at 0x000000-0x3FFFFF; anything larger needs a mapper.
 pub const MAX_ROM_SIZE: usize = 0x40_0000;
@@ -103,6 +103,21 @@ impl Rom {
     /// Returns the wrapping sum of every word from 0x200 to the end of the file.
     pub fn computed_checksum(&self) -> u16 {
         self.computed_checksum
+    }
+
+    /// Whether the header checksum agrees with the computed one.
+    pub fn has_valid_checksum(&self) -> bool {
+        self.header.checksum == self.computed_checksum
+    }
+
+    /// Returns the image with the computed checksum written into its header, so a game that
+    /// checks itself at boot accepts a changed image.
+    #[must_use]
+    pub fn with_fixed_checksum(self) -> Self {
+        let mut bytes = self.bytes;
+        bytes[CHECKSUM..CHECKSUM + 2].copy_from_slice(&self.computed_checksum.to_be_bytes());
+        // The image parsed before and the checksum field lies outside the words it sums.
+        Self::from_bytes(bytes).expect("an image that parsed still parses")
     }
 
     /// Returns the SHA-1 of the whole image.
@@ -296,6 +311,18 @@ mod tests {
         let rom = load(synthetic_rom());
         assert_eq!(rom.warnings(), []);
         assert_eq!(rom.computed_checksum(), rom.header().checksum);
+    }
+
+    #[test]
+    fn test_with_fixed_checksum_changed_image_checksum_rewritten() {
+        let mut bytes = synthetic_rom();
+        bytes[0x300] ^= 0xFF;
+        let rom = load(bytes);
+        assert!(!rom.has_valid_checksum());
+        let fixed = rom.with_fixed_checksum();
+        assert!(fixed.has_valid_checksum());
+        assert_eq!(fixed.warnings(), []);
+        assert_eq!(fixed.bytes()[0x300], (0x300 % 251) as u8 ^ 0xFF);
     }
 
     #[test]

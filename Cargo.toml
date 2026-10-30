@@ -12,6 +12,7 @@ members = [
     "crates/ir",
     "crates/m68k",
     "crates/oracle",
+    "crates/patch",
     "crates/player",
     "crates/player-lib",
     "crates/psg",

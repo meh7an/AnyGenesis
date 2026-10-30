@@ -26,6 +26,7 @@ use std::{
     process::{Command, ExitCode},
 };
 
+use anygenesis_patch::Patch;
 use anygenesis_recomp::build;
 use anygenesis_rom::Rom;
 use anyhow::{Context, Result, bail};
@@ -43,7 +44,11 @@ const USAGE: &str = "usage:
                                     [--input <file>] [--record <file>] [--controls <file>]
   anygenesis <rom> --discovery profile|static|vectors ...
                                     either one, with how far the build discovers code
-                                    (default profile: a headless run of the game finds it)";
+                                    (default profile: a headless run of the game finds it)
+  anygenesis <rom> --patch <file> ...
+                                    either one, with the ROM patched first by a patch pack
+                                    (.toml) or an IPS, UPS or BPS file; repeat it to apply
+                                    several in order";
 
 /// Names the player library instead of the one next to anygenesis.
 const PLAYER_VAR: &str = "ANYGENESIS_PLAYER";
@@ -54,7 +59,7 @@ fn main() -> Result<ExitCode> {
         bail!(USAGE);
     };
     let mut options: Vec<OsString> = arguments.collect();
-    let discovery = take_discovery(&mut options)?;
+    let build_options = take_build_options(&mut options)?;
     let out = match options.first() {
         Some(flag) if flag == "--out" => match &options[1..] {
             [folder] => Some(PathBuf::from(folder)),
@@ -64,14 +69,22 @@ fn main() -> Result<ExitCode> {
         _ => None,
     };
     let rom_path = PathBuf::from(rom_path);
-    let rom = build::load_rom(&rom_path)?;
+    let patches = build_options
+        .patches
+        .iter()
+        .map(|path| {
+            Patch::load(path).with_context(|| format!("loading the patch {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let rom = patched(build::load_rom(&rom_path)?, &patches)?;
     for warning in rom.warnings() {
         eprintln!("warning: {warning}");
     }
-    let program = cached_program(&rom, discovery)?;
+    let program = cached_program(&rom, build_options.discovery)?;
     match out {
         Some(folder) => {
-            let exe = folder.join(exe_name(&rom_path));
+            let names: Vec<&str> = patches.iter().map(Patch::name).collect();
+            let exe = folder.join(exe_name(&rom_path, &names));
             fs::create_dir_all(&folder)
                 .with_context(|| format!("creating {}", folder.display()))?;
             fs::copy(&program, &exe).with_context(|| format!("writing {}", exe.display()))?;
@@ -92,20 +105,64 @@ fn main() -> Result<ExitCode> {
     }
 }
 
-/// Takes `--discovery <stage>` from the front of `options`; the default stage without it.
-fn take_discovery(options: &mut Vec<OsString>) -> Result<Discovery> {
-    if options.first().is_none_or(|option| option != "--discovery") {
-        return Ok(Discovery::default());
+/// How the game program is built, from the options in front of the rest.
+#[derive(Debug, PartialEq)]
+struct BuildOptions {
+    discovery: Discovery,
+    /// The patches to apply to the ROM first, in order.
+    patches: Vec<PathBuf>,
+}
+
+/// Takes `--discovery <stage>` (once at most, the default stage without it) and `--patch
+/// <file>` (any number of times) from the front of `options`, in any order.
+fn take_build_options(options: &mut Vec<OsString>) -> Result<BuildOptions> {
+    let mut discovery = None;
+    let mut patches = Vec::new();
+    loop {
+        match (
+            options.first().and_then(|option| option.to_str()),
+            options.get(1),
+        ) {
+            (Some("--discovery"), Some(stage)) if discovery.is_none() => {
+                let Some(stage) = stage.to_str().and_then(Discovery::parse) else {
+                    bail!(USAGE);
+                };
+                discovery = Some(stage);
+            }
+            (Some("--patch"), Some(file)) => patches.push(PathBuf::from(file)),
+            (Some("--discovery" | "--patch"), _) => bail!(USAGE),
+            _ => break,
+        }
+        options.drain(..2);
     }
-    let Some(discovery) = options
-        .get(1)
-        .and_then(|name| name.to_str())
-        .and_then(Discovery::parse)
-    else {
-        bail!(USAGE);
-    };
-    options.drain(..2);
-    Ok(discovery)
+    Ok(BuildOptions {
+        discovery: discovery.unwrap_or_default(),
+        patches,
+    })
+}
+
+/// `rom` with `patches` applied, or `rom` itself without any.
+fn patched(rom: Rom, patches: &[Patch]) -> Result<Rom> {
+    if patches.is_empty() {
+        return Ok(rom);
+    }
+    let names: Vec<&str> = patches.iter().map(Patch::name).collect();
+    let patched = anygenesis_patch::apply(&rom, patches).with_context(|| {
+        format!(
+            "patching {} (SHA-1 {}) with {}",
+            rom.title(),
+            rom.sha1(),
+            names.join(", ")
+        )
+    })?;
+    println!(
+        "{} (SHA-1 {}) patched with {}: SHA-1 {}",
+        rom.title(),
+        rom.sha1(),
+        names.join(", "),
+        patched.sha1()
+    );
+    Ok(patched)
 }
 
 /// The program for `rom` in the cache, discovering code up to `discovery`, built first
@@ -162,14 +219,17 @@ fn player_library(tool: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The game program's file name: the ROM file's stem with anything but letters, digits and
-/// ` ._-()` replaced, so it is a plain file name on every system.
-fn exe_name(rom_path: &Path) -> String {
+/// The game program's file name: the ROM file's stem, each patch's name after it in
+/// brackets so a patched build never overwrites the unpatched one, with anything but
+/// letters, digits and ` ._-()` replaced, so it is a plain file name on every system.
+fn exe_name(rom_path: &Path, patches: &[&str]) -> String {
     let stem = rom_path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let name: String = stem
+    let name: String = patches
+        .iter()
+        .fold(stem, |name, patch| format!("{name} ({patch})"))
         .chars()
         .map(|character| {
             if character.is_alphanumeric() || " ._-()".contains(character) {
@@ -193,7 +253,7 @@ mod tests {
     #[test]
     fn test_exe_name_keeps_the_rom_stem_and_replaces_odd_characters() {
         let name = |path: &str| {
-            let name = exe_name(Path::new(path));
+            let name = exe_name(Path::new(path), &[]);
             name.strip_suffix(EXE_SUFFIX).unwrap_or(&name).to_owned()
         };
         assert_eq!(name("roms/s1built.bin"), "s1built");
@@ -207,22 +267,58 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_comes_off_the_front_of_the_options_only() {
-        let mut options: Vec<OsString> = ["--discovery", "static", "--out", "folder"]
-            .map(OsString::from)
-            .into();
+    fn test_exe_name_patched_build_names_its_patches() {
+        let name = exe_name(Path::new("roms/s1built.bin"), &["Fixes", "cheats: 1/2"]);
         assert_eq!(
-            take_discovery(&mut options).expect("a stage"),
-            Discovery::Static
+            name.strip_suffix(EXE_SUFFIX),
+            Some("s1built (Fixes) (cheats_ 1_2)")
         );
-        assert_eq!(options, ["--out", "folder"]);
-        let mut options: Vec<OsString> = vec!["600".into()];
+    }
+
+    fn options(arguments: &[&str]) -> Vec<OsString> {
+        arguments.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn test_build_options_come_off_the_front_of_the_options_only() {
+        let mut taken = options(&["--discovery", "static", "--out", "folder"]);
+        let build = take_build_options(&mut taken).expect("a stage");
+        assert_eq!(build.discovery, Discovery::Static);
+        assert_eq!(build.patches, Vec::<PathBuf>::new());
+        assert_eq!(taken, ["--out", "folder"]);
+        let mut taken = options(&["600", "--patch", "a.ips"]);
+        let build = take_build_options(&mut taken).expect("the default");
+        assert_eq!(build.discovery, Discovery::Profile);
+        assert_eq!(build.patches, Vec::<PathBuf>::new());
+        assert_eq!(taken, ["600", "--patch", "a.ips"]);
+        let mut taken = options(&["--discovery", "fast"]);
+        assert!(take_build_options(&mut taken).is_err());
+    }
+
+    #[test]
+    fn test_build_options_patches_kept_in_order_around_the_stage() {
+        let mut taken = options(&[
+            "--patch",
+            "a.toml",
+            "--discovery",
+            "vectors",
+            "--patch",
+            "b.bps",
+            "--out",
+            "x",
+        ]);
+        let build = take_build_options(&mut taken).expect("options");
+        assert_eq!(build.discovery, Discovery::Vectors);
         assert_eq!(
-            take_discovery(&mut options).expect("the default"),
-            Discovery::Profile
+            build.patches,
+            [PathBuf::from("a.toml"), PathBuf::from("b.bps")]
         );
-        assert_eq!(options, ["600"]);
-        let mut options: Vec<OsString> = ["--discovery", "fast"].map(OsString::from).into();
-        assert!(take_discovery(&mut options).is_err());
+        assert_eq!(taken, ["--out", "x"]);
+        for bad in [
+            &["--patch"][..],
+            &["--discovery", "static", "--discovery", "static"],
+        ] {
+            assert!(take_build_options(&mut options(bad)).is_err(), "{bad:?}");
+        }
     }
 }

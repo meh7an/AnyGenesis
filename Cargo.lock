@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "anygenesis-analysis",
  "anygenesis-framediff",
+ "anygenesis-patch",
  "anygenesis-recomp",
  "anygenesis-rom",
  "anygenesis-runtime",
@@ -122,6 +123,16 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "thiserror",
+]
+
+[[package]]
+name = "anygenesis-patch"
+version = "0.1.0"
+dependencies = [
+ "anygenesis-rom",
+ "serde",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
