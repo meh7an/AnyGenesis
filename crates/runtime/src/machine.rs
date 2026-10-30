@@ -581,7 +581,8 @@ impl Context {
     /// Starts a budget that lasts until the [`Context::horizon`] or the cycle cap, less the
     /// refresh it will cause; none while an interrupt is due, which the next check point
     /// then takes, or one instruction when that is the one to take it. Cycles the Z80 took
-    /// from the 68000 where the last budget ended come first.
+    /// from the 68000 where the last budget ended come first; when they use up the budget,
+    /// the next instruction still runs, as the interpreter runs it.
     fn refill(&mut self, state: &mut AgState) {
         self.cut = false;
         let one_more = std::mem::take(&mut self.one_more);
@@ -605,6 +606,14 @@ impl Context {
             self.waited = self.waited.saturating_add(stall.unsigned_abs());
         } else {
             self.charge_stall(state);
+            // A stall holds the 68000 inside its next bus cycle, so no instruction boundary
+            // lies within it: an interrupt that becomes pending there is taken after the
+            // next instruction. Without this a native check point would call the scheduler
+            // again at the same boundary, a VBlank one instruction early (M5.1, Sonic 2).
+            if !self.cut && state.cycles <= 0 {
+                self.budget += 1 - state.cycles;
+                state.cycles = 1;
+            }
         }
     }
 
