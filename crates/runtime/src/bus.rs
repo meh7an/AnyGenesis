@@ -358,6 +358,14 @@ impl SystemBus<'_> {
         }
     }
 
+    /// `ag_set_view`: hands the widescreen view to the hardware once its clock has caught up
+    /// with the call, as a VDP access would, so the frame it starts with does not depend on
+    /// when the hardware last synced.
+    pub fn set_view(&mut self, left: usize, right: usize) {
+        self.devices.sync(self.elapsed);
+        self.devices.hardware.set_view(left, right);
+    }
+
     /// The 68000 waits `cycles` more for the access: the scheduler charges them later.
     fn wait(&mut self, cycles: u32) {
         self.elapsed = self.elapsed.saturating_add(cycles);

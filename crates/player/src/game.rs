@@ -6,7 +6,7 @@ use anygenesis_abi::{
     AgEntry, AgExtra, AgFn, AgGame, AgInterrupt, EXTRA_FLAG, EXTRA_RAM_PATCH, GAME_ABI,
 };
 use anygenesis_rom::{Rom, Sha1Digest};
-use anygenesis_runtime::{RamPatch, RamWhen};
+use anygenesis_runtime::{RamPatch, RamWhen, vdp::render::MAX_MARGIN};
 use anyhow::{Context, Result, bail};
 
 /// A translated game linked into the program, with the ROM image it was translated from.
@@ -34,6 +34,9 @@ pub struct Game {
     pub ram_patches: &'static [RamPatch],
     /// Whether lines keep the hardware's sprite limits: off by the `sprite_limit` flag.
     pub sprite_limit: bool,
+    /// Pixels drawn left and right of the console's picture: the `widescreen` flag, 0
+    /// without it (M6.3).
+    pub widescreen: usize,
 }
 
 impl Game {
@@ -69,15 +72,17 @@ impl Game {
                 function_entries: elements(table.function_entries, table.function_entry_count),
                 ram_patches: &[],
                 sprite_limit: true,
+                widescreen: 0,
             }
         };
         // SAFETY: as above.
         let extras = unsafe { elements(table.extras, table.extra_count) };
-        let (ram_patches, sprite_limit) = read_extras(extras)?;
+        let read = read_extras(extras)?;
         // Read once per program and kept for its life, as the rest of the table is.
         let game = Self {
-            ram_patches: Box::leak(ram_patches.into_boxed_slice()),
-            sprite_limit,
+            ram_patches: Box::leak(read.ram_patches.into_boxed_slice()),
+            sprite_limit: read.sprite_limit,
+            widescreen: read.widescreen,
             ..game
         };
         if game.sha1.bytes() != &table.sha1 {
@@ -156,16 +161,21 @@ impl Game {
     }
 }
 
-/// The `count` elements from `start` on, none when `count` is 0 (`start` may then be null).
-///
-/// # Safety
-/// Unless `count` is 0, `start` points to `count` initialised elements that stay unchanged
-/// for the rest of the program.
-/// The RAM patches and the sprite limit `extras` give; kinds this player does not know are
-/// skipped.
-fn read_extras(extras: &'static [AgExtra]) -> Result<(Vec<RamPatch>, bool)> {
-    let mut patches = Vec::new();
-    let mut sprite_limit = true;
+/// What a program's extras give.
+#[derive(Debug)]
+struct Extras {
+    ram_patches: Vec<RamPatch>,
+    sprite_limit: bool,
+    widescreen: usize,
+}
+
+/// The RAM patches and flags `extras` give; kinds this player does not know are skipped.
+fn read_extras(extras: &'static [AgExtra]) -> Result<Extras> {
+    let mut read = Extras {
+        ram_patches: Vec::new(),
+        sprite_limit: true,
+        widescreen: 0,
+    };
     for extra in extras {
         // SAFETY: the build wrote each extra's name NUL-terminated and its data with its
         // size, in the program's read-only data.
@@ -177,7 +187,7 @@ fn read_extras(extras: &'static [AgExtra]) -> Result<(Vec<RamPatch>, bool)> {
         };
         match (extra.kind, name, data) {
             (EXTRA_RAM_PATCH, "reset" | "vblank", [high, middle, low, bytes @ ..]) => {
-                patches.push(RamPatch {
+                read.ram_patches.push(RamPatch {
                     address: u32::from_be_bytes([0, *high, *middle, *low]),
                     bytes: bytes.to_vec(),
                     when: if name == "reset" {
@@ -187,7 +197,12 @@ fn read_extras(extras: &'static [AgExtra]) -> Result<(Vec<RamPatch>, bool)> {
                     },
                 });
             }
-            (EXTRA_FLAG, "sprite_limit", [value @ (0 | 1)]) => sprite_limit = *value == 1,
+            (EXTRA_FLAG, "sprite_limit", [value @ (0 | 1)]) => read.sprite_limit = *value == 1,
+            (EXTRA_FLAG, "widescreen", [pixels])
+                if usize::from(*pixels) <= MAX_MARGIN && pixels.is_multiple_of(2) =>
+            {
+                read.widescreen = usize::from(*pixels);
+            }
             (EXTRA_RAM_PATCH | EXTRA_FLAG, _, _) => {
                 bail!(
                     "the game carries a malformed extra of kind {} named {name:?}: rebuild it                      with this player",
@@ -197,9 +212,14 @@ fn read_extras(extras: &'static [AgExtra]) -> Result<(Vec<RamPatch>, bool)> {
             _ => {}
         }
     }
-    Ok((patches, sprite_limit))
+    Ok(read)
 }
 
+/// The `count` elements from `start` on, none when `count` is 0 (`start` may then be null).
+///
+/// # Safety
+/// Unless `count` is 0, `start` points to `count` initialised elements that stay unchanged
+/// for the rest of the program.
 unsafe fn elements<T>(start: *const T, count: u32) -> &'static [T] {
     if count == 0 {
         return &[];

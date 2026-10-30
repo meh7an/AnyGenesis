@@ -283,7 +283,7 @@ pub const GAME_ABI: u32 = 1;
 pub const EXTRA_RAM_PATCH: u32 = 1;
 
 /// [`AgExtra::kind`] of a runtime enhancement flag (M6.2): `name` is the flag's, `data` one
-/// byte, 0 or 1.
+/// byte, 0 or 1 for a switch, the pixels for `widescreen` (M6.3).
 pub const EXTRA_FLAG: u32 = 2;
 
 c_struct! {
@@ -446,6 +446,9 @@ c_externs! {
     fn ag_deliver(state: *mut AgState, pc: u32) -> u32;
     /// RESET: asserts the reset line of the external devices.
     fn ag_reset_devices(state: *mut AgState);
+    /// From a code patch (M6.3): shows `left` and `right` pixels of the widescreen margins
+    /// from the next frame on, the rest black.
+    fn ag_set_view(state: *mut AgState, left: u32, right: u32);
 }
 
 #[cfg(test)]

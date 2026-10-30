@@ -60,21 +60,86 @@ pub struct RamPatch {
     pub when: When,
 }
 
+/// The widest `widescreen` margin, the runtime's limit: wider, sprites left of the picture
+/// would wrap round into the right margin.
+pub const MAX_WIDESCREEN: u8 = 62;
+
 /// The runtime enhancement flags; `None` leaves the hardware behaviour.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Flags {
     /// `false` draws every sprite on a line; the overflow status bit keeps the hardware rule.
     pub sprite_limit: Option<bool>,
+    /// Pixels drawn left and right of the console's picture (M6.3), even, at most
+    /// [`MAX_WIDESCREEN`].
+    pub widescreen: Option<u8>,
+}
+
+/// A flag's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagValue {
+    Switch(bool),
+    Pixels(u8),
+}
+
+impl FlagValue {
+    /// The one byte the program embeds.
+    pub fn byte(self) -> u8 {
+        match self {
+            Self::Switch(on) => u8::from(on),
+            Self::Pixels(pixels) => pixels,
+        }
+    }
+}
+
+impl fmt::Display for FlagValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Switch(on) => write!(f, "{on}"),
+            Self::Pixels(pixels) => write!(f, "{pixels}"),
+        }
+    }
 }
 
 impl Flags {
     /// Each flag that is set, by name.
-    pub fn set(&self) -> Vec<(&'static str, bool)> {
-        self.sprite_limit
-            .map(|value| ("sprite_limit", value))
-            .into_iter()
-            .collect()
+    pub fn set(&self) -> Vec<(&'static str, FlagValue)> {
+        let sprite_limit = self
+            .sprite_limit
+            .map(|on| ("sprite_limit", FlagValue::Switch(on)));
+        let widescreen = self
+            .widescreen
+            .map(|pixels| ("widescreen", FlagValue::Pixels(pixels)));
+        sprite_limit.into_iter().chain(widescreen).collect()
+    }
+
+    /// Fails unless every flag set has a value the runtime takes.
+    pub(crate) fn check(&self) -> Result<(), String> {
+        match self.widescreen {
+            Some(pixels) if pixels > MAX_WIDESCREEN || !pixels.is_multiple_of(2) => Err(format!(
+                "`widescreen = {pixels}` is not an even number of pixels from 0 to \
+                 {MAX_WIDESCREEN}"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Adds `other`'s flags to these.
+    fn add(&mut self, other: Self) -> Result<(), PatchError> {
+        let clash = |name: &str| PatchError::Clash {
+            what: format!("two packs set `{name}`"),
+        };
+        if let Some(value) = other.sprite_limit
+            && self.sprite_limit.replace(value).is_some()
+        {
+            return Err(clash("sprite_limit"));
+        }
+        if let Some(value) = other.widescreen
+            && self.widescreen.replace(value).is_some()
+        {
+            return Err(clash("widescreen"));
+        }
+        Ok(())
     }
 }
 
@@ -130,15 +195,7 @@ impl CodePatches {
         }
         self.patches = patches.into_values().collect();
         self.ram.extend(other.ram.iter().cloned());
-        if let Some(value) = other.flags.sprite_limit {
-            if self.flags.sprite_limit.is_some() {
-                return Err(PatchError::Clash {
-                    what: "two packs set `sprite_limit`".to_owned(),
-                });
-            }
-            self.flags.sprite_limit = Some(value);
-        }
-        Ok(())
+        self.flags.add(other.flags)
     }
 
     /// The SHA-1 of everything here, in a fixed text form: what a build with these patches

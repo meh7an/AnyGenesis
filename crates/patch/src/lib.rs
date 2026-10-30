@@ -20,7 +20,9 @@ use std::{
 
 use anygenesis_rom::{MAX_ROM_SIZE, Rom, RomError, Sha1Digest};
 
-pub use code::{CodePatch, CodePatches, Flags, RAM_START, RamPatch, Source, When};
+pub use code::{
+    CodePatch, CodePatches, FlagValue, Flags, MAX_WIDESCREEN, RAM_START, RamPatch, Source, When,
+};
 pub use genie::GenieCode;
 pub use pack::Pack;
 

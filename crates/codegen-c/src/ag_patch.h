@@ -5,7 +5,10 @@
    that instruction, any other address leaves there, with the cycles its pack entry gives
    charged. It may read and write the registers (`s->d`, `s->a`, A7 the active stack pointer),
    the flags (`s->x`, `s->n`, `s->z`, `s->v`, `s->c`, each 0 or 1) and work RAM through
-   `ag_ram_read8/16/32` and `ag_ram_write8/16/32`; it reaches no device. */
+   `ag_ram_read8/16/32` and `ag_ram_write8/16/32`; it reaches no device. With the
+   `widescreen` flag, `ag_set_view(s, left, right)` sets how many pixels of the left and right
+   margins show from the next frame on, the rest black; a game that has drawn nothing there
+   (a menu, a level's edge) can hide them so. */
 #ifndef AG_PATCH_H
 #define AG_PATCH_H
 

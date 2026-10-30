@@ -129,7 +129,7 @@ fn extras(code: &CodePatches) -> Vec<Extra> {
         .into_iter()
         .map(|(name, value)| Extra::Flag {
             name: name.to_owned(),
-            value,
+            value: value.byte(),
         });
     ram.chain(flags).collect()
 }

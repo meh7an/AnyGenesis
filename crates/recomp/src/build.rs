@@ -46,8 +46,8 @@ pub enum Extra {
         address: u32,
         bytes: Vec<u8>,
     },
-    /// A runtime enhancement flag.
-    Flag { name: String, value: bool },
+    /// A runtime enhancement flag and its one-byte value.
+    Flag { name: String, value: u8 },
 }
 
 impl Extra {
@@ -64,7 +64,7 @@ impl Extra {
                 let name = if *vblank { "vblank" } else { "reset" };
                 ("AG_EXTRA_RAM_PATCH", name, data)
             }
-            Self::Flag { name, value } => ("AG_EXTRA_FLAG", name, vec![u8::from(*value)]),
+            Self::Flag { name, value } => ("AG_EXTRA_FLAG", name, vec![*value]),
         }
     }
 }

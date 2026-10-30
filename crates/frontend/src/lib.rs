@@ -43,7 +43,7 @@ use anygenesis_runtime::{
     timing::{FRAME_CLOCKS, MASTER_CLOCK_HZ},
     vdp::{
         Frame,
-        render::{HEIGHT, MAX_WIDTH},
+        render::{HEIGHT, ROW_WIDTH},
     },
 };
 use sdl3::{
@@ -82,6 +82,9 @@ const PIXEL_BYTES: usize = 4;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub title: String,
+    /// Picture pixels a row the window is sized for at first: 320, or wider with the
+    /// widescreen margins.
+    pub width: usize,
     /// Window pixels per picture pixel at first; the window can be resized.
     pub scale: u32,
     pub controls: Controls,
@@ -231,7 +234,7 @@ pub fn run<S, R: Send + 'static>(
     let window = video
         .window(
             &config.title,
-            MAX_WIDTH as u32 * config.scale,
+            config.width as u32 * config.scale,
             HEIGHT as u32 * config.scale,
         )
         .position_centered()
@@ -241,7 +244,7 @@ pub fn run<S, R: Send + 'static>(
     let mut canvas = window.into_canvas();
     let creator = canvas.texture_creator();
     let mut texture = creator
-        .create_texture_streaming(PixelFormat::XRGB8888, MAX_WIDTH as u32, HEIGHT as u32)
+        .create_texture_streaming(PixelFormat::XRGB8888, ROW_WIDTH as u32, HEIGHT as u32)
         .map_err(sdl)?;
     texture.set_scale_mode(ScaleMode::Nearest);
     let mut fullscreen = controls.fullscreen;
@@ -449,9 +452,9 @@ fn first_gamepad(gamepads: &GamepadSubsystem) -> Option<Gamepad> {
 fn upload(texture: &mut Texture<'_>, picture: &Frame) -> Result<(), Error> {
     texture
         .with_lock(None, |buffer, pitch| {
-            let (rows, _) = picture.pixels().as_chunks::<MAX_WIDTH>();
+            let (rows, _) = picture.pixels().as_chunks::<ROW_WIDTH>();
             for (target, row) in buffer.chunks_mut(pitch).zip(rows) {
-                let (pixels, _) = target[..MAX_WIDTH * PIXEL_BYTES].as_chunks_mut::<PIXEL_BYTES>();
+                let (pixels, _) = target[..ROW_WIDTH * PIXEL_BYTES].as_chunks_mut::<PIXEL_BYTES>();
                 for (bytes, pixel) in pixels.iter_mut().zip(row) {
                     *bytes = pixel.to_ne_bytes();
                 }

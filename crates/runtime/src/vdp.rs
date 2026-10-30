@@ -244,6 +244,20 @@ impl Vdp {
         self.screen.unlimited_sprites = !on;
     }
 
+    /// Draws `margin` widescreen pixels (at most [`render::MAX_MARGIN`]) left and right of
+    /// the console's picture, all shown until [`Vdp::set_view`] says otherwise (M6.3).
+    pub fn set_widescreen(&mut self, margin: usize) {
+        let margin = margin.min(render::MAX_MARGIN);
+        self.screen.margin = margin;
+        self.screen.view = [margin; 2];
+    }
+
+    /// Shows `left` and `right` pixels of the widescreen margins from the next frame on, the
+    /// rest black; values past the margin show all of it.
+    pub fn set_view(&mut self, left: usize, right: usize) {
+        self.screen.view = [left, right];
+    }
+
     /// Draws the line whose pixels start now, if it is a picture line.
     fn draw_line(&mut self) {
         let line = self.timing.line();
@@ -520,6 +534,10 @@ impl Hardware for Vdp {
     /// reach the VDP's registers or memories (chosen, unverified).
     fn reset(&mut self) {
         self.pending = false;
+    }
+
+    fn set_view(&mut self, left: usize, right: usize) {
+        Vdp::set_view(self, left, right);
     }
 }
 

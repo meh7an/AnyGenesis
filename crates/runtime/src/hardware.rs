@@ -101,6 +101,12 @@ pub trait Hardware: Any + Debug {
         let _ = clock;
         false
     }
+
+    /// A code patch's `ag_set_view` (M6.3): how many pixels of the widescreen margins show
+    /// from the next frame on. Hardware without margins ignores it.
+    fn set_view(&mut self, left: usize, right: usize) {
+        let _ = (left, right);
+    }
 }
 
 #[cfg(test)]

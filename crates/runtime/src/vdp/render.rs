@@ -25,6 +25,15 @@
 //! Two-cell vertical scrolling gives the part-shown column left of the first whole one
 //! VSRAM words 38 AND 39 in H40 and 0 in H32, for both planes.
 //!
+//! Widescreen (M6.3, the `widescreen` flag): a margin of extra pixels is drawn left and right
+//! of the console's picture, from the planes and sprites as they lie past its edges. No
+//! hardware draws there, so these rules are ours: the window stays inside the console's
+//! picture (plane A shows beside it), the left-column blank moves to the wide picture's left
+//! edge, two-cell vertical scrolling continues the part-shown column into the left margin
+//! and the last column into the right one, every sprite is drawn, and the status flags count
+//! as the hardware's picture alone would. A per-frame view hides any part of the margins in
+//! black.
+//!
 //! Sources (behaviour only, no emulator code read): Plutiedev (registers, tile and sprite
 //! formats, layer priority, sprite limits, shadow/highlight rules), Kabuto's hardware notes
 //! on Plutiedev (sprite scan, x = 0 masking), rasterscroll.com's VDP pages (scroll ranges
@@ -44,10 +53,15 @@
 
 use super::{CRAM_WORDS, REGISTERS, VRAM_SIZE, VSRAM_WORDS};
 
-/// Pixels in an H40 line, the widest a frame gets.
+/// Pixels in an H40 line, the widest the console draws.
 pub const MAX_WIDTH: usize = 320;
 /// Pixels in an H32 line.
 pub const H32_WIDTH: usize = 256;
+/// The widest widescreen margin on each side: wider, a sprite left of the picture whose X
+/// wraps round its 9 bits would land in the right margin.
+pub const MAX_MARGIN: usize = 62;
+/// Pixels a frame's row holds: an H40 line with the widest margins.
+pub const ROW_WIDTH: usize = MAX_WIDTH + 2 * MAX_MARGIN;
 /// Picture lines in NTSC's V28 mode.
 pub const HEIGHT: usize = 224;
 
@@ -69,25 +83,27 @@ const PATTERN_BYTES: usize = 32;
 /// The bytes a BMP's file and info headers take.
 const BMP_HEADER: usize = 54;
 
-/// A finished picture: [`HEIGHT`] rows of [`MAX_WIDTH`] pixels as 0x00RRGGBB, of which the
-/// left [`width`](Self::width) are drawn (256 in H32, 320 in H40) and the rest stay black.
+/// A finished picture: [`HEIGHT`] rows of [`ROW_WIDTH`] pixels as 0x00RRGGBB, of which the
+/// left [`width`](Self::width) are drawn (256 in H32, 320 in H40, plus both widescreen
+/// margins) and the rest stay black.
 #[derive(Debug, Clone)]
 pub struct Frame {
     width: usize,
-    pixels: Box<[u32; MAX_WIDTH * HEIGHT]>,
+    pixels: Box<[u32; ROW_WIDTH * HEIGHT]>,
 }
 
 impl Default for Frame {
     fn default() -> Self {
         Self {
             width: H32_WIDTH,
-            pixels: Box::new([0; MAX_WIDTH * HEIGHT]),
+            pixels: Box::new([0; ROW_WIDTH * HEIGHT]),
         }
     }
 }
 
 impl Frame {
-    /// Drawn pixels per row: the horizontal mode at the frame's first line.
+    /// Drawn pixels per row: the horizontal mode at the frame's first line, with the
+    /// widescreen margins.
     pub fn width(&self) -> usize {
         self.width
     }
@@ -97,8 +113,8 @@ impl Frame {
         HEIGHT
     }
 
-    /// Every pixel, row after row, each row [`MAX_WIDTH`] long whatever the width.
-    pub fn pixels(&self) -> &[u32; MAX_WIDTH * HEIGHT] {
+    /// Every pixel, row after row, each row [`ROW_WIDTH`] long whatever the width.
+    pub fn pixels(&self) -> &[u32; ROW_WIDTH * HEIGHT] {
         &self.pixels
     }
 
@@ -108,12 +124,13 @@ impl Frame {
     ///
     /// If `y` is [`HEIGHT`] or more.
     pub fn row(&self, y: usize) -> &[u32] {
-        &self.pixels[y * MAX_WIDTH..][..self.width]
+        &self.pixels[y * ROW_WIDTH..][..self.width]
     }
 
     /// The drawn pixels as a 24-bit BMP file.
     pub fn to_bmp(&self) -> Vec<u8> {
-        // Both widths make rows of a multiple of 4 bytes, so no row needs padding.
+        // Both modes' widths and the even margins make rows of a multiple of 4 bytes, so no
+        // row needs padding.
         let image = self.width * 3 * HEIGHT;
         let mut bmp = Vec::with_capacity(BMP_HEADER + image);
         let file_size = (BMP_HEADER + image) as u32;
@@ -142,7 +159,7 @@ impl Frame {
 
     fn row_mut(&mut self, y: usize) -> &mut [u32] {
         // Whole rows, so a line narrower than the frame can clear its tail.
-        &mut self.pixels[y * MAX_WIDTH..][..MAX_WIDTH]
+        &mut self.pixels[y * ROW_WIDTH..][..ROW_WIDTH]
     }
 }
 
@@ -209,6 +226,14 @@ pub(super) struct Screen {
     /// Draws the sprites past a line's sprite and pixel limits too, an enhancement flag
     /// (M6.2); the status flags and the masking stay as the hardware has them.
     pub unlimited_sprites: bool,
+    /// Widescreen pixels drawn left and right of the console's picture (M6.3), at most
+    /// [`MAX_MARGIN`]; 0 draws the console's picture alone.
+    pub margin: usize,
+    /// How many pixels of the left and right margins show from the next frame on; the rest
+    /// is black.
+    pub view: [usize; 2],
+    /// The view of the frame being drawn, taken at its first line.
+    frame_view: [usize; 2],
 }
 
 impl Screen {
@@ -220,12 +245,17 @@ impl Screen {
     /// Draws picture line `line` (below [`HEIGHT`]), returning what its sprites did; the
     /// last line finishes the frame.
     pub fn draw_line(&mut self, source: Source<'_>, line: usize) -> SpriteFlags {
-        let layout = Layout::of(source.registers);
+        let layout = Layout::of(source.registers, self.margin);
         if line == 0 {
-            self.drawing.width = layout.width;
+            self.drawing.width = layout.picture;
+            self.frame_view = self.view.map(|shown| shown.min(self.margin));
         }
         // A line drawn narrower than the frame (the mode changed after line 0) ends in black.
-        let width = self.drawing.width.min(layout.width);
+        let width = self.drawing.width.min(layout.picture);
+        // The view hides the margins' outer parts in black, past where they end.
+        let [left, right] = self.frame_view;
+        let shown = self.margin.saturating_sub(left)
+            ..self.drawing.width - self.margin.saturating_sub(right);
         let row = &mut self.drawing.row_mut(line)[..];
         row[width..].fill(0);
         let row = &mut row[..width];
@@ -235,20 +265,20 @@ impl Screen {
             row.fill(backdrop);
             self.pixels_ran_out = false;
         } else {
-            let mut planes = [[0; MAX_WIDTH]; 2];
+            let mut planes = [[0; ROW_WIDTH]; 2];
             let [plane_b, plane_a] = &mut planes;
             draw_plane(source, &layout, Plane::B, line, 0..width, plane_b);
             let window = layout.window_columns(line);
             draw_plane(source, &layout, Plane::A, line, 0..window.start, plane_a);
             draw_window(source, &layout, line, window.clone(), plane_a);
             draw_plane(source, &layout, Plane::A, line, window.end..width, plane_a);
-            let mut sprites = [0; MAX_WIDTH];
+            let mut sprites = [0; ROW_WIDTH];
             let drawn = draw_sprites(
                 source,
                 &layout,
                 line,
                 self.pixels_ran_out,
-                self.unlimited_sprites,
+                self.unlimited_sprites || self.margin > 0,
                 &mut sprites,
             );
             self.pixels_ran_out = drawn.pixels_ran_out;
@@ -261,6 +291,10 @@ impl Screen {
                     colour(source.cram[usize::from(index)], shade)
                 };
             }
+        }
+        row[..shown.start.min(width)].fill(0);
+        if let Some(hidden) = row.get_mut(shown.end..) {
+            hidden.fill(0);
         }
         if line == HEIGHT - 1 {
             std::mem::swap(&mut self.shown, &mut self.drawing);
@@ -348,7 +382,11 @@ enum HScroll {
 /// The registers as the renderer reads them.
 #[derive(Debug, Clone, Copy)]
 struct Layout {
+    /// The console's picture width.
     width: usize,
+    /// The widescreen margin on each side, and the whole drawn width with both.
+    margin: usize,
+    picture: usize,
     h40: bool,
     display: bool,
     left_blank: bool,
@@ -375,11 +413,14 @@ struct Layout {
 }
 
 impl Layout {
-    fn of(registers: &[u8; REGISTERS]) -> Self {
+    fn of(registers: &[u8; REGISTERS], margin: usize) -> Self {
         let h40 = registers[12] & 0x01 != 0;
         let [plane_width, plane_height] = [registers[16], registers[16] >> 4].map(plane_cells);
+        let width = if h40 { MAX_WIDTH } else { H32_WIDTH };
         Self {
-            width: if h40 { MAX_WIDTH } else { H32_WIDTH },
+            width,
+            margin,
+            picture: width + 2 * margin,
             h40,
             display: registers[1] & 0x40 != 0,
             left_blank: registers[0] & 0x20 != 0,
@@ -407,7 +448,8 @@ impl Layout {
         }
     }
 
-    /// The columns of `line` the window covers instead of plane A.
+    /// The drawn columns of `line` the window covers instead of plane A, all inside the
+    /// console's picture.
     fn window_columns(&self, line: usize) -> std::ops::Range<usize> {
         let edge = self.window_row * 8;
         let rows = if self.window_down {
@@ -415,15 +457,17 @@ impl Layout {
         } else {
             line < edge
         };
-        if rows {
-            return 0..self.width;
-        }
-        let edge = (self.window_column * 16).min(self.width);
-        if self.window_right {
-            edge..self.width
+        let columns = if rows {
+            0..self.width
         } else {
-            0..edge
-        }
+            let edge = (self.window_column * 16).min(self.width);
+            if self.window_right {
+                edge..self.width
+            } else {
+                0..edge
+            }
+        };
+        columns.start + self.margin..columns.end + self.margin
     }
 }
 
@@ -477,7 +521,7 @@ fn draw_plane(
     plane: Plane,
     line: usize,
     columns: std::ops::Range<usize>,
-    out: &mut [u8; MAX_WIDTH],
+    out: &mut [u8; ROW_WIDTH],
 ) {
     let (base, slot) = match plane {
         Plane::A => (layout.plane_a, 0),
@@ -494,7 +538,8 @@ fn draw_plane(
     let width = layout.plane_width * 8;
     let height = layout.plane_height * 8;
     // Positive values move the plane right; the first column of tiles may show only in
-    // part, and two-cell vertical scrolling follows the scrolled columns.
+    // part, and two-cell vertical scrolling follows the scrolled columns. The left margin
+    // continues the part-shown column and the right margin the last whole one.
     let fine = hscroll & 15;
     let part_column = if layout.h40 {
         let [first, second] = PART_COLUMN_WORDS;
@@ -502,13 +547,15 @@ fn draw_plane(
     } else {
         0
     };
+    let last_column = layout.width / 16 - 1;
     for x in columns {
-        let vscroll = match x.checked_sub(fine) {
+        let vscroll = match x.checked_sub(layout.margin + fine) {
             _ if !layout.vscroll_columns => source.vsram[slot],
-            Some(scrolled) => source.vsram[scrolled / 16 * 2 + slot],
+            Some(scrolled) => source.vsram[(scrolled / 16).min(last_column) * 2 + slot],
             None => part_column,
         };
-        let plane_x = x.wrapping_sub(hscroll) & (width - 1);
+        // x - margin is the console's X, below 0 in the left margin.
+        let plane_x = x.wrapping_sub(layout.margin + hscroll) & (width - 1);
         let plane_y = (line + usize::from(vscroll)) & (height - 1);
         let cell = (plane_y / 8) * layout.plane_width + plane_x / 8;
         let entry = word(source.vram, base + cell * 2);
@@ -516,35 +563,39 @@ fn draw_plane(
     }
 }
 
-/// Draws `columns` of the window on `line` into `out`; the window never scrolls.
+/// Draws `columns` of the window on `line` into `out`, all inside the console's picture;
+/// the window never scrolls.
 fn draw_window(
     source: Source<'_>,
     layout: &Layout,
     line: usize,
     columns: std::ops::Range<usize>,
-    out: &mut [u8; MAX_WIDTH],
+    out: &mut [u8; ROW_WIDTH],
 ) {
     let cells = if layout.h40 { 64 } else { 32 };
     for x in columns {
+        let console = x - layout.margin;
         let entry = word(
             source.vram,
-            layout.window + ((line / 8) * cells + x / 8) * 2,
+            layout.window + ((line / 8) * cells + console / 8) * 2,
         );
-        out[x] = cell_pixel(source.vram, entry, line % 8, x % 8);
+        out[x] = cell_pixel(source.vram, entry, line % 8, console % 8);
     }
 }
 
 /// Draws the sprites on `line` into `out`, walking the link list from sprite 0. With
 /// `unlimited`, the sprites and pixels past the line's limits are drawn as well, but they
-/// neither collide nor count, so the result is the hardware's.
+/// neither collide nor count, so the result is the hardware's; so are pixels in the
+/// widescreen margins.
 fn draw_sprites(
     source: Source<'_>,
     layout: &Layout,
     line: usize,
     pixels_ran_out: bool,
     unlimited: bool,
-    out: &mut [u8; MAX_WIDTH],
+    out: &mut [u8; ROW_WIDTH],
 ) -> SpriteLine {
+    let console = layout.margin..layout.margin + layout.width;
     let (total, per_line) = if layout.h40 { (80, 20) } else { (64, 16) };
     let pixel_limit = layout.width;
     let target = line + SPRITE_OFFSET;
@@ -602,9 +653,9 @@ fn draw_sprites(
                 let column = if hflip { columns - 1 - step } else { step };
                 let first = usize::from(pattern & 0x07FF) + column * rows + row / 8;
                 for offset in 0..8 {
-                    let Some(x) = (left + step * 8 + offset)
+                    let Some(x) = (left + step * 8 + offset + layout.margin)
                         .checked_sub(SPRITE_OFFSET)
-                        .filter(|&x| x < layout.width)
+                        .filter(|&x| x < layout.picture)
                     else {
                         continue;
                     };
@@ -615,7 +666,7 @@ fn draw_sprites(
                     }
                     // Sprites earlier in the list stay in front.
                     if opaque(out[x]) {
-                        flags.collision |= !extra;
+                        flags.collision |= !extra && console.contains(&x);
                     } else {
                         out[x] = colour | attributes(pattern);
                     }

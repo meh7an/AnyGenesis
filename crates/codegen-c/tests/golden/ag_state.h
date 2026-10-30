@@ -225,4 +225,8 @@ uint32_t ag_deliver(AgState *state, uint32_t pc);
 /* RESET: asserts the reset line of the external devices. */
 void ag_reset_devices(AgState *state);
 
+/* From a code patch (M6.3): shows `left` and `right` pixels of the widescreen margins
+ * from the next frame on, the rest black. */
+void ag_set_view(AgState *state, uint32_t left, uint32_t right);
+
 #endif

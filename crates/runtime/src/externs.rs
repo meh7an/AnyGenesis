@@ -31,6 +31,7 @@ const _: signatures::ag_step_late = ag_step_late;
 const _: signatures::ag_step_lookup = ag_step_lookup;
 const _: signatures::ag_deliver = ag_deliver;
 const _: signatures::ag_reset_devices = ag_reset_devices;
+const _: signatures::ag_set_view = ag_set_view;
 
 /// Gives `body` the state and context of an extern call.
 ///
@@ -238,4 +239,16 @@ pub unsafe extern "C" fn ag_deliver(state: *mut AgState, pc: u32) -> u32 {
 pub unsafe extern "C" fn ag_reset_devices(state: *mut AgState) {
     // SAFETY: forwarded from the caller.
     unsafe { with_context(state, |_, context| context.devices.reset()) }
+}
+
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_set_view(state: *mut AgState, left: u32, right: u32) {
+    // SAFETY: forwarded from the caller; the runtime attached the ROM the state points at.
+    unsafe {
+        with_context(state, |state, context| {
+            context.bus(state).set_view(left as usize, right as usize);
+        });
+    }
 }

@@ -934,3 +934,119 @@ fn test_frames_save_as_bottom_up_24_bit_bmp() {
     assert_eq!(bmp[54..57], [blue, green, red]);
     assert_eq!(bmp[54 + 8 * 3..57 + 8 * 3], [0, 0, 0]);
 }
+
+/// A scene drawn with `margin` widescreen pixels on each side.
+fn wide_scene(h40: bool, margin: usize) -> Scene {
+    let mut scene = Scene::new(h40);
+    scene.vdp.set_widescreen(margin);
+    scene
+}
+
+#[test]
+fn test_widescreen_planes_continue_past_both_edges_in_both_modes() {
+    // A 32-cell plane is 256 pixels wide: the left margin shows its last columns and the
+    // right margin wraps on into its first ones.
+    let mut scene = wide_scene(true, 16);
+    scene.cell(PLANE_B, 31, 0, name(SOLID, PAL_B));
+    scene.cell(PLANE_B, 8, 0, name(SOLID, PAL_B));
+    scene.cell(PLANE_A, 0, 0, name(SOLID, PAL_A));
+    let frame = scene.frame();
+    assert_eq!(frame.width(), MAX_WIDTH + 32);
+    assert_rows(frame, "left", 0, 0, &rows(&cells(".ba."), 8));
+    assert_rows(frame, "right", 336, 0, &rows(&cells("b."), 8));
+    assert_eq!(frame.to_bmp().len(), 54 + (MAX_WIDTH + 32) * HEIGHT * 3);
+
+    // Scrolled right by 4, the plane's last column moves on by 4 pixels in the margin.
+    scene.hscroll(0, 0, 4);
+    // The frame in progress may hold lines from before the change.
+    scene.frame();
+    let frame = scene.frame();
+    let expected = format!("{}{}", ".".repeat(12), "b".repeat(4));
+    assert_rows(frame, "scrolled", 0, 0, &rows(&expected, 8));
+
+    let mut scene = wide_scene(false, 16);
+    scene.cell(PLANE_B, 31, 0, name(SOLID, PAL_B));
+    let frame = scene.frame();
+    assert_eq!(frame.width(), H32_WIDTH + 32);
+    assert_rows(frame, "H32 left", 0, 0, &rows(&cells(".b"), 8));
+}
+
+#[test]
+fn test_widescreen_sprites_show_where_the_hardware_hides_them_without_status() {
+    let mut scene = wide_scene(true, 16);
+    // Two overlapping sprites in the left margin and one past the right edge.
+    scene.sprite_at(0, 128 - 8, 0, (1, 1), 1, name(SOLID, PAL_S));
+    scene.sprite_at(1, 128 - 8, 0, (1, 1), 2, name(QUAD + 1, PAL_S));
+    let past_right = 128 + MAX_WIDTH as u16 + 8;
+    scene.sprite_at(2, past_right, 0, (1, 1), 0, name(QUAD + 1, PAL_S));
+    let frame = scene.frame();
+    assert_rows(frame, "left", 0, 0, &rows(&cells(".s."), 8));
+    assert_rows(frame, "right", 336, 0, &rows(&cells(".S"), 8));
+    assert_eq!(scene.sprite_status(), 0);
+}
+
+#[test]
+fn test_widescreen_view_hides_the_margins_in_black_from_the_next_frame() {
+    let mut scene = wide_scene(true, 16);
+    scene.register(7, 0x11);
+    let backdrop = rgb(cram_word(0x11));
+    let frame = scene.frame();
+    assert!(frame.row(0).iter().all(|&pixel| pixel == backdrop));
+
+    scene.vdp.set_view(4, 0);
+    scene.frame();
+    let frame = scene.frame();
+    let left = format!("{}{}", ".".repeat(12), "b".repeat(4));
+    assert_rows(frame, "left", 0, 0, &rows(&left, HEIGHT));
+    assert_rows(frame, "middle", 16, 0, &rows(&"b".repeat(MAX_WIDTH), 1));
+    assert_rows(frame, "right", 336, 0, &rows(&".".repeat(16), HEIGHT));
+
+    // A view past the margin shows all of it; 0 and 0 pillarbox the picture.
+    scene.vdp.set_view(99, 99);
+    scene.frame();
+    assert_rows(scene.frame(), "all", 0, 0, &rows(&"b".repeat(352), 1));
+    scene.vdp.set_view(0, 0);
+    scene.frame();
+    let frame = scene.frame();
+    let edge = ".".repeat(16);
+    let pillarbox = format!("{edge}{}{edge}", "b".repeat(MAX_WIDTH));
+    assert_rows(frame, "pillarbox", 0, 0, &rows(&pillarbox, 1));
+}
+
+#[test]
+fn test_widescreen_window_stays_inside_the_picture_and_the_blank_moves_left() {
+    // The window covers lines 0-7 from edge to edge of the console's picture; the margins
+    // beside it show plane A.
+    let mut scene = wide_scene(true, 8);
+    scene.register(18, 0x01);
+    scene.cell_in(WINDOW, 64, 0, 0, name(SOLID3, PAL_A));
+    scene.cell_in(WINDOW, 64, 39, 0, name(SOLID3, PAL_A));
+    scene.cell(PLANE_A, 31, 0, name(SOLID, PAL_A));
+    scene.cell(PLANE_A, 8, 0, name(SOLID, PAL_A));
+    let frame = scene.frame();
+    assert_rows(frame, "left", 0, 0, &rows(&cells("aw"), 8));
+    assert_rows(frame, "right", 320, 0, &rows(&cells("wa"), 8));
+
+    // The left-column blank covers the wide picture's first eight pixels, not the console's.
+    let mut scene = wide_scene(true, 8);
+    scene.register(0, 0x24);
+    scene.register(7, 0x12);
+    scene.cell(PLANE_B, 31, 0, name(SOLID, PAL_B));
+    scene.cell(PLANE_B, 0, 0, name(SOLID, PAL_B));
+    assert_rows(scene.frame(), "blank", 0, 0, &rows(&cells("Bb"), 8));
+}
+
+#[test]
+fn test_widescreen_two_cell_vscroll_continues_the_edge_columns_into_the_margins() {
+    // Lines 0-7 of plane B show its row 1 where a column scrolls by 8.
+    let mut scene = wide_scene(true, 16);
+    scene.register(11, 0x04);
+    scene.cell(PLANE_B, 31, 1, name(SOLID, PAL_B));
+    scene.cell(PLANE_B, 8, 1, name(SOLID, PAL_B));
+    scene.cell(PLANE_B, 30, 0, name(SOLID, PAL_B));
+    // The part-shown column (words 38 AND 39) is also the last column's pair.
+    scene.vsram(38, &[8, 8]);
+    let frame = scene.frame();
+    assert_rows(frame, "left", 0, 0, &rows(&cells(".b"), 8));
+    assert_rows(frame, "right", 336, 0, &rows(&cells("b."), 8));
+}

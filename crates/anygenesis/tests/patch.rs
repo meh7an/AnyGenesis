@@ -1,7 +1,8 @@
 //! A synthetic ROM patched by a pack that holds every ROM-level patch kind (an IPS file,
 //! inline bytes, a Game Genie code) builds like any other ROM, with no hints: its analysis
 //! finds the code only the patches make reachable. A pack's code patches (M6.2), a C hook, a
-//! C replacement and RAM patches at reset and at VBlank, run in the built game. The
+//! C replacement and RAM patches at reset and at VBlank, run in the built game, and so do
+//! the `widescreen` flag and a hook's `ag_set_view` (M6.3). The
 //! whole-program builds are ignored: they need the player library next to anygenesis, built
 //! in the same profile (`cargo build -p anygenesis-player-lib`).
 
@@ -270,5 +271,82 @@ fn test_code_patches_run_in_the_built_game() {
     let (text, built) = build_with(&folder, &rom_path, &pack_path, &out);
     assert!(!built);
     assert!(text.contains("no code is at 0x000300"), "{text}");
+    fs::remove_dir_all(&folder).expect("the test folder is removed");
+}
+
+/// The widescreen program (M6.3): TMSS is unlocked with `move.l #'SEGA',($A14000).l`, CRAM 0,
+/// the backdrop, set white with `move.l #$C0000000,($C00004).l` and `move.w
+/// #$0EEE,($C00000).l`, then `bra.s *`, where a hook shows 8 of the 16 pixels of the left
+/// margin and none of the right one.
+const WIDE_PROGRAM: [u16; 14] = [
+    0x23FC, 0x5345, 0x4741, 0x00A1, 0x4000, 0x23FC, 0xC000, 0x0000, 0x00C0, 0x0004, 0x33FC, 0x0EEE,
+    0x00C0, 0x0000,
+];
+const WIDE_LOOP: usize = RESET + 2 * WIDE_PROGRAM.len();
+const WIDE_MARGIN: usize = 16;
+const VIEW_HOOK: &str = "uint32_t narrow_view(AgState *s, uint32_t pc)\n{\n    \
+                         ag_set_view(s, 8u, 0u);\n    return pc;\n}\n";
+
+#[test]
+#[ignore = "needs the player library next to anygenesis"]
+fn test_widescreen_flag_and_view_hook_shape_the_built_games_picture() {
+    let folder = folder("widescreen");
+    let mut code = WIDE_PROGRAM.to_vec();
+    code.push(0x60FE);
+    let rom = synthetic_rom(&code);
+    let rom_path = folder.join("synthetic.bin");
+    fs::write(&rom_path, &rom).expect("the ROM is written");
+    fs::write(folder.join("view.c"), VIEW_HOOK).expect("the C is written");
+    let pack = format!(
+        "name = \"Wide pack\"\nrom = \"{}\"\n\n\
+         [[hook]]\naddress = {WIDE_LOOP:#x}\nfile = \"view.c\"\nfunction = \"narrow_view\"\n\n\
+         [flags]\nwidescreen = {WIDE_MARGIN}\n",
+        Sha1Digest::of(&rom)
+    );
+    let pack_path = folder.join("wide.toml");
+    fs::write(&pack_path, pack).expect("the pack is written");
+    let out = folder.join("out");
+    let (text, built) = build_with(&folder, &rom_path, &pack_path, &out);
+    assert!(built, "the build succeeds");
+    assert!(
+        text.contains("code patches: 1 in C, 0 RAM, 1 flags"),
+        "{text}"
+    );
+
+    let exe = out.join(format!("synthetic (Wide pack){}", env::consts::EXE_SUFFIX));
+    let run = Command::new(&exe)
+        .args(["3", "--dump", "3"])
+        .current_dir(&out)
+        .output()
+        .expect("the game runs");
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(run.status.success());
+    let bmp = fs::read(out.join("dumps").join("frame-00003.bmp")).expect("the picture is saved");
+    // The program leaves every register at 0: H32, 256 pixels between the margins.
+    let width = 256 + 2 * WIDE_MARGIN;
+    let width_field = u32::from_le_bytes(bmp[18..22].try_into().expect("4 bytes"));
+    assert_eq!(width_field as usize, width);
+    // The first stored row, blue, green and red a pixel: black where the view hides the
+    // margins, the white backdrop elsewhere.
+    let row: String = bmp[54..54 + width * 3]
+        .chunks(3)
+        .map(|pixel| match pixel {
+            [0, 0, 0] => '.',
+            [0xFF, 0xFF, 0xFF] => 'w',
+            _ => '?',
+        })
+        .collect();
+    let hidden = WIDE_MARGIN - 8;
+    let expected = format!(
+        "{}{}{}",
+        ".".repeat(hidden),
+        "w".repeat(width - WIDE_MARGIN - hidden),
+        ".".repeat(WIDE_MARGIN)
+    );
+    assert_eq!(row, expected);
     fs::remove_dir_all(&folder).expect("the test folder is removed");
 }

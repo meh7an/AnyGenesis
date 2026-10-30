@@ -36,6 +36,7 @@
 //!
 //! [flags]
 //! sprite_limit = false
+//! widescreen = 40           # pixels left and right of the picture, even, at most 62
 //! ```
 
 use std::{
@@ -261,6 +262,9 @@ fn code_patches(
     flags: Flags,
     folder: &Path,
 ) -> Result<CodePatches, PackFault> {
+    flags
+        .check()
+        .map_err(|reason| PackFault::Reason(format!("flags: {reason}")))?;
     let mut code = CodePatches {
         flags,
         ..CodePatches::default()
@@ -370,6 +374,7 @@ mod tests {
     use std::env;
 
     use super::*;
+    use crate::FlagValue;
 
     const ROM: &[u8] = b"an image that stands in for a ROM";
 
@@ -562,5 +567,34 @@ mod tests {
         assert_ne!(one(0x200, 0).hash(), one(0x202, 0).hash());
         assert!(CodePatches::default().is_empty());
         assert!(!one(0x200, 0).is_empty());
+    }
+
+    #[test]
+    fn test_pack_widescreen_flag_parses_checks_and_merges() {
+        let head = format!("name = \"t\"\nrom = \"{}\"\n", sha1(ROM));
+        let flags = |value: &str| format!("{head}[flags]\nwidescreen = {value}\n");
+        let pack = parse(&flags("40")).expect("the pack parses");
+        assert_eq!(pack.code.flags.widescreen, Some(40));
+        assert_eq!(
+            pack.code.flags.set(),
+            [("widescreen", FlagValue::Pixels(40))]
+        );
+        assert!(!pack.code.is_empty());
+        for value in ["41", "64", "300", "-2"] {
+            assert!(reason(&flags(value)).contains("widescreen"), "{value}");
+        }
+
+        let wide = |pixels: u8| CodePatches {
+            flags: Flags {
+                widescreen: Some(pixels),
+                ..Flags::default()
+            },
+            ..CodePatches::default()
+        };
+        let mut all = CodePatches::default();
+        all.add(&wide(40)).expect("first");
+        let clash = all.add(&wide(40)).expect_err("set twice");
+        assert!(matches!(clash, PatchError::Clash { .. }), "{clash}");
+        assert_ne!(wide(40).hash(), wide(32).hash());
     }
 }

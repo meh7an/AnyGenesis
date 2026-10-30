@@ -51,7 +51,7 @@ use anygenesis_runtime::{
     Access, Buttons, Chip, Cpu, Exit, Hardware, InterruptStop, Miss, Options, RUN_STACK, Runtime,
     SoundCounts, SoundWrite, Vdp,
     io::{VERSION_NO_EXPANSION, VERSION_OVERSEAS},
-    vdp::Frame,
+    vdp::{Frame, render::MAX_WIDTH},
 };
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -693,6 +693,7 @@ fn run_in_window(
     let (settings, settings_path) = load_settings();
     let config = Config {
         title: format!("AnyGenesis - {}", game.name),
+        width: MAX_WIDTH + 2 * game.widescreen,
         scale: WINDOW_SCALE,
         controls,
         settings,
@@ -799,6 +800,7 @@ pub fn native(rom: Rom, game: Game, mut options: Options) -> Runtime {
     options.ram_patches.extend(game.ram_patches.iter().cloned());
     let mut vdp = Box::<Vdp>::default();
     vdp.set_sprite_limit(game.sprite_limit);
+    vdp.set_widescreen(game.widescreen);
     Runtime::new(rom, game.table, vdp, options).with_stepped(
         game.steps,
         game.step_entry,

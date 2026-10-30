@@ -120,6 +120,7 @@ const _: signatures::ag_step_late = ag_step_late;
 const _: signatures::ag_step_lookup = ag_step_lookup;
 const _: signatures::ag_deliver = ag_deliver;
 const _: signatures::ag_reset_devices = ag_reset_devices;
+const _: signatures::ag_set_view = ag_set_view;
 
 /// # Safety
 /// Called by translated code only, with the state of a running [`call`].
@@ -282,3 +283,10 @@ pub unsafe extern "C" fn ag_reset_devices(state: *mut AgState) {
     // SAFETY: forwarded from the caller.
     unsafe { with_host(state, |_, host| host.reset_devices()) }
 }
+
+/// Code patches never run here, and no host draws a picture, so there is no view to set.
+///
+/// # Safety
+/// As for [`ag_read8`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_set_view(_state: *mut AgState, _left: u32, _right: u32) {}
