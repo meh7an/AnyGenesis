@@ -986,6 +986,37 @@ fn test_widescreen_sprites_show_where_the_hardware_hides_them_without_status() {
 }
 
 #[test]
+fn test_widescreen_draws_sprites_past_the_line_limits_in_the_margins_only() {
+    // The count: 20 sprites in the left margin fill the line, so the next one, in the
+    // picture, stays hidden as on the hardware, and one more in the right margin shows.
+    let mut scene = wide_scene(true, 16);
+    for index in 0..20 {
+        scene.sprite_at(index, 128 - 16, 0, (1, 1), index + 1, name(SOLID, PAL_S));
+    }
+    scene.sprite(20, 0, 0, (1, 1), 21, name(SOLID, PAL_S));
+    let past_right = 128 + MAX_WIDTH as u16 + 8;
+    scene.sprite_at(21, past_right, 0, (1, 1), 0, name(QUAD + 1, PAL_S));
+    let frame = scene.frame();
+    assert_rows(frame, "count left", 0, 0, &rows(&cells("s.."), 8));
+    assert_rows(frame, "count right", 336, 0, &rows(&cells(".S"), 8));
+    assert_eq!(scene.sprite_status(), status::SPRITE_OVERFLOW);
+
+    // The pixels: ten 32-pixel sprites off the picture use the line's 320, as a game's
+    // masking does; the sprite after them stays hidden in the picture and shows in the
+    // right margin.
+    let mut scene = wide_scene(true, 16);
+    for index in 0..10 {
+        scene.sprite_at(index, 1, 0, (4, 1), index + 1, name(SOLID, PAL_S));
+    }
+    scene.sprite(10, 0, 0, (1, 1), 11, name(SOLID, PAL_S));
+    scene.sprite_at(11, past_right, 0, (1, 1), 0, name(QUAD + 1, PAL_S));
+    let frame = scene.frame();
+    assert_rows(frame, "pixels left", 0, 0, &rows(&cells("..."), 8));
+    assert_rows(frame, "pixels right", 336, 0, &rows(&cells(".S"), 8));
+    assert_eq!(scene.sprite_status(), 0);
+}
+
+#[test]
 fn test_widescreen_view_hides_the_margins_in_black_from_the_next_frame() {
     let mut scene = wide_scene(true, 16);
     scene.register(7, 0x11);

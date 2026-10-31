@@ -30,9 +30,10 @@
 //! hardware draws there, so these rules are ours: the window stays inside the console's
 //! picture (plane A shows beside it), the left-column blank moves to the wide picture's left
 //! edge, two-cell vertical scrolling continues the part-shown column into the left margin
-//! and the last column into the right one, every sprite is drawn, and the status flags count
-//! as the hardware's picture alone would. A per-frame view hides any part of the margins in
-//! black.
+//! and the last column into the right one, sprites past a line's limits are drawn in the
+//! margins only (the console's picture stays the hardware's, masking by the limits included),
+//! and the status flags count as the hardware's picture alone would. A per-frame view hides
+//! any part of the margins in black.
 //!
 //! Sources (behaviour only, no emulator code read): Plutiedev (registers, tile and sprite
 //! formats, layer priority, sprite limits, shadow/highlight rules), Kabuto's hardware notes
@@ -272,13 +273,20 @@ impl Screen {
             draw_plane(source, &layout, Plane::A, line, 0..window.start, plane_a);
             draw_window(source, &layout, line, window.clone(), plane_a);
             draw_plane(source, &layout, Plane::A, line, window.end..width, plane_a);
+            let past_limits = if self.unlimited_sprites {
+                PastLimits::Everywhere
+            } else if self.margin > 0 {
+                PastLimits::Margins
+            } else {
+                PastLimits::Hidden
+            };
             let mut sprites = [0; ROW_WIDTH];
             let drawn = draw_sprites(
                 source,
                 &layout,
                 line,
                 self.pixels_ran_out,
-                self.unlimited_sprites || self.margin > 0,
+                past_limits,
                 &mut sprites,
             );
             self.pixels_ran_out = drawn.pixels_ran_out;
@@ -583,16 +591,28 @@ fn draw_window(
     }
 }
 
-/// Draws the sprites on `line` into `out`, walking the link list from sprite 0. With
-/// `unlimited`, the sprites and pixels past the line's limits are drawn as well, but they
-/// neither collide nor count, so the result is the hardware's; so are pixels in the
-/// widescreen margins.
+/// Where a line draws the sprite pixels past its sprite and pixel limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PastLimits {
+    /// Nowhere, as the hardware.
+    Hidden,
+    /// In the widescreen margins only, so the console's picture stays the hardware's, the
+    /// masking games build on the limits included.
+    Margins,
+    /// Everywhere: the `sprite_limit = false` flag.
+    Everywhere,
+}
+
+/// Draws the sprites on `line` into `out`, walking the link list from sprite 0. Sprites and
+/// pixels past the line's limits are drawn where `past_limits` says, but they neither
+/// collide nor count, so the status is the hardware's; so are pixels in the widescreen
+/// margins.
 fn draw_sprites(
     source: Source<'_>,
     layout: &Layout,
     line: usize,
     pixels_ran_out: bool,
-    unlimited: bool,
+    past_limits: PastLimits,
     out: &mut [u8; ROW_WIDTH],
 ) -> SpriteLine {
     let console = layout.margin..layout.margin + layout.width;
@@ -621,7 +641,7 @@ fn draw_sprites(
             let past_count = found > per_line;
             if past_count {
                 flags.overflow = true;
-                if !unlimited {
+                if past_limits == PastLimits::Hidden {
                     break;
                 }
             }
@@ -641,7 +661,7 @@ fn draw_sprites(
             for step in 0..columns {
                 // Out of pixels, the walk goes on only to count sprites.
                 let extra = past_count || pixels >= pixel_limit;
-                if extra && !unlimited {
+                if extra && past_limits == PastLimits::Hidden {
                     break;
                 }
                 if !extra {
@@ -656,6 +676,9 @@ fn draw_sprites(
                     let Some(x) = (left + step * 8 + offset + layout.margin)
                         .checked_sub(SPRITE_OFFSET)
                         .filter(|&x| x < layout.picture)
+                        .filter(|x| {
+                            !extra || past_limits != PastLimits::Margins || !console.contains(x)
+                        })
                     else {
                         continue;
                     };
