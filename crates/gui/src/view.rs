@@ -637,6 +637,7 @@ impl Builder {
                 .py(px(4.))
                 .rounded(px(4.))
                 .text_size(px(13.))
+                .occlude()
                 .child(badge)
                 .child(step.label())
                 .map(|this| match state {
@@ -656,7 +657,7 @@ impl Builder {
                 .items_center()
                 .gap(px(8.))
                 .when(step != Step::Rom, |this| {
-                    this.child(div().w(px(24.)).h(px(1.)).bg(t.control))
+                    this.child(div().w(px(1.)).h(px(16.)).bg(t.control))
                 })
                 .child(button)
         });
@@ -672,6 +673,7 @@ impl Builder {
                 .items_center()
                 .justify_center()
                 .hover(move |style| style.bg(hover))
+                .occlude()
                 .when(is_windows, |this| this.window_control_area(area))
                 .when(!is_windows, |this| {
                     this.on_mouse_down(MouseButton::Left, |_, window, cx| {
@@ -719,6 +721,7 @@ impl Builder {
         });
         div()
             .id("header")
+            .relative()
             .h(px(44.))
             .flex_none()
             .flex()
@@ -752,6 +755,17 @@ impl Builder {
                     }
                 }))
             })
+            // Centred on the whole header, not on the space between the unequal side groups.
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .justify_center()
+                    .items_center()
+                    .gap(px(8.))
+                    .children(steps),
+            )
             .child(img("icon.png").size(px(20.)).rounded(px(4.)).flex_none())
             .child(
                 div()
@@ -760,16 +774,7 @@ impl Builder {
                     .whitespace_nowrap()
                     .child("AnyGenesis Builder"),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .justify_center()
-                    .items_center()
-                    .gap(px(8.))
-                    .children(steps),
-            )
+            .child(div().flex_1())
             .child(
                 div()
                     .id("settings")
@@ -783,6 +788,7 @@ impl Builder {
                     .text_color(t.text2)
                     .cursor_pointer()
                     .hover(|style| style.bg(t.hover))
+                    .occlude()
                     .child(icon("gear-six", 16., t.text2))
                     .child("Settings")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -797,6 +803,7 @@ impl Builder {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|style| style.bg(t.hover))
+                    .occlude()
                     .child(icon("info", 16., t.text2))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.set_overlay(Some(Overlay::About), cx)
