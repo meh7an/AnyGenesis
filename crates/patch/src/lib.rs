@@ -1,6 +1,7 @@
 //! ROM-level patches, applied to a ROM image before analysis, so a patched image builds like
 //! any other ROM: our own IPS, UPS and BPS appliers, inline byte runs, Game Genie codes, and
-//! patch packs that list them for one ROM, with the code patches they carry (M6.2). The
+//! patch packs that list them for one ROM, with the code patches they carry (M6.2), and the
+//! Marketplace's index and installs (M7.3). The
 //! appliers and the Game Genie decoder follow the public format specifications recorded in
 //! plan/PROGRESS.md (M6.1).
 
@@ -9,8 +10,10 @@ mod code;
 mod crc32;
 mod genie;
 mod ips;
+pub mod market;
 mod pack;
 mod reader;
+pub mod sha256;
 mod ups;
 
 use std::{

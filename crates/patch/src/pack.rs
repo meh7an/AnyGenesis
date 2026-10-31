@@ -62,6 +62,7 @@ use crate::{
 #[serde(deny_unknown_fields)]
 struct PackText {
     name: String,
+    description: Option<String>,
     rom: String,
     result: Option<String>,
     #[serde(default)]
@@ -117,6 +118,8 @@ enum Entry {
 #[derive(Debug, Clone)]
 pub struct Pack {
     pub name: String,
+    /// One line for the Marketplace.
+    pub description: Option<String>,
     /// The SHA-1 of the unpatched ROM the pack is for.
     pub rom: Sha1Digest,
     /// The SHA-1 of the image the pack builds from its ROM when it is the only patch,
@@ -170,6 +173,7 @@ impl Pack {
         let code = code_patches(&pack.hook, &pack.replace, &pack.ram, pack.flags, folder)?;
         Ok(Self {
             name: pack.name,
+            description: pack.description,
             rom: digest(&pack.rom)?,
             result: pack.result.as_deref().map(digest).transpose()?,
             entries,

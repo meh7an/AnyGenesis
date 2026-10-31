@@ -13,9 +13,10 @@ use std::{
     process::{Command, ExitCode},
 };
 
+use anygenesis_patch::sha256;
 use anyhow::{Context, Result, bail};
 
-use crate::{sha256, workspace_root};
+use crate::workspace_root;
 
 /// The pinned Zig. Move it on purpose: the archives below and anygenesis's cache key follow.
 const ZIG_VERSION: &str = "0.17.0";

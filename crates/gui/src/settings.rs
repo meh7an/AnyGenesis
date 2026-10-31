@@ -110,9 +110,20 @@ impl Settings {
     }
 }
 
-/// The settings file: `%APPDATA%\AnyGenesis\AnyGenesis` on Windows, `$XDG_DATA_HOME/AnyGenesis`
-/// (or `~/.local/share/AnyGenesis`) elsewhere, as SDL places the controls file.
+/// The settings file in [`data_folder`].
 fn file() -> Option<PathBuf> {
+    data_folder().map(|folder| folder.join(FILE_NAME))
+}
+
+/// Where the Marketplace installs packs, one folder per game and patch.
+pub fn market_folder() -> Option<PathBuf> {
+    data_folder().map(|folder| folder.join("patches"))
+}
+
+/// The app's per-user folder: `%APPDATA%\AnyGenesis\AnyGenesis` on Windows,
+/// `$XDG_DATA_HOME/AnyGenesis` (or `~/.local/share/AnyGenesis`) elsewhere, as SDL places the
+/// controls file.
+fn data_folder() -> Option<PathBuf> {
     let folder = if cfg!(windows) {
         PathBuf::from(env::var_os("APPDATA")?)
             .join("AnyGenesis")

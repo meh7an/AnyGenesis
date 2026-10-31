@@ -8,7 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anygenesis_patch::{Pack, Patch};
+use anygenesis_patch::{
+    Pack, Patch,
+    market::{self, Index, IndexPack, Status},
+};
 use anygenesis_rom::{Regions, Rom, RomError, RomWarning, Sha1Digest};
 
 use crate::{
@@ -86,6 +89,7 @@ pub enum RomState {
 pub enum Origin {
     File,
     Folder,
+    Market,
 }
 
 /// One patch on this computer.
@@ -105,6 +109,7 @@ impl LocalPatch {
         let origin = match self.origin {
             Origin::File => "from file",
             Origin::Folder => "in the patches folder",
+            Origin::Market => "from the Marketplace",
         };
         format!("{} \u{b7} {origin}", self.kind)
     }
@@ -128,6 +133,8 @@ pub enum Pane {
 pub enum Overlay {
     Settings,
     About,
+    /// The install confirmation for [`Model::confirm`].
+    Install,
 }
 
 /// The Build step's state.
@@ -169,11 +176,38 @@ pub struct Next {
     pub action: Option<NextAction>,
 }
 
+/// The Marketplace's index for this run.
+#[derive(Debug, Clone)]
+pub enum Market {
+    /// Not asked for yet: the index is fetched when the Patches step first opens.
+    Idle,
+    Loading,
+    /// Why the index could not be fetched or read; installed packs still work.
+    Offline(String),
+    Ready(Index),
+}
+
+/// One Marketplace pack for the loaded ROM.
+#[derive(Debug, Clone)]
+pub struct MarketEntry {
+    pub pack: IndexPack,
+    pub status: Status,
+}
+
 #[derive(Debug)]
 pub struct Model {
     pub step: Step,
     pub rom: RomState,
     pub patches: Vec<LocalPatch>,
+    pub market: Market,
+    /// Where the Marketplace installs packs; none when the per-user folder is unknown.
+    pub market_root: Option<PathBuf>,
+    /// The pack whose install is waiting for the user's yes.
+    pub confirm: Option<IndexPack>,
+    /// The id of the pack being installed.
+    pub installing: Option<String>,
+    /// Why the last install or removal failed.
+    pub market_error: Option<String>,
     pub tab: Tab,
     pub pane: Pane,
     pub build: Build,
@@ -191,6 +225,11 @@ impl Model {
             step: Step::Rom,
             rom: RomState::Empty,
             patches: Vec::new(),
+            market: Market::Idle,
+            market_root: None,
+            confirm: None,
+            installing: None,
+            market_error: None,
             tab: Tab::Patches,
             pane: Pane::Local,
             build: Build::Ready,
@@ -213,26 +252,65 @@ impl Model {
         matches!(self.build, Build::Running { .. })
     }
 
-    /// Loads the ROM at `path`, with the packs for it found under `patches_folder` listed,
-    /// and goes back to the ROM step. Ignored while a build runs.
-    pub fn load_rom(&mut self, path: &Path, patches_folder: Option<&Path>) {
+    /// Loads the ROM at `path`, with the packs for it found under `folders` listed, and goes
+    /// back to the ROM step. Ignored while a build runs.
+    pub fn load_rom(&mut self, path: &Path, folders: &[(PathBuf, Origin)]) {
         if self.is_building() {
             return;
         }
         self.step = Step::Rom;
         self.patches.clear();
         self.patch_error = None;
+        self.market_error = None;
+        self.confirm = None;
         self.build = Build::Ready;
         self.log.clear();
         self.rom = match Rom::load(path) {
             Ok(rom) => {
-                if let Some(folder) = patches_folder {
-                    self.patches = folder_patches(folder, rom.sha1());
-                }
+                self.patches = scan(folders, rom.sha1());
                 RomState::Loaded(rom_info(path, &rom))
             }
             Err(error) => rom_error(path, &error),
         };
+    }
+
+    /// Lists the packs under `folders` again after an install or a removal, keeping the
+    /// added files, the order, and which patches are on; new packs go last, on.
+    pub fn rescan(&mut self, folders: &[(PathBuf, Origin)]) {
+        let Some(rom) = self.rom().map(|rom| rom.sha1) else {
+            return;
+        };
+        let mut found = scan(folders, rom);
+        let mut patches = Vec::new();
+        for patch in self.patches.drain(..) {
+            if patch.origin == Origin::File {
+                patches.push(patch);
+            } else if let Some(at) = found.iter().position(|new| new.path == patch.path) {
+                let mut new = found.remove(at);
+                new.on = patch.on;
+                patches.push(new);
+            }
+        }
+        patches.extend(found);
+        self.patches = patches;
+    }
+
+    /// The Marketplace's packs for the loaded ROM, in index order.
+    pub fn market_entries(&self) -> Vec<MarketEntry> {
+        let (Market::Ready(index), Some(rom)) = (&self.market, self.rom()) else {
+            return Vec::new();
+        };
+        index
+            .for_rom(rom.sha1)
+            .into_iter()
+            .map(|pack| MarketEntry {
+                pack: pack.clone(),
+                status: self
+                    .market_root
+                    .as_deref()
+                    .map_or(Status::Absent, |root| market::status(root, pack)),
+            })
+            .collect()
     }
 
     /// Steps after the first open once a ROM is loaded.
@@ -715,16 +793,24 @@ fn local_patch(path: &Path, rom: Sha1Digest, origin: Origin) -> Result<LocalPatc
     })
 }
 
+/// The packs for the ROM with SHA-1 `rom` in every folder of `folders`, in their order.
+fn scan(folders: &[(PathBuf, Origin)], rom: Sha1Digest) -> Vec<LocalPatch> {
+    folders
+        .iter()
+        .flat_map(|(folder, origin)| folder_patches(folder, rom, *origin))
+        .collect()
+}
+
 /// The packs under `folder` (searched through its subfolders) made for the ROM with SHA-1
 /// `rom`, in path order. Packs that do not load are skipped.
-pub fn folder_patches(folder: &Path, rom: Sha1Digest) -> Vec<LocalPatch> {
+fn folder_patches(folder: &Path, rom: Sha1Digest, origin: Origin) -> Vec<LocalPatch> {
     let mut packs = Vec::new();
     collect_packs(folder, 0, &mut packs);
     packs.sort();
     packs
         .iter()
         .filter(|path| Pack::load(path).is_ok_and(|pack| pack.rom == rom))
-        .filter_map(|path| local_patch(path, rom, Origin::Folder).ok())
+        .filter_map(|path| local_patch(path, rom, origin).ok())
         .collect()
 }
 
@@ -803,7 +889,7 @@ mod tests {
     fn loaded(scratch: &Scratch) -> Model {
         let rom = scratch.write("test game.bin", &image("GM 00001009-01", "JUE"));
         let mut model = Model::new(Settings::default());
-        model.load_rom(&rom, None);
+        model.load_rom(&rom, &[]);
         model
     }
 
@@ -838,7 +924,7 @@ mod tests {
         let scratch = Scratch::new("errors");
         let mut model = Model::new(Settings::default());
         let odd = scratch.write("odd.bin", &[0; 0x401]);
-        model.load_rom(&odd, None);
+        model.load_rom(&odd, &[]);
         let RomState::Error {
             title,
             message,
@@ -855,9 +941,9 @@ mod tests {
         assert!(message.ends_with('.'));
         assert_eq!(file, "odd.bin \u{b7} 1,025 bytes");
         let large = scratch.write("big.bin", &vec![0; 0x40_0002]);
-        model.load_rom(&large, None);
+        model.load_rom(&large, &[]);
         assert!(matches!(&model.rom, RomState::Error { title, .. } if title.contains("mapper")));
-        model.load_rom(&scratch.0.join("missing.bin"), None);
+        model.load_rom(&scratch.0.join("missing.bin"), &[]);
         assert!(matches!(&model.rom, RomState::Error { file, .. } if file == "missing.bin"));
         assert!(!model.can_go(Step::Patches));
         assert_eq!(model.next().action, None);
@@ -956,7 +1042,7 @@ mod tests {
         scratch.write("patches/a/other.toml", other.as_bytes());
         scratch.write("patches/broken.toml", b"name = ");
         let mut model = Model::new(Settings::default());
-        model.load_rom(&rom_path, Some(&scratch.0.join("patches")));
+        model.load_rom(&rom_path, &[(scratch.0.join("patches"), Origin::Folder)]);
         assert_eq!(model.patches.len(), 1, "{:?}", model.patches);
         assert_eq!(model.patches[0].name, "Mine");
         assert_eq!(model.patches[0].origin, Origin::Folder);
@@ -968,6 +1054,67 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("another ROM"))
         );
+    }
+
+    #[test]
+    fn test_market_install_lists_the_pack_and_rescan_keeps_choices() {
+        let scratch = Scratch::new("market");
+        let bytes = image("GM 00000000-00", "U");
+        let rom_path = scratch.write("game.bin", &bytes);
+        let pack_text = format!(
+            "name = \"Wide\"\nrom = \"{}\"\n\n[[patch]]\noffset = 0x200\nbytes = \"4E71\"\n",
+            Sha1Digest::of(&bytes)
+        );
+        scratch.write("repo/Game/wide/pack.toml", pack_text.as_bytes());
+        let pack = IndexPack {
+            id: "Game/wide".to_owned(),
+            name: "Wide".to_owned(),
+            description: None,
+            rom: Sha1Digest::of(&bytes).to_string(),
+            runs_code: false,
+            files: vec![market::IndexFile {
+                path: market::PACK_FILE.to_owned(),
+                size: pack_text.len() as u64,
+                sha256: anygenesis_patch::sha256::hex_digest(pack_text.as_bytes()),
+            }],
+        };
+        let mut other = pack.clone();
+        other.id = "Other/wide".to_owned();
+        other.rom = "0".repeat(40);
+        let index = Index {
+            format: market::INDEX_FORMAT,
+            commit: "a".repeat(40),
+            packs: vec![pack.clone(), other],
+        };
+        let root = scratch.0.join("installed");
+        let folders = [(root.clone(), Origin::Market)];
+        let mut model = Model::new(Settings::default());
+        model.market = Market::Ready(index.clone());
+        model.market_root = Some(root.clone());
+        model.load_rom(&rom_path, &folders);
+        let added = scratch.write("added.ips", b"PATCH\x00\x02\x00\x00\x01\x4EEOF");
+        model.add_patch(&added);
+        model.toggle_patch(0);
+        let entries = model.market_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, Status::Absent);
+        let source = market::LocalSource {
+            root: scratch.0.join("repo"),
+        };
+        market::install(&root, &index, &pack, &source).expect("the pack installs");
+        model.rescan(&folders);
+        assert_eq!(model.patches.len(), 2, "{:?}", model.patches);
+        assert!(!model.patches[0].on, "the added file stays off");
+        assert_eq!(model.patches[1].origin, Origin::Market);
+        assert!(model.patches[1].on, "a new pack comes on");
+        assert!(matches!(
+            model.market_entries()[0].status,
+            Status::Installed { .. }
+        ));
+        market::remove(&root, &pack).expect("the pack is removed");
+        model.rescan(&folders);
+        assert_eq!(model.patches.len(), 1);
+        assert_eq!(model.patches[0].origin, Origin::File);
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! anygenesis-gui: the AnyGenesis Builder. Pick a ROM, choose local patches, and build a
+//! anygenesis-gui: the AnyGenesis Builder. Pick a ROM, choose patches from this computer or
+//! the Marketplace, and build a
 //! native game program by clicking; the build runs as a child `anygenesis --progress` next
 //! to this program. Built games are for the user who built them: never distribute one.
 
@@ -6,6 +7,7 @@
 
 mod assets;
 mod child;
+mod market;
 mod model;
 mod progress;
 mod settings;

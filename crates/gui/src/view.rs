@@ -18,14 +18,16 @@ use gpui_kit::{
     size, svg,
 };
 
+use anygenesis_patch::market::{self, IndexPack, Status};
+
 use crate::{
     child::{self, Child},
     model::{
-        Build, LogLine, Model, NextAction, Notice, Origin, Overlay, Pane, RomState, Step,
+        Build, LogLine, Market, Model, NextAction, Notice, Origin, Overlay, Pane, RomState, Step,
         StepState, Tab,
     },
     progress::{self, Burst, PAD, PixelBar},
-    settings::{Settings, ThemeChoice},
+    settings::{self, Settings, ThemeChoice},
     theme::{Theme, Tone},
 };
 
@@ -73,8 +75,10 @@ impl Builder {
         })
         .detach();
         let now = Instant::now();
+        let mut model = Model::new(Settings::load());
+        model.market_root = settings::market_folder();
         Self {
-            model: Model::new(Settings::load()),
+            model,
             system_dark: is_dark(window.appearance()),
             system_reduce: cx.reduce_motion(),
             child: None,
@@ -147,6 +151,9 @@ impl Builder {
             self.page += 1;
         }
         self.model.go(step);
+        if self.model.step == Step::Patches && matches!(self.model.market, Market::Idle) {
+            self.fetch_market(cx);
+        }
         cx.notify();
     }
 
@@ -161,9 +168,91 @@ impl Builder {
     }
 
     fn load_rom(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let folder = child::patches_folder();
-        self.model.load_rom(&path, folder.as_deref());
+        self.model.load_rom(&path, &self.folders());
         self.burst = None;
+        cx.notify();
+    }
+
+    /// The folders scanned for packs: `patches/` next to the app, then the Marketplace's.
+    fn folders(&self) -> Vec<(PathBuf, Origin)> {
+        let local = child::patches_folder().map(|folder| (folder, Origin::Folder));
+        let market = self
+            .model
+            .market_root
+            .clone()
+            .map(|root| (root, Origin::Market));
+        local.into_iter().chain(market).collect()
+    }
+
+    /// Fetches the Marketplace index on a background thread.
+    fn fetch_market(&mut self, cx: &mut Context<Self>) {
+        self.model.market = Market::Loading;
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { market::fetch_index(&*crate::market::source()) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.model.market = match result {
+                    Ok(index) => Market::Ready(index),
+                    Err(error) => Market::Offline(error.to_string()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn ask_install(&mut self, pack: IndexPack, cx: &mut Context<Self>) {
+        self.model.confirm = Some(pack);
+        self.set_overlay(Some(Overlay::Install), cx);
+    }
+
+    /// Installs the confirmed pack on a background thread, then lists it.
+    fn install_pack(&mut self, cx: &mut Context<Self>) {
+        self.model.overlay = None;
+        let (Some(pack), Some(root), Market::Ready(index)) = (
+            self.model.confirm.take(),
+            self.model.market_root.clone(),
+            &self.model.market,
+        ) else {
+            cx.notify();
+            return;
+        };
+        let index = index.clone();
+        let name = pack.name.clone();
+        self.model.installing = Some(pack.id.clone());
+        self.model.market_error = None;
+        cx.notify();
+        let task = cx.background_executor().spawn(async move {
+            market::install(&root, &index, &pack, &*crate::market::source()).map(|_| ())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.model.installing = None;
+                if let Err(error) = result {
+                    this.model.market_error =
+                        Some(format!("{name} couldn't be installed: {error}."));
+                }
+                let folders = this.folders();
+                this.model.rescan(&folders);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn remove_pack(&mut self, pack: &IndexPack, cx: &mut Context<Self>) {
+        let Some(root) = self.model.market_root.clone() else {
+            return;
+        };
+        self.model.market_error = market::remove(&root, pack)
+            .err()
+            .map(|error| format!("{} couldn't be removed: {error}.", pack.name));
+        let folders = self.folders();
+        self.model.rescan(&folders);
         cx.notify();
     }
 
@@ -1058,7 +1147,9 @@ impl Builder {
                     .min_h_0()
                     .flex()
                     .when(show_local, |this| this.child(self.local_pane(wide, cx, t)))
-                    .when(show_market, |this| this.child(market_pane(wide, t)))
+                    .when(show_market, |this| {
+                        this.child(self.market_pane(wide, cx, t))
+                    })
                     .into_any_element()
             }
         };
@@ -1234,21 +1325,11 @@ impl Builder {
                 this.child(card(t).overflow_hidden().children(rows))
             })
             .when(!has_patches, |this| {
-                this.child(
-                    div()
-                        .p(px(20.))
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_dashed()
-                        .border_color(t.control)
-                        .text_center()
-                        .text_color(t.text2)
-                        .line_height(px(13. * 1.5))
-                        .child(
-                            "No patches yet. Add a file, or drop packs into the patches folder \
-                             next to the app.",
-                        ),
-                )
+                this.child(empty_box(
+                    t,
+                    "No patches yet. Add a file, get one from the Marketplace, or drop packs \
+                     into the patches folder next to the app.",
+                ))
             })
             .when(!trusted.is_empty(), |this| {
                 this.child(notice(
@@ -1834,8 +1915,16 @@ impl Builder {
                     )
                     .child(section("Marketplace").child(
                         div().text_size(px(12.)).text_color(t.text2).child(
-                            "Patches from AnyGenesis-Patches on GitHub arrive in a later \
-                                     update.",
+                            self.model.market_root.as_ref().map_or_else(
+                                || "The Marketplace needs a per-user folder.".to_owned(),
+                                |root| {
+                                    format!(
+                                        "Patches from AnyGenesis-Patches on GitHub, checked by \
+                                         SHA-256, installed in {}.",
+                                        root.display()
+                                    )
+                                },
+                            ),
                         ),
                     ))
                     .child(
@@ -1951,50 +2040,313 @@ fn dialog(t: &Theme, width: f32) -> gpui_kit::Stateful<Div> {
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-/// The Marketplace pane, empty until M7.3.
-fn market_pane(wide: bool, t: &Theme) -> Div {
+/// A dashed box with a centred message, for an empty or waiting list.
+fn empty_box(t: &Theme, message: impl Into<SharedString>) -> Div {
     div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(10.))
-        .py(px(14.))
-        .pr(px(24.))
-        .pl(px(if wide { 16. } else { 24. }))
-        .bg(t.bg)
-        .child(
+        .p(px(20.))
+        .rounded(px(6.))
+        .border_1()
+        .border_dashed()
+        .border_color(t.control)
+        .text_center()
+        .text_color(t.text2)
+        .line_height(px(13. * 1.5))
+        .child(message.into())
+}
+
+/// `bytes` as people read file sizes.
+fn size_text(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
+impl Builder {
+    /// The Marketplace pane: the index's packs for the loaded ROM, with their install state.
+    fn market_pane(
+        &mut self,
+        wide: bool,
+        cx: &mut Context<Self>,
+        t: &Theme,
+    ) -> gpui_kit::AnyElement {
+        let entries = self.model.market_entries();
+        let installing = self.model.installing.clone();
+        let rows = entries.into_iter().enumerate().map(|(index, entry)| {
+            let pack = entry.pack;
+            let kind = if pack.runs_code {
+                "runs native code"
+            } else {
+                "data only"
+            };
+            let files = match pack.files.len() {
+                1 => "1 file".to_owned(),
+                count => format!("{count} files"),
+            };
+            let state = match entry.status {
+                Status::Absent => None,
+                Status::Installed { modified: true, .. } => Some("Changed on this computer"),
+                Status::Installed { update: true, .. } => Some("Update available"),
+                Status::Installed { .. } => Some("Installed"),
+            };
+            let size = size_text(pack.size());
+            let meta = [Some(files.as_str()), Some(size.as_str()), Some(kind), state]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ");
+            let busy = installing.as_deref() == Some(pack.id.as_str());
+            let install_label = match entry.status {
+                Status::Absent => Some("Install"),
+                Status::Installed { update: true, .. } => Some("Update"),
+                Status::Installed { modified: true, .. } => Some("Reinstall"),
+                Status::Installed { .. } => None,
+            };
+            let action = if busy {
+                div()
+                    .text_size(px(12.))
+                    .text_color(t.muted)
+                    .child("Installing\u{2026}")
+                    .into_any_element()
+            } else if installing.is_some() {
+                install_label.map_or_else(
+                    || div().into_any_element(),
+                    |label| primary_off(label, t).into_any_element(),
+                )
+            } else {
+                let ask = pack.clone();
+                install_label.map_or_else(
+                    || div().into_any_element(),
+                    |label| {
+                        primary(("install", index), label, t)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.ask_install(ask.clone(), cx)
+                            }))
+                            .into_any_element()
+                    },
+                )
+            };
+            let installed = entry.status != Status::Absent && !busy;
+            let remove = pack.clone();
             div()
+                .id(("market", index))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(10.))
+                .bg(t.surface)
+                .when(index > 0, |this| this.border_t_1().border_color(t.row))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .truncate()
+                                .child(pack.name.clone()),
+                        )
+                        .children(pack.description.clone().map(|description| {
+                            div()
+                                .text_size(px(12.))
+                                .text_color(t.text2)
+                                .line_height(px(12. * 1.45))
+                                .child(description)
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(t.muted)
+                                .truncate()
+                                .child(meta),
+                        ),
+                )
+                .child(action)
+                .when(installed, |this| {
+                    this.child(
+                        div()
+                            .id(("uninstall", index))
+                            .flex()
+                            .p(px(6.))
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(t.hover))
+                            .child(icon("trash", 16., t.text2))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.remove_pack(&remove, cx)
+                            })),
+                    )
+                })
+        });
+        let rows: Vec<_> = rows.collect();
+        let body = match &self.model.market {
+            Market::Idle | Market::Loading => {
+                empty_box(t, "Looking for patches for this game\u{2026}").into_any_element()
+            }
+            Market::Offline(reason) => div()
                 .flex()
                 .flex_col()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Marketplace for this game"),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(t.muted)
-                        .child("From AnyGenesis-Patches on GitHub \u{b7} matched by SHA-1"),
-                ),
-        )
-        .child(
-            div()
+                .items_center()
+                .gap(px(8.))
                 .p(px(20.))
                 .rounded(px(6.))
                 .border_1()
                 .border_dashed()
                 .border_color(t.control)
                 .text_center()
-                .text_color(t.text2)
-                .line_height(px(13. * 1.5))
+                .child(icon("warning-circle", 28., t.muted))
                 .child(
-                    "The Marketplace opens in a later update. Until then, add patch files from \
-                     this computer.",
-                ),
-        )
+                    div().font_weight(FontWeight::MEDIUM).child(
+                        "The Marketplace can't be reached. Patches you installed still work.",
+                    ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(t.muted)
+                        .child(reason.clone()),
+                )
+                .child(
+                    secondary("market-retry", "Try again", 12., t)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.fetch_market(cx))),
+                )
+                .into_any_element(),
+            Market::Ready(_) if rows.is_empty() => {
+                empty_box(t, "No Marketplace patches for this game yet.").into_any_element()
+            }
+            Market::Ready(_) => card(t).overflow_hidden().children(rows).into_any_element(),
+        };
+        div()
+            .id("market-pane")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .py(px(14.))
+            .pr(px(24.))
+            .pl(px(if wide { 16. } else { 24. }))
+            .bg(t.bg)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Marketplace for this game"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(t.muted)
+                            .child("From AnyGenesis-Patches on GitHub \u{b7} matched by SHA-1"),
+                    ),
+            )
+            .child(body)
+            .children(self.model.market_error.clone().map(|message| {
+                notice(
+                    t.error,
+                    "warning-circle",
+                    lead_text(&Notice {
+                        lead: message,
+                        rest: String::new(),
+                    }),
+                )
+            }))
+            .into_any_element()
+    }
+
+    /// What the user reads before a pack is installed: its files, where they come from, and
+    /// the native-code notice for a pack with C code.
+    fn install_dialog(&mut self, cx: &mut Context<Self>, t: &Theme) -> gpui_kit::AnyElement {
+        let (Some(pack), Market::Ready(index)) = (&self.model.confirm, &self.model.market) else {
+            return div().into_any_element();
+        };
+        let files = pack.files.iter().enumerate().map(|(index, file)| {
+            div()
+                .flex()
+                .justify_between()
+                .gap(px(12.))
+                .px(px(12.))
+                .py(px(6.))
+                .bg(t.surface)
+                .when(index > 0, |this| this.border_t_1().border_color(t.row))
+                .child(
+                    div()
+                        .font_family(MONO)
+                        .text_size(px(12.))
+                        .truncate()
+                        .child(file.path.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(12.))
+                        .text_color(t.muted)
+                        .child(size_text(file.size)),
+                )
+        });
+        dialog(t, 460.)
+            .gap(px(12.))
+            .p(px(24.))
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Install {}?", pack.name)),
+            )
+            .children(pack.description.clone().map(|description| {
+                div()
+                    .text_color(t.text2)
+                    .line_height(px(13. * 1.5))
+                    .child(description)
+            }))
+            .child(div().text_size(px(11.)).text_color(t.muted).child(format!(
+                "{} from AnyGenesis-Patches at commit {}, each file checked by SHA-256",
+                pack.id,
+                &index.commit[..7]
+            )))
+            .child(card(t).overflow_hidden().children(files))
+            .when(pack.runs_code, |this| {
+                this.child(notice(
+                    t.trust,
+                    "shield-warning",
+                    lead_text(&Notice {
+                        lead: "Heads up: this pack runs its own native code.".into(),
+                        rest: "Its C code is built into your game and runs like any program on \
+                               this PC. Install it only if you trust its authors."
+                            .into(),
+                    }),
+                ))
+            })
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        secondary("install-cancel", "Cancel", 13., t).on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.model.confirm = None;
+                                this.set_overlay(None, cx)
+                            },
+                        )),
+                    )
+                    .child(primary("install-confirm", "Install", t).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.install_pack(cx)),
+                    )),
+            )
+            .into_any_element()
+    }
 }
 
 fn ready_text(patches: usize) -> String {
@@ -2070,6 +2422,7 @@ impl Render for Builder {
             let dialog = match overlay {
                 Overlay::Settings => self.settings_dialog(cx, &t).into_any_element(),
                 Overlay::About => self.about_dialog(cx, &t).into_any_element(),
+                Overlay::Install => self.install_dialog(cx, &t),
             };
             div()
                 .id("scrim")

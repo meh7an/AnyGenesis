@@ -1,5 +1,5 @@
-//! SHA-256 (FIPS 180-4), to check a downloaded archive against its pinned digest without a
-//! hashing crate.
+//! SHA-256 (FIPS 180-4), to check downloads against their pinned digests without a hashing
+//! crate: the toolchain archive in xtask and the Marketplace's pack files.
 
 /// The first 32 bits of the fractional parts of the cube roots of the first 64 primes.
 const ROUND_CONSTANTS: [u32; 64] = [
@@ -19,7 +19,7 @@ const INITIAL_STATE: [u32; 8] = [
 ];
 
 /// The SHA-256 digest of `bytes` in lowercase hex.
-pub(crate) fn hex_digest(bytes: &[u8]) -> String {
+pub fn hex_digest(bytes: &[u8]) -> String {
     let mut state = INITIAL_STATE;
     let mut padded = bytes.to_vec();
     padded.push(0x80);

@@ -9,3 +9,4 @@ anygenesis-patch = { version = "0.1.0", path = "../patch" }
 anygenesis-rom = { version = "0.1.0", path = "../rom" }
 anyhow = "1.0.104"
 gpui-kit = "=0.8.1"
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
