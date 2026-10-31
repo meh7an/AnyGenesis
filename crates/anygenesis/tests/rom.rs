@@ -1,9 +1,9 @@
 //! The game exe anygenesis builds from the ROM `ANYGENESIS_ROM` names: any ROM must build
 //! into one exe with warnings as errors; Sonic 1 REV00's exe is also run from a folder of
-//! its own with no ROM in it. Ignored: needs `ANYGENESIS_ROM` and the player library next to
-//! anygenesis, built in the same profile (`cargo build -p anygenesis-player-lib`,
-//! `--release` for a release run). The build goes to a cache folder under the system temp
-//! folder, not the per-user one, and is made once for all the tests here.
+//! its own with no ROM in it. Ignored: needs `ANYGENESIS_ROM` and `ANYGENESIS_TOOLCHAIN`
+//! naming a toolchain folder (`cargo xtask toolchain` writes one under target/bundle/). The
+//! build goes to a cache folder under the system temp folder, not the per-user one, and is
+//! made once for all the tests here.
 
 use std::{
     env, fs,
@@ -102,7 +102,7 @@ fn run_game(arguments: &[&str]) -> Output {
 }
 
 #[test]
-#[ignore = "needs ANYGENESIS_ROM pointing at a ROM image and the player library"]
+#[ignore = "needs ANYGENESIS_ROM pointing at a ROM image and ANYGENESIS_TOOLCHAIN"]
 fn test_any_rom_builds_into_a_lone_game_exe() {
     let exe = game_exe();
     let size = fs::metadata(&exe).expect("the exe has metadata").len();
@@ -111,7 +111,7 @@ fn test_any_rom_builds_into_a_lone_game_exe() {
 }
 
 #[test]
-#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and the player library"]
+#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and ANYGENESIS_TOOLCHAIN"]
 fn test_sonic1_game_exe_runs_600_frames_alone_as_signed_off() {
     let output = run_game(&["600", "--dump", "240,600"]);
     let stdout = text(&output.stdout);
@@ -139,7 +139,7 @@ fn test_sonic1_game_exe_runs_600_frames_alone_as_signed_off() {
 }
 
 #[test]
-#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and the player library"]
+#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and ANYGENESIS_TOOLCHAIN"]
 fn test_sonic1_game_exe_refuses_a_rom_file() {
     let rom = rom_path();
     let output = run_game(&[rom.to_str().expect("a UTF-8 ROM path")]);
@@ -149,7 +149,7 @@ fn test_sonic1_game_exe_refuses_a_rom_file() {
 }
 
 #[test]
-#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and the player library"]
+#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and ANYGENESIS_TOOLCHAIN"]
 fn test_sonic1_game_exe_replays_input_into_the_level() {
     // The build starts the test folder afresh, so it comes before anything is written there.
     game_folder();
@@ -254,7 +254,7 @@ fn run_600(exe: &Path, folder: &Path) -> (String, Vec<Vec<u8>>) {
 }
 
 #[test]
-#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and the player library"]
+#[ignore = "needs ANYGENESIS_ROM set to Sonic 1 REV00 and ANYGENESIS_TOOLCHAIN"]
 fn test_sonic1_with_an_empty_hook_at_reset_runs_as_the_plain_exe() {
     // The plain build first: it starts the test folder afresh.
     let plain = game_exe();

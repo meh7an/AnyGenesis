@@ -1,7 +1,7 @@
 //! Builds a game program from a ROM in its cache entry: discover its code (with a profile
 //! run at the furthest stage), translate with the code patches placed, write the C (the
-//! patch packs' own C beside it), compile it on every core, link it with the player library
-//! into one native program.
+//! patch packs' own C beside it), compile it with Zig on every core, link it with the player
+//! library into one native program.
 
 use std::{
     collections::BTreeMap,
@@ -38,9 +38,9 @@ pub fn program(entry: &Entry) -> PathBuf {
     entry.folder.join(format!("game{EXE_SUFFIX}"))
 }
 
-/// Builds the program for `rom` into `entry` with `toolchain`, discovering code as far as
-/// `discovery` goes, with the code patches `code`, and linking the player library at
-/// `player`, and marks the entry finished. Prints what each step took.
+/// Builds the program for `rom` into `entry` with `toolchain` and its player library,
+/// discovering code as far as `discovery` goes, with the code patches `code`, and marks the
+/// entry finished. Prints what each step took.
 ///
 /// # Errors
 /// The profile run, a code patch at an address no code holds, writing the files, a compile
@@ -49,12 +49,13 @@ pub fn build_program(
     rom: &Rom,
     entry: &Entry,
     toolchain: &Toolchain,
-    player: &Path,
     discovery: Discovery,
     code: &CodePatches,
 ) -> Result<()> {
     entry.invalidate()?;
     let (sources, objects) = (entry.folder.join("c"), entry.folder.join("obj"));
+    let scratch = entry.folder.join("zig-local");
+    remove_folder(&scratch)?;
     for folder in [&sources, &objects] {
         remove_folder(folder)?;
         fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
@@ -90,15 +91,16 @@ pub fn build_program(
     files.push(main);
     let written = started.elapsed();
     let jobs = compile_jobs(&files, &objects)?;
-    compile_all(toolchain, &jobs)?;
+    compile_all(toolchain, &jobs, &scratch)?;
     let compiled = started.elapsed();
     let objects: Vec<PathBuf> = jobs.into_iter().map(|job| job.object).collect();
     let exe = program(entry);
-    let mut link = toolchain.link(&objects, player, &exe, &entry.folder.join("link.rsp"))?;
+    let mut link = toolchain.link(&objects, &exe, &entry.folder.join("link.rsp"), &scratch)?;
     let output = link
         .output()
-        .with_context(|| format!("running {}", toolchain.compiler().display()))?;
+        .with_context(|| format!("running {}", toolchain.zig().display()))?;
     check(&output, "linking the game")?;
+    remove_folder(&scratch)?;
     let linked = started.elapsed();
     entry.finish()?;
     println!(
@@ -173,7 +175,7 @@ fn compile_jobs(sources: &[PathBuf], objects: &Path) -> Result<Vec<Job>> {
             .file_stem()
             .with_context(|| format!("{} has no file name", source.display()))?;
         let mut object = objects.join(stem);
-        object.set_extension(if cfg!(windows) { "obj" } else { "o" });
+        object.set_extension("o");
         let size = fs::metadata(source)
             .with_context(|| format!("reading {}", source.display()))?
             .len();
@@ -188,9 +190,9 @@ fn compile_jobs(sources: &[PathBuf], objects: &Path) -> Result<Vec<Job>> {
     Ok(jobs)
 }
 
-/// Compiles every job, one compiler process per core at a time; stops starting new ones
-/// after the first failure.
-fn compile_all(toolchain: &Toolchain, jobs: &[Job]) -> Result<()> {
+/// Compiles every job with Zig's local cache in `scratch`, one compiler process per core at a
+/// time; stops starting new ones after the first failure.
+fn compile_all(toolchain: &Toolchain, jobs: &[Job], scratch: &Path) -> Result<()> {
     let workers = thread::available_parallelism().map_or(1, |count| count.get());
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
@@ -203,9 +205,9 @@ fn compile_all(toolchain: &Toolchain, jobs: &[Job]) -> Result<()> {
                         break;
                     };
                     let result = toolchain
-                        .compile(&job.source, &job.object, job.stepped)
+                        .compile(&job.source, &job.object, job.stepped, scratch)
                         .output()
-                        .with_context(|| format!("running {}", toolchain.compiler().display()))
+                        .with_context(|| format!("running {}", toolchain.zig().display()))
                         .and_then(|output| {
                             check(&output, &format!("compiling {}", job.source.display()))
                         });

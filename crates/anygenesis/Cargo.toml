@@ -12,7 +12,6 @@ anygenesis-rom = { version = "0.1.0", path = "../rom" }
 anygenesis-runtime = { version = "0.1.0", path = "../runtime" }
 anygenesis-shared = { version = "0.1.0", path = "../shared" }
 anyhow = "1.0.104"
-cc = "1.10.0"
 
 [dev-dependencies]
 anygenesis-framediff = { path = "../framediff" }

@@ -3,8 +3,8 @@
 //! finds the code only the patches make reachable. A pack's code patches (M6.2), a C hook, a
 //! C replacement and RAM patches at reset and at VBlank, run in the built game, and so do
 //! the `widescreen` flag and a hook's `ag_set_view` (M6.3). The
-//! whole-program builds are ignored: they need the player library next to anygenesis, built
-//! in the same profile (`cargo build -p anygenesis-player-lib`).
+//! whole-program builds are ignored: they need `ANYGENESIS_TOOLCHAIN` naming a toolchain
+//! folder (`cargo xtask toolchain` writes one under target/bundle/).
 
 use std::{
     env, fs,
@@ -143,7 +143,7 @@ fn test_pack_result_checked_when_the_pack_is_alone() {
 }
 
 #[test]
-#[ignore = "needs the player library next to anygenesis"]
+#[ignore = "needs ANYGENESIS_TOOLCHAIN"]
 fn test_patched_synthetic_rom_builds_into_a_game_exe_of_its_own() {
     let folder = folder("build");
     let (rom_path, pack_path) = write_pack(&folder, None);
@@ -225,7 +225,7 @@ fn build_with(folder: &Path, rom_path: &Path, pack_path: &Path, out: &Path) -> (
 }
 
 #[test]
-#[ignore = "needs the player library next to anygenesis"]
+#[ignore = "needs ANYGENESIS_TOOLCHAIN"]
 fn test_code_patches_run_in_the_built_game() {
     let folder = folder("code");
     let (rom_path, pack_path) = write_code_pack(&folder, LOOP);
@@ -288,7 +288,7 @@ const VIEW_HOOK: &str = "uint32_t narrow_view(AgState *s, uint32_t pc)\n{\n    \
                          ag_set_view(s, 8u, 0u);\n    return pc;\n}\n";
 
 #[test]
-#[ignore = "needs the player library next to anygenesis"]
+#[ignore = "needs ANYGENESIS_TOOLCHAIN"]
 fn test_widescreen_flag_and_view_hook_shape_the_built_games_picture() {
     let folder = folder("widescreen");
     let mut code = WIDE_PROGRAM.to_vec();

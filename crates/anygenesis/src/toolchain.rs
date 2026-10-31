@@ -1,42 +1,62 @@
-//! The system C toolchain a game program is compiled and linked with: clang-cl and the
-//! MSVC linker from a Visual Studio installation on Windows, clang on PATH elsewhere.
-//! Generated code needs clang: cross-function jumps rely on `musttail`.
+//! The toolchain a game program is compiled and linked with: the pinned Zig (clang, lld and
+//! the C library for the target) and the prebuilt player library, in the toolchain folder
+//! next to anygenesis (`ANYGENESIS_TOOLCHAIN` names another) as `cargo xtask toolchain` lays
+//! it out: zig/, lib/ and toolchain.txt. Generated code needs clang: cross-function jumps
+//! rely on `musttail`.
 
 use std::{
+    env,
     ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use anyhow::{Context, Result, bail};
 
-/// The Rust target the player library is built for on Windows.
+/// Names the toolchain folder instead of the one next to anygenesis.
+const TOOLCHAIN_VAR: &str = "ANYGENESIS_TOOLCHAIN";
+
+/// The toolchain folder's name next to anygenesis.
+const TOOLCHAIN_FOLDER: &str = "toolchain";
+
+/// The file in the toolchain folder naming its Zig version and target.
+const MANIFEST: &str = "toolchain.txt";
+
+/// What games are built for, as Zig names it; the toolchain must be made for the same.
 #[cfg(windows)]
-const TARGET: &str = "x86_64-pc-windows-msvc";
+const TARGET: &str = "x86_64-windows-gnu";
+#[cfg(not(windows))]
+const TARGET: &str = "x86_64-linux-gnu.2.28";
+
+const ZIG_EXE: &str = if cfg!(windows) { "zig.exe" } else { "zig" };
+
+/// The player library's file name in the toolchain's lib/.
+const PLAYER_LIBRARY: &str = "libanygenesis_player_lib.a";
 
 /// The system libraries the player library needs, as rustc's `--print native-static-libs`
-/// lists them for it (SDL3, the Rust standard library); the C runtime comes from the
-/// library's own default-library directives.
+/// lists them for its target (SDL3, the Rust standard library); Zig brings every one.
 #[cfg(windows)]
-const SYSTEM_LIBRARIES: [&str; 18] = [
-    "kernel32.lib",
-    "user32.lib",
-    "gdi32.lib",
-    "winmm.lib",
-    "imm32.lib",
-    "ole32.lib",
-    "oleaut32.lib",
-    "version.lib",
-    "uuid.lib",
-    "advapi32.lib",
-    "setupapi.lib",
-    "shell32.lib",
-    "dinput8.lib",
-    "legacy_stdio_definitions.lib",
-    "ntdll.lib",
-    "userenv.lib",
-    "ws2_32.lib",
-    "dbghelp.lib",
+const SYSTEM_LIBRARIES: [&str; 19] = [
+    "-lm",
+    "-lkernel32",
+    "-luser32",
+    "-lgdi32",
+    "-lwinmm",
+    "-limm32",
+    "-lole32",
+    "-loleaut32",
+    "-lversion",
+    "-luuid",
+    "-ladvapi32",
+    "-lsetupapi",
+    "-lshell32",
+    "-ldinput8",
+    "-lntdll",
+    "-luserenv",
+    "-lws2_32",
+    "-ldbghelp",
+    "-lunwind",
 ];
 #[cfg(not(windows))]
 const SYSTEM_LIBRARIES: [&str; 7] = [
@@ -49,193 +69,227 @@ const SYSTEM_LIBRARIES: [&str; 7] = [
     "-lc",
 ];
 
-/// The file name of the player library next to anygenesis.
+/// The optimisation level of a file that is not stepped code, and the code generation flags
+/// besides it: on Linux the ones cc gives a release build.
 #[cfg(windows)]
-pub const PLAYER_LIBRARY: &str = "anygenesis_player_lib.lib";
+const RELEASE_FLAGS: [&str; 1] = ["-O2"];
 #[cfg(not(windows))]
-pub const PLAYER_LIBRARY: &str = "libanygenesis_player_lib.a";
+const RELEASE_FLAGS: [&str; 4] = ["-O3", "-ffunction-sections", "-fdata-sections", "-fPIC"];
 
 /// The file name extension of a native program.
-pub const EXE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
+pub const EXE_SUFFIX: &str = env::consts::EXE_SUFFIX;
 
-/// The C compiler, found once, with the environment it runs in.
+/// A checked toolchain folder.
 #[derive(Debug)]
 pub struct Toolchain {
-    compiler: PathBuf,
-    env: Vec<(OsString, OsString)>,
+    zig: PathBuf,
+    player: PathBuf,
+    /// The Zig version the folder names.
+    version: String,
+    /// Zig's global cache, shared by every build: the C library, compiler-rt and libunwind
+    /// it builds on the first link.
+    cache: PathBuf,
 }
 
 impl Toolchain {
-    /// Finds clang-cl in the Visual Studio installation (its "C++ Clang tools for Windows"
-    /// component).
+    /// The toolchain folder for the anygenesis at `tool`, with Zig's cache in `cache`.
     ///
     /// # Errors
-    /// Says what to install when there is none.
-    #[cfg(windows)]
-    pub fn find() -> Result<Self> {
-        let Some(tool) = cc::windows_registry::find_tool(TARGET, "clang-cl.exe") else {
-            bail!(
-                "clang-cl was not found: anygenesis compiles games with the clang-cl of a \
-                 Visual Studio installation; install Visual Studio (or its Build Tools) with \
-                 the \"C++ Clang tools for Windows\" component"
-            );
+    /// The folder is missing, incomplete or made for another target.
+    pub fn find(tool: &Path, cache: &Path) -> Result<Self> {
+        let folder = match env::var_os(TOOLCHAIN_VAR) {
+            Some(folder) => PathBuf::from(folder),
+            None => tool
+                .parent()
+                .context("anygenesis's program has no folder")?
+                .join(TOOLCHAIN_FOLDER),
         };
-        Ok(Self {
-            compiler: tool.path().to_owned(),
-            env: tool
-                .get_envs()
-                .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                .collect(),
+        Self::open(&folder, cache).with_context(|| {
+            format!(
+                "the toolchain folder {} is not usable: keep the whole {TOOLCHAIN_FOLDER} folder \
+                 that came with anygenesis next to it (or name one with {TOOLCHAIN_VAR})",
+                folder.display()
+            )
         })
     }
 
-    /// Finds clang on PATH.
-    ///
-    /// # Errors
-    /// Says what to install when there is none.
-    #[cfg(not(windows))]
-    pub fn find() -> Result<Self> {
-        let found = Command::new("clang")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success());
-        if !found {
-            bail!(
-                "clang was not found on PATH: anygenesis compiles games with clang; install \
-                 your distribution's clang package"
-            );
+    fn open(folder: &Path, cache: &Path) -> Result<Self> {
+        let manifest_path = folder.join(MANIFEST);
+        let manifest = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("reading {}", manifest_path.display()))?;
+        let field = |key: &str| {
+            manifest
+                .lines()
+                .find_map(|line| line.strip_prefix(key)?.strip_prefix(' '))
+                .with_context(|| format!("{} names no {key}", manifest_path.display()))
+        };
+        let target = field("target")?;
+        if target != TARGET {
+            bail!("it builds games for {target}, this anygenesis for {TARGET}");
         }
-        Ok(Self {
-            compiler: PathBuf::from("clang"),
-            env: Vec::new(),
-        })
+        let zig_folder = folder.join("zig");
+        let toolchain = Self {
+            zig: zig_folder.join(ZIG_EXE),
+            player: folder.join("lib").join(PLAYER_LIBRARY),
+            version: field("zig")?.to_owned(),
+            cache: cache.to_owned(),
+        };
+        // Zig finds its lib/ next to its program; a folder still being copied may lack it.
+        for needed in [
+            &toolchain.zig,
+            &toolchain.player,
+            &zig_folder.join("lib").join("std"),
+        ] {
+            if !needed.exists() {
+                bail!("{} is missing", needed.display());
+            }
+        }
+        Ok(toolchain)
     }
 
-    /// Where the compiler is.
-    pub fn compiler(&self) -> &Path {
-        &self.compiler
+    /// Where Zig is.
+    pub fn zig(&self) -> &Path {
+        &self.zig
     }
 
-    fn command(&self) -> Command {
-        let mut command = Command::new(&self.compiler);
-        command.envs(self.env.iter().map(|(key, value)| (key, value)));
+    /// Where the player library is.
+    pub fn player(&self) -> &Path {
+        &self.player
+    }
+
+    /// The Zig version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// `zig cc` for the target. Zig keeps a copy of every object it compiles in its local
+    /// cache, `scratch`, which a build removes when done; the global one is the user's.
+    fn cc(&self, scratch: &Path) -> Command {
+        let mut command = Command::new(&self.zig);
+        command
+            .args(["cc", "-target", TARGET])
+            .env("ZIG_GLOBAL_CACHE_DIR", &self.cache)
+            .env("ZIG_LOCAL_CACHE_DIR", scratch);
         command
     }
 
-    /// Compiles `source` into `object` with the flags cc gives a game build: C11, warnings
-    /// as errors, the DLL C runtime on Windows, and at the size-oriented level for a stepped
-    /// file (/O1 on Windows, -O1 elsewhere) or the release level otherwise.
-    #[cfg(windows)]
-    pub fn compile(&self, source: &Path, object: &Path, stepped: bool) -> Command {
-        let mut command = self.command();
+    /// Compiles `source` into `object` with Zig's local cache in `scratch`: C11, warnings as
+    /// errors, no debug information (Zig emits it by default; it doubles the compile time and
+    /// the link strips it), and at the size-oriented level for a stepped file (`-Os`: `zig cc`
+    /// reads `-O1` as `-O2`) or the release level otherwise.
+    pub fn compile(&self, source: &Path, object: &Path, stepped: bool, scratch: &Path) -> Command {
+        let mut command = self.cc(scratch);
+        if stepped {
+            command.arg("-Os");
+        } else {
+            command.args(RELEASE_FLAGS);
+        }
         command
-            .args(["-nologo", "-MD", if stepped { "-O1" } else { "-O2" }])
-            .args(["-Brepro", &format!("--target={TARGET}")])
-            .args(["-std:c11", "-W4", "-WX", "-c"])
-            .arg(source)
-            .arg(prefixed("-Fo", object));
-        command
-    }
-
-    /// Compiles `source` into `object`; see the Windows version.
-    #[cfg(not(windows))]
-    pub fn compile(&self, source: &Path, object: &Path, stepped: bool) -> Command {
-        let mut command = self.command();
-        command
-            .arg(if stepped { "-O1" } else { "-O3" })
-            .args(["-ffunction-sections", "-fdata-sections", "-fPIC", "-m64"])
-            .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-c"])
+            .args(["-g0", "-std=c11", "-Wall", "-Wextra", "-Werror", "-c"])
             .arg(source)
             .arg("-o")
             .arg(object);
         command
     }
 
-    /// Links `objects` with the player library `player` into the stripped program `exe`,
-    /// through the response file `arguments` (the object list outgrows Windows' command
-    /// line), with the MSVC linker and without debug information.
-    #[cfg(windows)]
+    /// Links `objects` with the player library into the stripped program `exe`, through the
+    /// response file `arguments` (the object list outgrows Windows' command line), with Zig's
+    /// local cache in `scratch`.
+    ///
+    /// # Errors
+    /// Writing the response file.
     pub fn link(
         &self,
         objects: &[PathBuf],
-        player: &Path,
         exe: &Path,
         arguments: &Path,
-    ) -> Result<Command> {
-        let mut lines: Vec<String> = vec!["-nologo".to_owned(), "-fuse-ld=link".to_owned()];
-        lines.extend(objects.iter().map(|object| quoted(object)));
-        lines.push(quoted(player));
-        lines.extend(SYSTEM_LIBRARIES.iter().map(|library| (*library).to_owned()));
-        lines.push(format!("-Fe{}", quoted(exe)));
-        lines.extend(["-link", "-subsystem:console"].map(str::to_owned));
-        write_arguments(arguments, &lines)?;
-        let mut command = self.command();
-        command.arg(prefixed("@", arguments));
-        Ok(command)
-    }
-
-    /// Links `objects` with `player` into the stripped program `exe`; see the Windows
-    /// version.
-    #[cfg(not(windows))]
-    pub fn link(
-        &self,
-        objects: &[PathBuf],
-        player: &Path,
-        exe: &Path,
-        arguments: &Path,
+        scratch: &Path,
     ) -> Result<Command> {
         let mut lines: Vec<String> = vec!["-s".to_owned(), "-o".to_owned(), quoted(exe)];
         lines.extend(objects.iter().map(|object| quoted(object)));
-        lines.push(quoted(player));
+        lines.push(quoted(&self.player));
         lines.extend(SYSTEM_LIBRARIES.iter().map(|library| (*library).to_owned()));
-        write_arguments(arguments, &lines)?;
-        let mut command = self.command();
-        command.arg(prefixed("@", arguments));
+        fs::write(arguments, lines.join("\n") + "\n")
+            .with_context(|| format!("writing {}", arguments.display()))?;
+        let mut command = self.cc(scratch);
+        let mut argument = OsString::from("@");
+        argument.push(arguments);
+        command.arg(argument);
         Ok(command)
     }
 }
 
-/// `prefix` followed by `path`, as one argument.
-fn prefixed(prefix: &str, path: &Path) -> OsString {
-    let mut argument = OsString::from(prefix);
-    argument.push(path);
-    argument
-}
-
-/// `path` in double quotes for a clang response file, which reads backslashes literally
-/// except before a quote; paths hold no quotes.
+/// `path` in double quotes for a response file, with forward slashes: Windows takes them, and
+/// a backslash may escape the next character there.
 fn quoted(path: &Path) -> String {
-    format!("\"{}\"", path.display())
-}
-
-fn write_arguments(path: &Path, lines: &[String]) -> Result<()> {
-    std::fs::write(path, lines.join("\n") + "\n")
-        .with_context(|| format!("writing {}", path.display()))
+    format!("\"{}\"", path.display().to_string().replace('\\', "/"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn folder(name: &str) -> PathBuf {
+        let folder = env::temp_dir().join(format!(
+            "anygenesis-toolchain-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&folder);
+        folder
+    }
+
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().expect("a parent")).expect("the folder is created");
+        fs::write(path, text).expect("written");
+    }
+
     #[test]
-    fn test_quoted_wraps_paths_with_spaces_in_one_argument() {
+    fn test_quoted_wraps_paths_with_spaces_in_one_argument_with_forward_slashes() {
         assert_eq!(quoted(Path::new("a b/c.o")), "\"a b/c.o\"");
+        assert_eq!(quoted(Path::new(r"C:\a b\c.o")), "\"C:/a b/c.o\"");
+    }
+
+    #[test]
+    fn test_open_complete_folder_reads_version_and_missing_parts_fail() {
+        let root = folder("open");
+        write(
+            &root.join(MANIFEST),
+            &format!("zig 0.17.0\nzig-sha256 00\ntarget {TARGET}\nplayer abc\n"),
+        );
+        assert!(Toolchain::open(&root, &root).is_err(), "no Zig yet");
+        write(&root.join("zig").join(ZIG_EXE), "");
+        write(&root.join("lib").join(PLAYER_LIBRARY), "");
+        assert!(Toolchain::open(&root, &root).is_err(), "no lib/std yet");
+        fs::create_dir_all(root.join("zig").join("lib").join("std")).expect("created");
+        let toolchain = Toolchain::open(&root, &root).expect("complete");
+        assert_eq!(toolchain.version(), "0.17.0");
+
+        write(&root.join(MANIFEST), "zig 0.17.0\ntarget wasm32-wasi\n");
+        assert!(Toolchain::open(&root, &root).is_err(), "another target");
+        fs::remove_dir_all(&root).expect("the test folder is removed");
     }
 
     #[test]
     fn test_compile_puts_stepped_files_at_the_size_level() {
         let toolchain = Toolchain {
-            compiler: PathBuf::from("clang"),
-            env: Vec::new(),
+            zig: PathBuf::from("zig"),
+            player: PathBuf::from(PLAYER_LIBRARY),
+            version: "0.17.0".to_owned(),
+            cache: PathBuf::from("cache"),
         };
         let arguments = |stepped| -> Vec<String> {
             toolchain
-                .compile(Path::new("ag_s000.c"), Path::new("ag_s000.o"), stepped)
+                .compile(
+                    Path::new("ag_s000.c"),
+                    Path::new("ag_s000.o"),
+                    stepped,
+                    Path::new("scratch"),
+                )
                 .get_args()
                 .map(|argument| argument.to_string_lossy().into_owned())
                 .collect()
         };
-        assert!(arguments(true).iter().any(|argument| argument == "-O1"));
-        assert!(!arguments(false).iter().any(|argument| argument == "-O1"));
+        assert_eq!(arguments(true)[..4], ["cc", "-target", TARGET, "-Os"]);
+        assert_eq!(arguments(false)[3], RELEASE_FLAGS[0]);
     }
 }

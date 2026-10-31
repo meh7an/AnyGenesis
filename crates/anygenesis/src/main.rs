@@ -1,17 +1,17 @@
 //! anygenesis: turns a Genesis ROM into a native game program on this machine.
 //!
-//! `anygenesis <rom> --out <folder>` translates the ROM, compiles the C with the system
-//! clang and links it with the player library into one self-contained program, the whole ROM
-//! image embedded, named after the ROM file, in that folder. `anygenesis <rom> [<options>]`
-//! builds the same program into the per-user cache and runs it with the game's options (see
+//! `anygenesis <rom> --out <folder>` translates the ROM, compiles the C with the bundled Zig
+//! and links it with the player library into one self-contained program, the whole ROM image
+//! embedded, named after the ROM file, in that folder. `anygenesis <rom> [<options>]` builds
+//! the same program into the per-user cache and runs it with the game's options (see
 //! anygenesis-player); a cached build is reused while the ROM, anygenesis, the player
-//! library, the discovery stage and the patch packs' code patches stay the same. Before translating, the build runs the game
-//! headless on the interpreter (`--discovery profile`, the default) so the code it runs
-//! becomes optimised functions; `--discovery static` or `vectors` stops earlier.
-//! anygenesis itself holds no game: the player library sits next to it
-//! (`ANYGENESIS_PLAYER` names another), built on its own with `cargo build --release -p
-//! anygenesis-player-lib`, since building it with anygenesis would give it anygenesis's
-//! interpreter. Built games are for the user who built them: never distribute one.
+//! library, the Zig version, the discovery stage and the patch packs' code patches stay the
+//! same. Before translating, the build runs the game headless on the interpreter
+//! (`--discovery profile`, the default) so the code it runs becomes optimised functions;
+//! `--discovery static` or `vectors` stops earlier. anygenesis itself holds no game: Zig and
+//! the player library are in the toolchain folder next to it (`ANYGENESIS_TOOLCHAIN` names
+//! another), which `cargo xtask toolchain` builds, so nothing else needs installing. Built
+//! games are for the user who built them: never distribute one.
 
 mod builder;
 mod cache;
@@ -34,7 +34,7 @@ use anyhow::{Context, Result, bail};
 use crate::{
     cache::Entry,
     profile::Discovery,
-    toolchain::{EXE_SUFFIX, PLAYER_LIBRARY, Toolchain},
+    toolchain::{EXE_SUFFIX, Toolchain},
 };
 
 const USAGE: &str = "usage:
@@ -50,9 +50,6 @@ const USAGE: &str = "usage:
                                     (.toml, which may also carry C hooks, RAM patches and
                                     flags) or an IPS, UPS or BPS file; repeat it to apply
                                     several in order";
-
-/// Names the player library instead of the one next to anygenesis.
-const PLAYER_VAR: &str = "ANYGENESIS_PLAYER";
 
 fn main() -> Result<ExitCode> {
     let mut arguments = env::args_os().skip(1);
@@ -179,12 +176,14 @@ fn patched(rom: Rom, patches: &[Patch]) -> Result<Rom> {
 /// patches `code`, built first unless a current build is there.
 fn cached_program(rom: &Rom, discovery: Discovery, code: &CodePatches) -> Result<PathBuf> {
     let tool = env::current_exe().context("finding anygenesis's own program")?;
-    let player = player_library(&tool)?;
+    let root = cache::root()?;
+    let toolchain = Toolchain::find(&tool, &cache::zig_folder(&root))?;
     let entry = Entry::new(
-        &cache::root()?,
+        &root,
         rom.sha1(),
         &tool,
-        &player,
+        toolchain.player(),
+        toolchain.version(),
         discovery.name(),
         (!code.is_empty()).then(|| code.hash()),
     )?;
@@ -197,37 +196,16 @@ fn cached_program(rom: &Rom, discovery: Discovery, code: &CodePatches) -> Result
         );
         return Ok(program);
     }
-    let toolchain = Toolchain::find()?;
     println!(
-        "{} (SHA-1 {}): building in {} with {}",
+        "{} (SHA-1 {}): building in {} with Zig {}",
         rom.title(),
         rom.sha1(),
         entry.folder.display(),
-        toolchain.compiler().display()
+        toolchain.version()
     );
-    builder::build_program(rom, &entry, &toolchain, &player, discovery, code)
+    builder::build_program(rom, &entry, &toolchain, discovery, code)
         .with_context(|| format!("building {} (SHA-1 {})", rom.title(), rom.sha1()))?;
     Ok(program)
-}
-
-/// The player library: `ANYGENESIS_PLAYER`, else the one next to anygenesis at `tool`.
-fn player_library(tool: &Path) -> Result<PathBuf> {
-    let path = match env::var_os(PLAYER_VAR) {
-        Some(path) => PathBuf::from(path),
-        None => tool
-            .parent()
-            .context("anygenesis's program has no folder")?
-            .join(PLAYER_LIBRARY),
-    };
-    if !path.is_file() {
-        bail!(
-            "the player library {} is missing: build it next to anygenesis with `cargo build \
-             --release -p anygenesis-player-lib` on its own (built together with anygenesis it \
-             gets the interpreter), or name one with {PLAYER_VAR}",
-            path.display()
-        );
-    }
-    Ok(path)
 }
 
 /// The game program's file name: the ROM file's stem, each patch's name after it in
