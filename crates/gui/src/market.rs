@@ -44,10 +44,12 @@ impl Github {
             .get(url)
             .call()
             .map_err(|error| error.to_string())?;
+        // ureq fails a body of exactly its limit (the read that would see the end finds no
+        // room left), so allow one byte more; the install refuses any size but the index's.
         response
             .body_mut()
             .with_config()
-            .limit(limit)
+            .limit(limit.saturating_add(1))
             .read_to_vec()
             .map_err(|error| error.to_string())
     }
