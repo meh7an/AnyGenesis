@@ -9,6 +9,7 @@ members = [
     "crates/framediff",
     "crates/frontend",
     "crates/game",
+    "crates/gui",
     "crates/ir",
     "crates/m68k",
     "crates/oracle",

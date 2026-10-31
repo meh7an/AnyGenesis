@@ -1,0 +1,11 @@
+[package]
+name = "anygenesis-gui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anygenesis-patch = { version = "0.1.0", path = "../patch" }
+anygenesis-rom = { version = "0.1.0", path = "../rom" }
+anyhow = "1.0.104"
+gpui-kit = "=0.8.1"

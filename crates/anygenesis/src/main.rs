@@ -11,11 +11,13 @@
 //! `--discovery static` or `vectors` stops earlier. anygenesis itself holds no game: Zig and
 //! the player library are in the toolchain folder next to it (`ANYGENESIS_TOOLCHAIN` names
 //! another), which `cargo xtask toolchain` builds, so nothing else needs installing. Built
-//! games are for the user who built them: never distribute one.
+//! games are for the user who built them: never distribute one. `--progress` adds
+//! machine-readable progress lines for anygenesis-gui (see `progress`).
 
 mod builder;
 mod cache;
 mod profile;
+mod progress;
 mod toolchain;
 
 use std::{
@@ -34,6 +36,7 @@ use anyhow::{Context, Result, bail};
 use crate::{
     cache::Entry,
     profile::Discovery,
+    progress::Phase,
     toolchain::{EXE_SUFFIX, Toolchain},
 };
 
@@ -49,15 +52,23 @@ const USAGE: &str = "usage:
                                     either one, with the ROM patched first by a patch pack
                                     (.toml, which may also carry C hooks, RAM patches and
                                     flags) or an IPS, UPS or BPS file; repeat it to apply
-                                    several in order";
+                                    several in order
+  anygenesis <rom> --progress ...   either one, with machine-readable progress lines";
 
 fn main() -> Result<ExitCode> {
+    run().inspect_err(progress::error)
+}
+
+fn run() -> Result<ExitCode> {
     let mut arguments = env::args_os().skip(1);
     let Some(rom_path) = arguments.next().filter(|argument| argument != "--out") else {
         bail!(USAGE);
     };
     let mut options: Vec<OsString> = arguments.collect();
     let build_options = take_build_options(&mut options)?;
+    if build_options.progress {
+        progress::enable();
+    }
     let out = match options.first() {
         Some(flag) if flag == "--out" => match &options[1..] {
             [folder] => Some(PathBuf::from(folder)),
@@ -67,6 +78,7 @@ fn main() -> Result<ExitCode> {
         _ => None,
     };
     let rom_path = PathBuf::from(rom_path);
+    progress::phase(Phase::Read);
     let patches = build_options
         .patches
         .iter()
@@ -96,6 +108,7 @@ fn main() -> Result<ExitCode> {
                 .with_context(|| format!("creating {}", folder.display()))?;
             fs::copy(&program, &exe).with_context(|| format!("writing {}", exe.display()))?;
             println!("{} written to {}", rom.title(), exe.display());
+            progress::done(exe.display());
             Ok(ExitCode::SUCCESS)
         }
         None => {
@@ -118,14 +131,22 @@ struct BuildOptions {
     discovery: Discovery,
     /// The patches to apply to the ROM first, in order.
     patches: Vec<PathBuf>,
+    /// Whether to print the progress lines.
+    progress: bool,
 }
 
 /// Takes `--discovery <stage>` (once at most, the default stage without it) and `--patch
-/// <file>` (any number of times) from the front of `options`, in any order.
+/// <file>` (any number of times) and `--progress` from the front of `options`, in any order.
 fn take_build_options(options: &mut Vec<OsString>) -> Result<BuildOptions> {
     let mut discovery = None;
     let mut patches = Vec::new();
+    let mut progress = false;
     loop {
+        if options.first().is_some_and(|option| option == "--progress") {
+            progress = true;
+            options.remove(0);
+            continue;
+        }
         match (
             options.first().and_then(|option| option.to_str()),
             options.get(1),
@@ -145,6 +166,7 @@ fn take_build_options(options: &mut Vec<OsString>) -> Result<BuildOptions> {
     Ok(BuildOptions {
         discovery: discovery.unwrap_or_default(),
         patches,
+        progress,
     })
 }
 
@@ -153,6 +175,7 @@ fn patched(rom: Rom, patches: &[Patch]) -> Result<Rom> {
     if patches.is_empty() {
         return Ok(rom);
     }
+    progress::phase(Phase::Patch);
     let names: Vec<&str> = patches.iter().map(Patch::name).collect();
     let patched = anygenesis_patch::apply(&rom, patches).with_context(|| {
         format!(
@@ -274,6 +297,7 @@ mod tests {
         let build = take_build_options(&mut taken).expect("a stage");
         assert_eq!(build.discovery, Discovery::Static);
         assert_eq!(build.patches, Vec::<PathBuf>::new());
+        assert!(!build.progress);
         assert_eq!(taken, ["--out", "folder"]);
         let mut taken = options(&["600", "--patch", "a.ips"]);
         let build = take_build_options(&mut taken).expect("the default");
@@ -302,6 +326,11 @@ mod tests {
             build.patches,
             [PathBuf::from("a.toml"), PathBuf::from("b.bps")]
         );
+        assert_eq!(taken, ["--out", "x"]);
+        let mut taken = options(&["--progress", "--patch", "a.ips", "--progress", "--out", "x"]);
+        let build = take_build_options(&mut taken).expect("options");
+        assert!(build.progress);
+        assert_eq!(build.patches, [PathBuf::from("a.ips")]);
         assert_eq!(taken, ["--out", "x"]);
         for bad in [
             &["--patch"][..],

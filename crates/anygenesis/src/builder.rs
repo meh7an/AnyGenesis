@@ -25,6 +25,7 @@ use anyhow::{Context, Result, bail};
 use crate::{
     cache::Entry,
     profile::{self, Discovery},
+    progress::{self, Phase},
     toolchain::{EXE_SUFFIX, Toolchain},
 };
 
@@ -61,6 +62,7 @@ pub fn build_program(
         fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
     }
     let started = Instant::now();
+    progress::phase(Phase::Profile);
     let analysis = profile::analyze(rom, discovery, &entry.folder)?;
     let analysed = started.elapsed();
     let patches: BTreeMap<Address, build::CodePatch> = code
@@ -74,6 +76,7 @@ pub fn build_program(
             (Address::new(patch.address), placed)
         })
         .collect();
+    progress::phase(Phase::Translate);
     let (liveness, options) = build::patched_game(patches);
     let translation = build::translate_analysis(rom, analysis, liveness, &options);
     if let Some(address) = translation.output.unplaced_patches.first() {
@@ -95,6 +98,7 @@ pub fn build_program(
     let compiled = started.elapsed();
     let objects: Vec<PathBuf> = jobs.into_iter().map(|job| job.object).collect();
     let exe = program(entry);
+    progress::phase(Phase::Link);
     let mut link = toolchain.link(&objects, &exe, &entry.folder.join("link.rsp"), &scratch)?;
     let output = link
         .output()
@@ -195,6 +199,8 @@ fn compile_jobs(sources: &[PathBuf], objects: &Path) -> Result<Vec<Job>> {
 fn compile_all(toolchain: &Toolchain, jobs: &[Job], scratch: &Path) -> Result<()> {
     let workers = thread::available_parallelism().map_or(1, |count| count.get());
     let next = AtomicUsize::new(0);
+    let finished = AtomicUsize::new(0);
+    progress::compiled(0, jobs.len());
     let failed = AtomicBool::new(false);
     let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
     thread::scope(|scope| {
@@ -211,12 +217,18 @@ fn compile_all(toolchain: &Toolchain, jobs: &[Job], scratch: &Path) -> Result<()
                         .and_then(|output| {
                             check(&output, &format!("compiling {}", job.source.display()))
                         });
-                    if let Err(error) = result {
-                        failed.store(true, Ordering::Relaxed);
-                        failure
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .get_or_insert(error);
+                    match result {
+                        Ok(()) => {
+                            let done = finished.fetch_add(1, Ordering::Relaxed) + 1;
+                            progress::compiled(done, jobs.len());
+                        }
+                        Err(error) => {
+                            failed.store(true, Ordering::Relaxed);
+                            failure
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .get_or_insert(error);
+                        }
                     }
                 }
             });
