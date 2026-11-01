@@ -62,7 +62,8 @@ Never put ROMs, ROM-derived files, built games, caches or dumps into a release f
 >
 > - Windows 10 or 11 (x64): run `AnyGenesis-<version>-windows-x64-setup.exe`. No
 >   administrator rights needed.
-> - Linux x86_64 (glibc 2.28 or newer): make `AnyGenesis-<version>-x86_64.AppImage`
+> - Linux x86_64 (glibc 2.28 or newer, a Vulkan driver, libxkbcommon-x11, and
+>   xdg-desktop-portal for file dialogs): make `AnyGenesis-<version>-x86_64.AppImage`
 >   executable and run it.
 >
 > The programs are not code-signed yet. If Windows shows "Windows protected your PC",

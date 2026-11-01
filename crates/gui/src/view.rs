@@ -10,10 +10,10 @@ use std::{
 };
 
 use gpui_kit::{
-    Animation, AnimationExt, AppContext, ClickEvent, ClipboardItem, Context, Decorations, Div,
-    ElementId, ExternalPaths, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, PathPromptOptions, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, StyledText, Svg, Window, WindowAppearance,
+    Animation, AnimationExt, AppContext, AsyncApp, ClickEvent, ClipboardItem, Context, Decorations,
+    Div, ElementId, ExternalPaths, FontWeight, HighlightStyle, Hsla, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, PathPromptOptions, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, StyledText, Svg, WeakEntity, Window, WindowAppearance,
     WindowControlArea, canvas, div, ease_out_quint, fill, img, point, prelude::FluentBuilder, px,
     size, svg,
 };
@@ -36,6 +36,10 @@ const MONO: &str = "IBM Plex Mono";
 /// Window width from which the Patches tab shows both panes.
 const TWO_PANES: f32 = 1040.0;
 const POLL: Duration = Duration::from_millis(50);
+const NO_FILE_PICKER_TEXT: &str = "Drag the file onto this window instead. On Linux, file \
+                                   dialogs come from xdg-desktop-portal with a backend such as \
+                                   xdg-desktop-portal-gtk; installing them brings the buttons \
+                                   back.";
 
 pub struct Builder {
     model: Model,
@@ -264,9 +268,7 @@ impl Builder {
             prompt: Some("Pick a ROM file".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = paths.await
-                && let Some(path) = paths.pop()
-            {
+            if let Some(path) = picked(paths.await, &this, cx).and_then(|mut paths| paths.pop()) {
                 let _ = this.update(cx, |this, cx| this.load_rom(path, cx));
             }
         })
@@ -281,7 +283,7 @@ impl Builder {
             prompt: Some("Add patch".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await {
+            if let Some(paths) = picked(paths.await, &this, cx) {
                 let _ = this.update(cx, |this, cx| {
                     for path in &paths {
                         this.model.add_patch(path);
@@ -301,9 +303,7 @@ impl Builder {
             prompt: Some("Choose".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = paths.await
-                && let Some(path) = paths.pop()
-            {
+            if let Some(path) = picked(paths.await, &this, cx).and_then(|mut paths| paths.pop()) {
                 let _ = this.update(cx, |this, cx| {
                     this.model.settings.games = Some(path);
                     this.model.settings.save();
@@ -2354,6 +2354,48 @@ impl Builder {
             )
             .into_any_element()
     }
+
+    fn no_file_picker_dialog(&mut self, cx: &mut Context<Self>, t: &Theme) -> gpui_kit::AnyElement {
+        dialog(t, 420.)
+            .gap(px(12.))
+            .p(px(24.))
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("No file dialog on this system"),
+            )
+            .child(
+                div()
+                    .text_color(t.text2)
+                    .line_height(px(13. * 1.5))
+                    .child(NO_FILE_PICKER_TEXT),
+            )
+            .child(div().flex().justify_end().child(
+                primary("no-file-picker-close", "OK", t).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.set_overlay(None, cx)),
+                ),
+            ))
+            .into_any_element()
+    }
+}
+
+/// The paths a file dialog returned, or `None` when the user cancelled it or the system has
+/// no file dialog (on Linux, no xdg-desktop-portal), which then shows the dialog saying so.
+fn picked<E>(
+    result: Result<anyhow::Result<Option<Vec<PathBuf>>>, E>,
+    this: &WeakEntity<Builder>,
+    cx: &mut AsyncApp,
+) -> Option<Vec<PathBuf>> {
+    match result {
+        Ok(Ok(paths)) => paths,
+        _ => {
+            let _ = this.update(cx, |this, cx| {
+                this.set_overlay(Some(Overlay::NoFilePicker), cx)
+            });
+            None
+        }
+    }
 }
 
 fn ready_text(patches: usize) -> String {
@@ -2430,6 +2472,7 @@ impl Render for Builder {
                 Overlay::Settings => self.settings_dialog(cx, &t).into_any_element(),
                 Overlay::About => self.about_dialog(cx, &t).into_any_element(),
                 Overlay::Install => self.install_dialog(cx, &t),
+                Overlay::NoFilePicker => self.no_file_picker_dialog(cx, &t),
             };
             div()
                 .id("scrim")

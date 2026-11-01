@@ -135,6 +135,8 @@ pub enum Overlay {
     About,
     /// The install confirmation for [`Model::confirm`].
     Install,
+    /// The system offered no file dialog (on Linux, no xdg-desktop-portal).
+    NoFilePicker,
 }
 
 /// The Build step's state.
