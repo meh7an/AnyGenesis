@@ -1,10 +1,10 @@
 [package]
 name = "xtask"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 publish = false
 
 [dependencies]
-anygenesis-patch = { version = "0.1.0", path = "../crates/patch" }
-anygenesis-shared = { version = "0.1.0", path = "../crates/shared" }
+anygenesis-patch = { version = "0.2.0", path = "../crates/patch" }
+anygenesis-shared = { version = "0.2.0", path = "../crates/shared" }
 anyhow = "1.0.104"

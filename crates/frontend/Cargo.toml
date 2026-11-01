@@ -1,13 +1,13 @@
 [package]
 name = "anygenesis-frontend"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 publish = false
 
 [dependencies]
-anygenesis-psg = { version = "0.1.0", path = "../psg" }
-anygenesis-runtime = { version = "0.1.0", path = "../runtime", default-features = false }
-anygenesis-ym2612 = { version = "0.1.0", path = "../ym2612" }
+anygenesis-psg = { version = "0.2.0", path = "../psg" }
+anygenesis-runtime = { version = "0.2.0", path = "../runtime", default-features = false }
+anygenesis-ym2612 = { version = "0.2.0", path = "../ym2612" }
 sdl3 = { version = "0.20.0", features = ["build-from-source-static"] }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"

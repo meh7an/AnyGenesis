@@ -183,7 +183,7 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "anygenesis"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-analysis",
  "anygenesis-framediff",
@@ -193,15 +193,16 @@ dependencies = [
  "anygenesis-runtime",
  "anygenesis-shared",
  "anyhow",
+ "embed-resource",
 ]
 
 [[package]]
 name = "anygenesis-abi"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "anygenesis-analysis"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-ir",
  "anygenesis-m68k",
@@ -212,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-c-oracle"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-abi",
  "anygenesis-analysis",
@@ -227,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-codegen-c"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-abi",
  "anygenesis-analysis",
@@ -240,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-framediff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-rom",
  "anyhow",
@@ -251,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-frontend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-psg",
  "anygenesis-runtime",
@@ -264,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-game"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-abi",
  "anygenesis-framediff",
@@ -278,18 +279,19 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-patch",
  "anygenesis-rom",
  "anyhow",
+ "embed-resource",
  "gpui-kit",
  "ureq",
 ]
 
 [[package]]
 name = "anygenesis-ir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-m68k",
  "anygenesis-oracle",
@@ -299,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-m68k"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-oracle",
  "anygenesis-shared",
@@ -308,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-oracle"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "thiserror 2.0.21",
@@ -316,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-patch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-rom",
  "serde",
@@ -326,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-player"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-abi",
  "anygenesis-framediff",
@@ -338,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-player-lib"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-abi",
  "anygenesis-player",
@@ -347,11 +349,11 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-psg"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "anygenesis-recomp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-analysis",
  "anygenesis-codegen-c",
@@ -365,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-rom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-shared",
  "sha1_smol",
@@ -374,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-abi",
  "anygenesis-ir",
@@ -387,21 +389,21 @@ dependencies = [
 
 [[package]]
 name = "anygenesis-shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "anygenesis-ym2612"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-oracle",
 ]
 
 [[package]]
 name = "anygenesis-z80"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-oracle",
 ]
@@ -8359,7 +8361,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anygenesis-patch",
  "anygenesis-shared",

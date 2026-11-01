@@ -1,6 +1,6 @@
 [package]
 name = "anygenesis-recomp"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 publish = false
 
@@ -9,11 +9,11 @@ name = "recomp"
 path = "src/main.rs"
 
 [dependencies]
-anygenesis-analysis = { version = "0.1.0", path = "../analysis" }
-anygenesis-codegen-c = { version = "0.1.0", path = "../codegen-c" }
-anygenesis-m68k = { version = "0.1.0", path = "../m68k" }
-anygenesis-rom = { version = "0.1.0", path = "../rom" }
-anygenesis-shared = { version = "0.1.0", path = "../shared" }
+anygenesis-analysis = { version = "0.2.0", path = "../analysis" }
+anygenesis-codegen-c = { version = "0.2.0", path = "../codegen-c" }
+anygenesis-m68k = { version = "0.2.0", path = "../m68k" }
+anygenesis-rom = { version = "0.2.0", path = "../rom" }
+anygenesis-shared = { version = "0.2.0", path = "../shared" }
 anyhow = "1.0.104"
 cc = { version = "1.10.0", features = ["parallel"] }
 thiserror = "2.0.21"

@@ -53,7 +53,8 @@ const USAGE: &str = "usage:
                                     (.toml, which may also carry C hooks, RAM patches and
                                     flags) or an IPS, UPS or BPS file; repeat it to apply
                                     several in order
-  anygenesis <rom> --progress ...   either one, with machine-readable progress lines";
+  anygenesis <rom> --progress ...   either one, with machine-readable progress lines
+  anygenesis --version              print the version";
 
 fn main() -> Result<ExitCode> {
     run().inspect_err(progress::error)
@@ -64,6 +65,10 @@ fn run() -> Result<ExitCode> {
     let Some(rom_path) = arguments.next().filter(|argument| argument != "--out") else {
         bail!(USAGE);
     };
+    if rom_path == "--version" {
+        println!("anygenesis {}", env!("CARGO_PKG_VERSION"));
+        return Ok(ExitCode::SUCCESS);
+    }
     let mut options: Vec<OsString> = arguments.collect();
     let build_options = take_build_options(&mut options)?;
     if build_options.progress {

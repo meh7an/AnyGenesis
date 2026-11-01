@@ -1,6 +1,6 @@
 [package]
 name = "anygenesis-runtime"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 publish = false
 
@@ -11,10 +11,10 @@ default = ["interpreter"]
 interpreter = ["anygenesis-ir/interpreter"]
 
 [dependencies]
-anygenesis-abi = { version = "0.1.0", path = "../abi" }
-anygenesis-ir = { version = "0.1.0", path = "../ir", default-features = false }
-anygenesis-m68k = { version = "0.1.0", path = "../m68k" }
-anygenesis-rom = { version = "0.1.0", path = "../rom" }
-anygenesis-shared = { version = "0.1.0", path = "../shared" }
-anygenesis-ym2612 = { version = "0.1.0", path = "../ym2612" }
-anygenesis-z80 = { version = "0.1.0", path = "../z80" }
+anygenesis-abi = { version = "0.2.0", path = "../abi" }
+anygenesis-ir = { version = "0.2.0", path = "../ir", default-features = false }
+anygenesis-m68k = { version = "0.2.0", path = "../m68k" }
+anygenesis-rom = { version = "0.2.0", path = "../rom" }
+anygenesis-shared = { version = "0.2.0", path = "../shared" }
+anygenesis-ym2612 = { version = "0.2.0", path = "../ym2612" }
+anygenesis-z80 = { version = "0.2.0", path = "../z80" }

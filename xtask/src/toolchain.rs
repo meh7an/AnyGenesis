@@ -1,6 +1,6 @@
 //! Builds what a user builds games with, for this host's target, into
-//! target/bundle/<host>/: anygenesis, built to need no Rust or C installation, and next to it
-//! toolchain/ with the pinned Zig pruned to what a game build needs (zig/), the player
+//! target/bundle/<host>/: anygenesis and the builder app anygenesis-gui, built to need no Rust
+//! or C installation, and next to them toolchain/ with the pinned Zig pruned to what a game build needs (zig/), the player
 //! library built with that Zig, SDL3 inside it (lib/), and toolchain.txt naming both.
 //! anygenesis reads that layout (its toolchain.rs). Nothing here is ever committed: Zig and
 //! the libraries are native binaries.
@@ -42,9 +42,9 @@ const ZIG_KEEP: [&str; 12] = [
 const PLAYER_LIBRARY: &str = "libanygenesis_player_lib.a";
 
 /// One host's toolchain.
-struct Host {
+pub(crate) struct Host {
     /// The bundle's folder under target/bundle/.
-    name: &'static str,
+    pub(crate) name: &'static str,
     /// The pinned Zig archive's file name, its SHA-256 (ziglang.org/download/index.json) and
     /// the folder it unpacks into.
     archive: &'static str,
@@ -53,14 +53,16 @@ struct Host {
     /// What Zig builds games for.
     zig_target: &'static str,
     /// What Rust builds the player library and anygenesis for.
-    player_target: &'static str,
-    tool_target: &'static str,
+    pub(crate) player_target: &'static str,
+    pub(crate) tool_target: &'static str,
     /// The C library sources and headers of `zig_target`, on top of `ZIG_KEEP`.
     libc: &'static [&'static str],
+    /// The licence text of those C library files, under Zig's folder.
+    pub(crate) libc_notice: &'static str,
 }
 
 #[cfg(windows)]
-const HOST: Host = Host {
+pub(crate) const HOST: Host = Host {
     name: "windows-x64",
     archive: "zig-x86_64-windows-0.17.0.zip",
     sha256: "b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428",
@@ -70,10 +72,11 @@ const HOST: Host = Host {
     // The static C runtime, so anygenesis needs no Visual C++ runtime (see `tool_settings`).
     tool_target: "x86_64-pc-windows-msvc",
     libc: &["lib/libc/mingw", "lib/libc/include/any-windows-any"],
+    libc_notice: "lib/libc/mingw/COPYING",
 };
 
 #[cfg(not(windows))]
-const HOST: Host = Host {
+pub(crate) const HOST: Host = Host {
     name: "linux-x64",
     archive: "zig-x86_64-linux-0.17.0.tar.xz",
     sha256: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026",
@@ -89,6 +92,7 @@ const HOST: Host = Host {
         "lib/libc/include/x86-linux-any",
         "lib/libc/include/x86-linux-gnu",
     ],
+    libc_notice: "lib/libc/glibc/LICENSES",
 };
 
 const ZIG_EXE: &str = if cfg!(windows) { "zig.exe" } else { "zig" };
@@ -109,9 +113,9 @@ pub(crate) fn run(archive: Option<&str>) -> Result<ExitCode> {
     let zig_root = unpack(&archive, &work)?;
     let wrappers = Wrappers::write(&zig_root.join(ZIG_EXE), &work.join("wrappers"))?;
     let player = build_player(&root, &work, &wrappers)?;
-    let tool = build_tool(&root, &work, &wrappers)?;
+    let tools = build_tools(&root, &work, &wrappers)?;
     let bundle = root.join("target").join("bundle").join(HOST.name);
-    let zig_bytes = assemble(&bundle, &zig_root, &player, &tool, &player_commit(&root)?)?;
+    let zig_bytes = assemble(&bundle, &zig_root, &player, &tools, &player_commit(&root)?)?;
     println!(
         "bundle written to {}: Zig {ZIG_VERSION} pruned to {:.1} MB, player library {:.1} MB",
         bundle.display(),
@@ -155,13 +159,13 @@ fn unpack(archive: &Path, work: &Path) -> Result<PathBuf> {
 /// The bsdtar every Windows 10 and later ships, which also unpacks zip files; a tar from
 /// Git or MSYS earlier on PATH may not.
 #[cfg(windows)]
-fn tar_program() -> PathBuf {
+pub(crate) fn tar_program() -> PathBuf {
     let system = env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
     Path::new(&system).join("System32").join("tar.exe")
 }
 
 #[cfg(not(windows))]
-fn tar_program() -> PathBuf {
+pub(crate) fn tar_program() -> PathBuf {
     PathBuf::from("tar")
 }
 
@@ -251,7 +255,7 @@ fn build_player(root: &Path, work: &Path, wrappers: &Wrappers) -> Result<PathBuf
     let key = HOST.player_target.replace('-', "_");
     let mut command = cargo(
         root,
-        "anygenesis-player-lib",
+        &["anygenesis-player-lib"],
         HOST.player_target,
         &target_dir,
     );
@@ -271,44 +275,91 @@ fn build_player(root: &Path, work: &Path, wrappers: &Wrappers) -> Result<PathBuf
         .join(PLAYER_LIBRARY))
 }
 
-/// Builds anygenesis to run with nothing installed (see `tool_settings`).
-fn build_tool(root: &Path, work: &Path, wrappers: &Wrappers) -> Result<PathBuf> {
+/// The programs a user runs, each the package of the same name.
+const TOOLS: [&str; 2] = ["anygenesis", "anygenesis-gui"];
+
+/// Builds the `TOOLS` to run with nothing installed (see `tool_settings`) and returns their
+/// paths.
+fn build_tools(root: &Path, work: &Path, wrappers: &Wrappers) -> Result<Vec<PathBuf>> {
     let target_dir = work.join("cargo-tool");
-    let mut command = cargo(root, "anygenesis", HOST.tool_target, &target_dir);
-    tool_settings(&mut command, wrappers);
-    run_tool(&mut command, "building anygenesis")?;
-    Ok(target_dir
-        .join(HOST.tool_target)
-        .join("release")
-        .join(format!("anygenesis{}", env::consts::EXE_SUFFIX)))
+    let mut command = cargo(root, &TOOLS, HOST.tool_target, &target_dir);
+    tool_settings(&mut command, work, wrappers)?;
+    run_tool(&mut command, "building anygenesis and anygenesis-gui")?;
+    let release = target_dir.join(HOST.tool_target).join("release");
+    Ok(TOOLS
+        .iter()
+        .map(|tool| release.join(format!("{tool}{}", env::consts::EXE_SUFFIX)))
+        .collect())
 }
 
-/// The static C runtime, so anygenesis imports only system DLLs.
+/// The static C runtime, so the programs import only system DLLs (no Visual C++ runtime).
 #[cfg(windows)]
-fn tool_settings(command: &mut Command, _wrappers: &Wrappers) {
+fn tool_settings(command: &mut Command, _work: &Path, _wrappers: &Wrappers) -> Result<()> {
     command.env("RUSTFLAGS", "-Ctarget-feature=+crt-static");
+    Ok(())
 }
 
-/// Zig as the linker, against its glibc 2.28 stubs, so anygenesis runs on any glibc since.
+/// The desktop libraries anygenesis-gui links (GPUI's X11 keyboard and text), which every
+/// desktop Linux has and the user's own copies of are loaded at run time.
 #[cfg(not(windows))]
-fn tool_settings(command: &mut Command, wrappers: &Wrappers) {
-    command.env("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", &wrappers.cc);
+const GUI_SYSTEM_LIBRARIES: [&str; 4] = ["xcb", "xkbcommon", "xkbcommon-x11", "freetype"];
+
+/// Zig as the linker, against its glibc 2.28 stubs, so the programs run on any glibc since.
+/// Zig searches no system folder, so a folder of links to just `GUI_SYSTEM_LIBRARIES` is
+/// passed to the link; a whole system folder would also offer the host's libc in place of
+/// Zig's.
+#[cfg(not(windows))]
+fn tool_settings(command: &mut Command, work: &Path, wrappers: &Wrappers) -> Result<()> {
+    let links = work.join("system-libraries");
+    remove_folder(&links)?;
+    fs::create_dir_all(&links).with_context(|| format!("creating {}", links.display()))?;
+    for library in GUI_SYSTEM_LIBRARIES {
+        let name = format!("lib{library}.so");
+        let found = system_library(&name)
+            .with_context(|| format!("{name} not found: install the {library} package"))?;
+        std::os::unix::fs::symlink(&found, links.join(&name))
+            .with_context(|| format!("linking {}", found.display()))?;
+    }
+    // The host's copies need a newer glibc than Zig's 2.28 stubs offer; those are their own
+    // needs, met at run time by the user's glibc, so the link must not check them.
+    let flags = format!(
+        "-Lnative={} -Clink-arg=-Wl,--allow-shlib-undefined",
+        links.display()
+    );
+    command
+        .env("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", &wrappers.cc)
+        .env("RUSTFLAGS", flags);
+    Ok(())
 }
 
-/// `cargo build --release --locked -p <package> --target <target>` into `target_dir`.
-fn cargo(root: &Path, package: &str, target: &str, target_dir: &Path) -> Command {
+/// The shared library `name` (`libx.so`) in a system folder: the development link if there is
+/// one, else the runtime file `name.<major>` (a desktop has those without the -dev packages).
+#[cfg(not(windows))]
+fn system_library(name: &str) -> Option<PathBuf> {
+    let folders = ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"];
+    let link = folders.iter().map(|folder| Path::new(folder).join(name));
+    let runtime = folders.iter().filter_map(|folder| {
+        fs::read_dir(folder).ok()?.find_map(|entry| {
+            let path = entry.ok()?.path();
+            let file = path.file_name()?.to_str()?;
+            let major = file.strip_prefix(name)?.strip_prefix('.')?;
+            major
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+                .then_some(path)
+        })
+    });
+    link.filter(|path| path.exists()).chain(runtime).next()
+}
+
+/// `cargo build --release --locked -p <package>... --target <target>` into `target_dir`.
+fn cargo(root: &Path, packages: &[&str], target: &str, target_dir: &Path) -> Command {
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
         .current_dir(root)
-        .args([
-            "build",
-            "--release",
-            "--locked",
-            "-p",
-            package,
-            "--target",
-            target,
-        ])
+        .args(["build", "--release", "--locked"])
+        .args(packages.iter().flat_map(|package| ["-p", package]))
+        .args(["--target", target])
         .env("CARGO_TARGET_DIR", target_dir);
     command
 }
@@ -318,7 +369,7 @@ fn assemble(
     bundle: &Path,
     zig_root: &Path,
     player: &Path,
-    tool: &Path,
+    tools: &[PathBuf],
     commit: &str,
 ) -> Result<u64> {
     remove_folder(bundle)?;
@@ -331,10 +382,12 @@ fn assemble(
     let lib = toolchain.join("lib");
     fs::create_dir_all(&lib).with_context(|| format!("creating {}", lib.display()))?;
     copy_tree(player, &lib.join(PLAYER_LIBRARY))?;
-    let tool_name = tool
-        .file_name()
-        .context("anygenesis's program has no file name")?;
-    copy_tree(tool, &bundle.join(tool_name))?;
+    for tool in tools {
+        let name = tool
+            .file_name()
+            .context("a built program has no file name")?;
+        copy_tree(tool, &bundle.join(name))?;
+    }
     let manifest = toolchain.join("toolchain.txt");
     fs::write(&manifest, manifest_text(commit))
         .with_context(|| format!("writing {}", manifest.display()))?;
@@ -342,16 +395,18 @@ fn assemble(
 }
 
 /// toolchain.txt: one `key value` line each for the Zig version and archive digest, the
-/// target games are built for and the commit the player library was built from.
+/// target games are built for, the commit the player library was built from and the release.
 fn manifest_text(commit: &str) -> String {
     format!(
-        "zig {ZIG_VERSION}\nzig-sha256 {}\ntarget {}\nplayer {commit}\n",
-        HOST.sha256, HOST.zig_target
+        "zig {ZIG_VERSION}\nzig-sha256 {}\ntarget {}\nplayer {commit}\nanygenesis {}\n",
+        HOST.sha256,
+        HOST.zig_target,
+        env!("CARGO_PKG_VERSION")
     )
 }
 
 /// The checked-out commit, with `-dirty` when the working tree has changes.
-fn player_commit(root: &Path) -> Result<String> {
+pub(crate) fn player_commit(root: &Path) -> Result<String> {
     let git = |arguments: &[&str]| -> Result<String> {
         let output = Command::new("git")
             .current_dir(root)
@@ -373,7 +428,7 @@ fn player_commit(root: &Path) -> Result<String> {
 }
 
 /// Copies the file or folder `from` to `to` and returns the bytes copied.
-fn copy_tree(from: &Path, to: &Path) -> Result<u64> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<u64> {
     if from.is_dir() {
         fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
         let mut bytes = 0;
@@ -389,7 +444,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<u64> {
     fs::copy(from, to).with_context(|| format!("copying {} to {}", from.display(), to.display()))
 }
 
-fn run_tool(command: &mut Command, what: &str) -> Result<()> {
+pub(crate) fn run_tool(command: &mut Command, what: &str) -> Result<()> {
     let status = command
         .status()
         .with_context(|| format!("{what}: running {}", command.get_program().display()))?;
@@ -399,7 +454,7 @@ fn run_tool(command: &mut Command, what: &str) -> Result<()> {
     Ok(())
 }
 
-fn remove_folder(folder: &Path) -> Result<()> {
+pub(crate) fn remove_folder(folder: &Path) -> Result<()> {
     match fs::remove_dir_all(folder) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -429,6 +484,10 @@ mod tests {
         assert_eq!(lines[1], format!("zig-sha256 {}", HOST.sha256));
         assert_eq!(lines[2], format!("target {}", HOST.zig_target));
         assert_eq!(lines[3], "player abc123");
+        assert_eq!(
+            lines[4],
+            format!("anygenesis {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

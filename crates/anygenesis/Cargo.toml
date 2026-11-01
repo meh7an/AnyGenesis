@@ -1,17 +1,20 @@
 [package]
 name = "anygenesis"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 publish = false
 
 [dependencies]
-anygenesis-analysis = { version = "0.1.0", path = "../analysis" }
-anygenesis-patch = { version = "0.1.0", path = "../patch" }
-anygenesis-recomp = { version = "0.1.0", path = "../recomp" }
-anygenesis-rom = { version = "0.1.0", path = "../rom" }
-anygenesis-runtime = { version = "0.1.0", path = "../runtime" }
-anygenesis-shared = { version = "0.1.0", path = "../shared" }
+anygenesis-analysis = { version = "0.2.0", path = "../analysis" }
+anygenesis-patch = { version = "0.2.0", path = "../patch" }
+anygenesis-recomp = { version = "0.2.0", path = "../recomp" }
+anygenesis-rom = { version = "0.2.0", path = "../rom" }
+anygenesis-runtime = { version = "0.2.0", path = "../runtime" }
+anygenesis-shared = { version = "0.2.0", path = "../shared" }
 anyhow = "1.0.104"
 
 [dev-dependencies]
 anygenesis-framediff = { path = "../framediff" }
+
+[build-dependencies]
+embed-resource = "3.0.12"

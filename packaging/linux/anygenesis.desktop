@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AnyGenesis
+Comment=Build native games from your own Genesis cartridge dumps
+Exec=anygenesis-gui
+Icon=anygenesis
+Categories=Game;Emulator;
+Terminal=false
