@@ -451,7 +451,9 @@ mod tests {
 
     use super::*;
 
-    const TARGET: &str = if cfg!(windows) {
+    const TARGET: &str = if cfg!(all(windows, target_arch = "aarch64")) {
+        "aarch64-pc-windows-msvc"
+    } else if cfg!(windows) {
         "x86_64-pc-windows-msvc"
     } else if cfg!(target_os = "macos") {
         "aarch64-apple-darwin"

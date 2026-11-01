@@ -171,6 +171,33 @@ fn test_patched_synthetic_rom_builds_into_a_game_exe_of_its_own() {
     fs::remove_dir_all(&folder).expect("the test folder is removed");
 }
 
+#[test]
+#[ignore = "needs ANYGENESIS_TOOLCHAIN"]
+fn test_rom_named_like_an_update_builds_a_game_that_starts_unelevated() {
+    let folder = folder("name");
+    let rom_path = folder.join("Sonic Update Patch.bin");
+    // bra.s *
+    fs::write(&rom_path, synthetic_rom(&[0x60FE])).expect("the ROM is written");
+    let out = folder.join("out");
+    let built = Command::new(env!("CARGO_BIN_EXE_anygenesis"))
+        .arg(&rom_path)
+        .args([Path::new("--out"), &out])
+        .env("ANYGENESIS_CACHE", folder.join("cache"))
+        .output()
+        .expect("anygenesis runs");
+    let stdout = String::from_utf8_lossy(&built.stdout);
+    println!("{stdout}{}", String::from_utf8_lossy(&built.stderr));
+    assert!(built.status.success(), "the build succeeds");
+    let exe = out.join(format!("Sonic Update Patch{}", env::consts::EXE_SUFFIX));
+    let run = Command::new(&exe)
+        .arg("1")
+        .current_dir(&out)
+        .output()
+        .expect("the game starts without asking for elevation");
+    assert!(run.status.success());
+    fs::remove_dir_all(&folder).expect("the test folder is removed");
+}
+
 /// The program the code patches act on: `move.b #$11,($FF0020).l` at reset, then a loop of
 /// `clr.b ($FF0040).l`. The replacement at reset stores 0x22 at $FF0021 instead and goes on
 /// at the loop, the hook at the loop stores 0xAB at $FF0010 every time round, and the RAM

@@ -26,8 +26,10 @@ const MANIFEST: &str = "toolchain.txt";
 
 /// What games are built for, as Zig (or on macOS clang) names it; the toolchain must be made
 /// for the same.
-#[cfg(windows)]
+#[cfg(all(windows, target_arch = "x86_64"))]
 const TARGET: &str = "x86_64-windows-gnu";
+#[cfg(all(windows, target_arch = "aarch64"))]
+const TARGET: &str = "aarch64-windows-gnu";
 #[cfg(target_os = "linux")]
 const TARGET: &str = "x86_64-linux-gnu.2.28";
 #[cfg(target_os = "macos")]
@@ -271,6 +273,9 @@ impl Toolchain {
         lines.extend(objects.iter().map(|object| quoted(object)));
         lines.push(quoted(&self.player));
         lines.extend(SYSTEM_LIBRARIES.iter().map(|library| (*library).to_owned()));
+        if cfg!(all(windows, target_arch = "aarch64")) {
+            lines.push(quoted(&write_manifest_resource(arguments)?));
+        }
         fs::write(arguments, lines.join("\n") + "\n")
             .with_context(|| format!("writing {}", arguments.display()))?;
         let mut command = self.cc(scratch);
@@ -279,6 +284,30 @@ impl Toolchain {
         command.arg(argument);
         Ok(command)
     }
+}
+
+/// What a game asks Windows for: no elevation. Windows on ARM refuses to start a program with
+/// no manifest and "patch" or "update" in its name without elevation (Installer Detection),
+/// and a game is named after its ROM file and patch packs.
+const APP_MANIFEST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+                            <assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" \
+                            manifestVersion=\"1.0\">\n\
+                            <trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v3\"><security>\
+                            <requestedPrivileges><requestedExecutionLevel level=\"asInvoker\" \
+                            uiAccess=\"false\"/></requestedPrivileges></security></trustInfo>\n\
+                            </assembly>\n";
+
+/// Writes `APP_MANIFEST` and the resource script embedding it next to the file `beside`,
+/// returning the script's path; Zig compiles a `.rc` on the link line. The script names the
+/// manifest relative to itself: Zig 0.17.0 fails with FileSystemFailure on an absolute path.
+fn write_manifest_resource(beside: &Path) -> Result<PathBuf> {
+    let manifest = beside.with_file_name("game.manifest");
+    fs::write(&manifest, APP_MANIFEST)
+        .with_context(|| format!("writing {}", manifest.display()))?;
+    let script = beside.with_file_name("game.rc");
+    fs::write(&script, "1 24 \"game.manifest\"\n")
+        .with_context(|| format!("writing {}", script.display()))?;
+    Ok(script)
 }
 
 /// The value of the `key value` line `key` in the manifest `text` read from `path`.

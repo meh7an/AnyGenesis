@@ -1,2 +1,7 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Windows on ARM refuses to start a program with no manifest and "patch" or "update" in its
+# name without elevation (Installer Detection), and cargo names test binaries after the test.
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-Clink-arg=/MANIFEST:EMBED", "-Clink-arg=/MANIFESTUAC:level='asInvoker'"]

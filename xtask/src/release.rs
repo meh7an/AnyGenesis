@@ -39,6 +39,12 @@ pub(crate) fn run(flag: Option<&str>) -> Result<ExitCode> {
              the builder app on macOS"
         );
     }
+    if cfg!(all(windows, target_arch = "aarch64")) {
+        bail!(
+            "there is no Windows ARM64 download yet: its installer comes with the builder app \
+             on Windows ARM64"
+        );
+    }
     let root = workspace_root()?;
     let bundle = root.join("target").join("bundle").join(HOST.name);
     check_bundle(&bundle, &player_commit(&root)?, allow_dirty)?;

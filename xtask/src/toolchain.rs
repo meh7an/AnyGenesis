@@ -67,7 +67,23 @@ pub(crate) struct Zig {
     pub(crate) libc_notice: &'static str,
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, target_arch = "aarch64"))]
+pub(crate) const HOST: Host = Host {
+    name: "windows-arm64",
+    game_target: "aarch64-windows-gnu",
+    player_target: "aarch64-pc-windows-gnullvm",
+    // The static C runtime, so anygenesis needs no Visual C++ runtime (see `tool_settings`).
+    tool_target: "aarch64-pc-windows-msvc",
+    zig: Some(Zig {
+        archive: "zig-aarch64-windows-0.17.0.zip",
+        sha256: "0a59d91fa1cb40cf068e9b0954434ce973500c7a2ea749f1e01af62cdab52d26",
+        folder: "zig-aarch64-windows-0.17.0",
+        libc: &["lib/libc/mingw", "lib/libc/include/any-windows-any"],
+        libc_notice: "lib/libc/mingw/COPYING",
+    }),
+};
+
+#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) const HOST: Host = Host {
     name: "windows-x64",
     game_target: "x86_64-windows-gnu",
