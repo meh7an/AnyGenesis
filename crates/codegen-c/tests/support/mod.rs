@@ -177,9 +177,9 @@ fn run(mut command: Command, source: &Path) -> Result<(), String> {
     }
 }
 
-/// Finds clang-cl (Windows, from the Visual Studio LLVM component) or clang (Linux) the way
-/// the game build will, through `cc`. Its warning flags stay on: `warnings(false)` makes cc
-/// pass `-W0` to clang-cl, which silences every later `-W` flag.
+/// Finds clang-cl (Windows, from the Visual Studio LLVM component) or clang (Linux, macOS)
+/// the way the game build will, through `cc`. Its warning flags stay on: `warnings(false)`
+/// makes cc pass `-W0` to clang-cl, which silences every later `-W` flag.
 fn compiler() -> cc::Tool {
     let target = target();
     let mut build = cc::Build::new();
@@ -197,15 +197,17 @@ fn compiler() -> cc::Tool {
     build.try_get_compiler().expect("a C compiler is found")
 }
 
-/// The target triple of this test binary; only the two supported hosts are known.
+/// The target triple of this test binary; only the three supported hosts are known.
 fn target() -> String {
     let arch = std::env::consts::ARCH;
     if cfg!(all(windows, target_env = "msvc")) {
         format!("{arch}-pc-windows-msvc")
     } else if cfg!(all(target_os = "linux", target_env = "gnu")) {
         format!("{arch}-unknown-linux-gnu")
+    } else if cfg!(target_os = "macos") {
+        format!("{arch}-apple-darwin")
     } else {
-        panic!("compile checks support Windows (MSVC) and Linux (GNU) hosts only")
+        panic!("compile checks support Windows (MSVC), Linux (GNU) and macOS hosts only")
     }
 }
 

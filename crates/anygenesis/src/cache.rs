@@ -1,6 +1,7 @@
 //! The per-user build cache: one folder per ROM SHA-1 (and code patch hash, M6.2), reused
-//! while the ROM, anygenesis, the player library, the Zig version, the discovery stage and
-//! the code patches all stay the same. Zig keeps its own cache in it too (`zig_folder`).
+//! while the ROM, anygenesis, the player library, the compiler version (Zig, or Apple clang
+//! on macOS), the discovery stage and the code patches all stay the same. Zig keeps its own
+//! cache in it too (`zig_folder`).
 
 use std::{
     env, fs,
@@ -16,8 +17,9 @@ const CACHE_VAR: &str = "ANYGENESIS_CACHE";
 /// The file in an entry that holds its key, written once the build in it has finished.
 const KEY_FILE: &str = "key";
 
-/// The cache folder: `ANYGENESIS_CACHE`, else %LOCALAPPDATA%\AnyGenesis\cache on Windows and
-/// $XDG_CACHE_HOME/anygenesis (else ~/.cache/anygenesis) elsewhere.
+/// The cache folder: `ANYGENESIS_CACHE`, else %LOCALAPPDATA%\AnyGenesis\cache on Windows,
+/// ~/Library/Caches/AnyGenesis on macOS and $XDG_CACHE_HOME/anygenesis (else
+/// ~/.cache/anygenesis) elsewhere.
 ///
 /// # Errors
 /// None of the variables it is found from is set.
@@ -28,6 +30,13 @@ pub fn root() -> Result<PathBuf> {
     if cfg!(windows) {
         let local = env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set")?;
         return Ok(Path::new(&local).join("AnyGenesis").join("cache"));
+    }
+    if cfg!(target_os = "macos") {
+        let home = env::var_os("HOME").context("HOME is not set")?;
+        return Ok(Path::new(&home)
+            .join("Library")
+            .join("Caches")
+            .join("AnyGenesis"));
     }
     if let Some(cache) = env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
         return Ok(Path::new(&cache).join("anygenesis"));

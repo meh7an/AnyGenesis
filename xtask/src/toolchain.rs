@@ -45,17 +45,23 @@ const PLAYER_LIBRARY: &str = "libanygenesis_player_lib.a";
 pub(crate) struct Host {
     /// The bundle's folder under target/bundle/.
     pub(crate) name: &'static str,
-    /// The pinned Zig archive's file name, its SHA-256 (ziglang.org/download/index.json) and
-    /// the folder it unpacks into.
-    archive: &'static str,
-    sha256: &'static str,
-    folder: &'static str,
-    /// What Zig builds games for.
-    zig_target: &'static str,
+    /// What games are built for, as Zig (or on macOS clang) names it.
+    game_target: &'static str,
     /// What Rust builds the player library and anygenesis for.
     pub(crate) player_target: &'static str,
     pub(crate) tool_target: &'static str,
-    /// The C library sources and headers of `zig_target`, on top of `ZIG_KEEP`.
+    /// The pinned Zig games are built with; none on macOS, which uses Apple's clang.
+    pub(crate) zig: Option<Zig>,
+}
+
+/// One host's pinned Zig download.
+pub(crate) struct Zig {
+    /// The archive's file name, its SHA-256 (ziglang.org/download/index.json) and the folder
+    /// it unpacks into.
+    archive: &'static str,
+    sha256: &'static str,
+    folder: &'static str,
+    /// The C library sources and headers of the game target, on top of `ZIG_KEEP`.
     libc: &'static [&'static str],
     /// The licence text of those C library files, under Zig's folder.
     pub(crate) libc_notice: &'static str,
@@ -64,58 +70,88 @@ pub(crate) struct Host {
 #[cfg(windows)]
 pub(crate) const HOST: Host = Host {
     name: "windows-x64",
-    archive: "zig-x86_64-windows-0.17.0.zip",
-    sha256: "b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428",
-    folder: "zig-x86_64-windows-0.17.0",
-    zig_target: "x86_64-windows-gnu",
+    game_target: "x86_64-windows-gnu",
     player_target: "x86_64-pc-windows-gnullvm",
     // The static C runtime, so anygenesis needs no Visual C++ runtime (see `tool_settings`).
     tool_target: "x86_64-pc-windows-msvc",
-    libc: &["lib/libc/mingw", "lib/libc/include/any-windows-any"],
-    libc_notice: "lib/libc/mingw/COPYING",
+    zig: Some(Zig {
+        archive: "zig-x86_64-windows-0.17.0.zip",
+        sha256: "b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428",
+        folder: "zig-x86_64-windows-0.17.0",
+        libc: &["lib/libc/mingw", "lib/libc/include/any-windows-any"],
+        libc_notice: "lib/libc/mingw/COPYING",
+    }),
 };
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub(crate) const HOST: Host = Host {
     name: "linux-x64",
-    archive: "zig-x86_64-linux-0.17.0.tar.xz",
-    sha256: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026",
-    folder: "zig-x86_64-linux-0.17.0",
     // The oldest glibc a game (and anygenesis) needs.
-    zig_target: "x86_64-linux-gnu.2.28",
+    game_target: "x86_64-linux-gnu.2.28",
     player_target: "x86_64-unknown-linux-gnu",
     tool_target: "x86_64-unknown-linux-gnu",
-    libc: &[
-        "lib/libc/glibc",
-        "lib/libc/include/any-linux-any",
-        "lib/libc/include/generic-glibc",
-        "lib/libc/include/x86-linux-any",
-        "lib/libc/include/x86-linux-gnu",
-    ],
-    libc_notice: "lib/libc/glibc/LICENSES",
+    zig: Some(Zig {
+        archive: "zig-x86_64-linux-0.17.0.tar.xz",
+        sha256: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026",
+        folder: "zig-x86_64-linux-0.17.0",
+        libc: &[
+            "lib/libc/glibc",
+            "lib/libc/include/any-linux-any",
+            "lib/libc/include/generic-glibc",
+            "lib/libc/include/x86-linux-any",
+            "lib/libc/include/x86-linux-gnu",
+        ],
+        libc_notice: "lib/libc/glibc/LICENSES",
+    }),
 };
+
+/// Games, the player library and the tools all need macOS 11, the first on Apple Silicon.
+#[cfg(target_os = "macos")]
+pub(crate) const HOST: Host = Host {
+    name: "macos-arm64",
+    game_target: "arm64-apple-macos11.0",
+    player_target: "aarch64-apple-darwin",
+    tool_target: "aarch64-apple-darwin",
+    zig: None,
+};
+
+/// The macOS version everything is built for, matching `game_target`.
+const MACOS_DEPLOYMENT_TARGET: &str = "11.0";
 
 const ZIG_EXE: &str = if cfg!(windows) { "zig.exe" } else { "zig" };
 
-/// Builds the bundle from the pinned Zig archive at `archive` (a local download).
+/// Builds the bundle from the pinned Zig archive at `archive` (a local download), or on
+/// macOS with no Zig at all.
 ///
 /// # Errors
 /// No archive given, an archive other than the pinned one, or a step that fails.
 pub(crate) fn run(archive: Option<&str>) -> Result<ExitCode> {
+    let Some(zig) = &HOST.zig else {
+        if archive.is_some() {
+            bail!("usage: cargo xtask toolchain (macOS builds games with Apple's clang, no Zig)");
+        }
+        return run_without_zig();
+    };
     let Some(archive) = archive.map(PathBuf::from) else {
         bail!(
             "usage: cargo xtask toolchain <path to {}> (Zig {ZIG_VERSION} from ziglang.org)",
-            HOST.archive
+            zig.archive
         );
     };
     let root = workspace_root()?;
     let work = root.join("target").join("toolchain-work");
-    let zig_root = unpack(&archive, &work)?;
+    let zig_root = unpack(zig, &archive, &work)?;
     let wrappers = Wrappers::write(&zig_root.join(ZIG_EXE), &work.join("wrappers"))?;
-    let player = build_player(&root, &work, &wrappers)?;
+    let player = build_player(&root, &work, Some(&wrappers))?;
     let tools = build_tools(&root, &work, &wrappers)?;
     let bundle = root.join("target").join("bundle").join(HOST.name);
-    let zig_bytes = assemble(&bundle, &zig_root, &player, &tools, &player_commit(&root)?)?;
+    let zig_bytes = assemble(
+        &bundle,
+        Some((zig, &zig_root)),
+        &player,
+        &tools,
+        &player_commit(&root)?,
+    )?;
     println!(
         "bundle written to {}: Zig {ZIG_VERSION} pruned to {:.1} MB, player library {:.1} MB",
         bundle.display(),
@@ -125,22 +161,44 @@ pub(crate) fn run(archive: Option<&str>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The macOS bundle: the player library and the tools built with Apple's clang (cc-rs and
+/// CMake find it themselves), all for `MACOS_DEPLOYMENT_TARGET`; games are compiled with the
+/// user's own Command Line Tools.
+fn run_without_zig() -> Result<ExitCode> {
+    let root = workspace_root()?;
+    let work = root.join("target").join("toolchain-work");
+    let player = build_player(&root, &work, None)?;
+    let target_dir = work.join("cargo-tool");
+    let mut command = cargo(&root, &TOOLS, HOST.tool_target, &target_dir);
+    command.env("MACOSX_DEPLOYMENT_TARGET", MACOS_DEPLOYMENT_TARGET);
+    run_tool(&mut command, "building anygenesis and anygenesis-gui")?;
+    let tools = tool_paths(&target_dir);
+    let bundle = root.join("target").join("bundle").join(HOST.name);
+    assemble(&bundle, None, &player, &tools, &player_commit(&root)?)?;
+    println!(
+        "bundle written to {}: player library {:.1} MB",
+        bundle.display(),
+        megabytes(file_size(&player)?)
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 /// Checks `archive` against the pin and unpacks it into `work`, returning Zig's folder.
-fn unpack(archive: &Path, work: &Path) -> Result<PathBuf> {
-    if archive.file_name() != Some(OsStr::new(HOST.archive)) {
+fn unpack(zig: &Zig, archive: &Path, work: &Path) -> Result<PathBuf> {
+    if archive.file_name() != Some(OsStr::new(zig.archive)) {
         bail!(
             "{} is not the pinned Zig archive {}",
             archive.display(),
-            HOST.archive
+            zig.archive
         );
     }
     let bytes = fs::read(archive).with_context(|| format!("reading {}", archive.display()))?;
     let digest = sha256::hex_digest(&bytes);
-    if digest != HOST.sha256 {
+    if digest != zig.sha256 {
         bail!(
             "{} has SHA-256 {digest}, not the pinned {}",
             archive.display(),
-            HOST.sha256
+            zig.sha256
         );
     }
     let unpacked = work.join("zig");
@@ -149,7 +207,7 @@ fn unpack(archive: &Path, work: &Path) -> Result<PathBuf> {
     let mut tar = Command::new(tar_program());
     tar.arg("-xf").arg(archive).arg("-C").arg(&unpacked);
     run_tool(&mut tar, "unpacking Zig")?;
-    let zig_root = unpacked.join(HOST.folder);
+    let zig_root = unpacked.join(zig.folder);
     if !zig_root.join(ZIG_EXE).is_file() {
         bail!("{} holds no {ZIG_EXE} after unpacking", zig_root.display());
     }
@@ -185,7 +243,7 @@ struct Wrappers {
 impl Wrappers {
     fn write(zig: &Path, folder: &Path) -> Result<Self> {
         fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
-        let target = format!("-target {}", HOST.zig_target);
+        let target = format!("-target {}", HOST.game_target);
         let script = |name: &str, command: &str| write_script(zig, folder, name, command);
         let wrappers = Self {
             cc: script("zigcc", &format!("cc {target}"))?,
@@ -248,9 +306,10 @@ fn cmake_path(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
-/// Builds the player library with Zig as its C compiler (SDL3 included) in a cargo command
-/// of its own, so it never shares anygenesis's runtime features (the interpreter).
-fn build_player(root: &Path, work: &Path, wrappers: &Wrappers) -> Result<PathBuf> {
+/// Builds the player library with Zig as its C compiler (SDL3 included), or with Apple's
+/// clang when there are no `wrappers`, in a cargo command of its own, so it never shares
+/// anygenesis's runtime features (the interpreter).
+fn build_player(root: &Path, work: &Path, wrappers: Option<&Wrappers>) -> Result<PathBuf> {
     let target_dir = work.join("cargo-player");
     let key = HOST.player_target.replace('-', "_");
     let mut command = cargo(
@@ -259,15 +318,18 @@ fn build_player(root: &Path, work: &Path, wrappers: &Wrappers) -> Result<PathBuf
         HOST.player_target,
         &target_dir,
     );
-    command
-        .env(format!("CC_{key}"), &wrappers.cc)
-        .env(format!("CXX_{key}"), &wrappers.cxx)
-        .env(format!("AR_{key}"), &wrappers.ar)
-        .env(format!("RANLIB_{key}"), &wrappers.ranlib)
-        .env(format!("CMAKE_TOOLCHAIN_FILE_{key}"), &wrappers.cmake)
-        // cc-rs's own target flags are clang's, which `zig cc -target` refuses.
-        .env("CRATE_CC_NO_DEFAULTS", "1")
-        .env("CMAKE_GENERATOR", "Ninja");
+    match wrappers {
+        Some(wrappers) => command
+            .env(format!("CC_{key}"), &wrappers.cc)
+            .env(format!("CXX_{key}"), &wrappers.cxx)
+            .env(format!("AR_{key}"), &wrappers.ar)
+            .env(format!("RANLIB_{key}"), &wrappers.ranlib)
+            .env(format!("CMAKE_TOOLCHAIN_FILE_{key}"), &wrappers.cmake)
+            // cc-rs's own target flags are clang's, which `zig cc -target` refuses.
+            .env("CRATE_CC_NO_DEFAULTS", "1"),
+        None => command.env("MACOSX_DEPLOYMENT_TARGET", MACOS_DEPLOYMENT_TARGET),
+    };
+    command.env("CMAKE_GENERATOR", "Ninja");
     run_tool(&mut command, "building the player library")?;
     Ok(target_dir
         .join(HOST.player_target)
@@ -285,11 +347,16 @@ fn build_tools(root: &Path, work: &Path, wrappers: &Wrappers) -> Result<Vec<Path
     let mut command = cargo(root, &TOOLS, HOST.tool_target, &target_dir);
     tool_settings(&mut command, work, wrappers)?;
     run_tool(&mut command, "building anygenesis and anygenesis-gui")?;
+    Ok(tool_paths(&target_dir))
+}
+
+/// Where cargo put the `TOOLS` it built into `target_dir`.
+fn tool_paths(target_dir: &Path) -> Vec<PathBuf> {
     let release = target_dir.join(HOST.tool_target).join("release");
-    Ok(TOOLS
+    TOOLS
         .iter()
         .map(|tool| release.join(format!("{tool}{}", env::consts::EXE_SUFFIX)))
-        .collect())
+        .collect()
 }
 
 /// The static C runtime, so the programs import only system DLLs (no Visual C++ runtime).
@@ -364,20 +431,23 @@ fn cargo(root: &Path, packages: &[&str], target: &str, target_dir: &Path) -> Com
     command
 }
 
-/// Writes the bundle afresh and returns the pruned Zig's size in bytes.
+/// Writes the bundle afresh, with the pruned Zig from its unpacked folder when there is one,
+/// and returns that Zig's size in bytes.
 fn assemble(
     bundle: &Path,
-    zig_root: &Path,
+    zig: Option<(&Zig, &Path)>,
     player: &Path,
     tools: &[PathBuf],
     commit: &str,
 ) -> Result<u64> {
     remove_folder(bundle)?;
     let toolchain = bundle.join("toolchain");
-    let zig = toolchain.join("zig");
     let mut zig_bytes = 0;
-    for entry in [ZIG_EXE].iter().chain(&ZIG_KEEP).chain(HOST.libc) {
-        zig_bytes += copy_tree(&zig_root.join(entry), &zig.join(entry))?;
+    if let Some((pin, zig_root)) = zig {
+        let to = toolchain.join("zig");
+        for entry in [ZIG_EXE].iter().chain(&ZIG_KEEP).chain(pin.libc) {
+            zig_bytes += copy_tree(&zig_root.join(entry), &to.join(entry))?;
+        }
     }
     let lib = toolchain.join("lib");
     fs::create_dir_all(&lib).with_context(|| format!("creating {}", lib.display()))?;
@@ -394,13 +464,16 @@ fn assemble(
     Ok(zig_bytes)
 }
 
-/// toolchain.txt: one `key value` line each for the Zig version and archive digest, the
-/// target games are built for, the commit the player library was built from and the release.
+/// toolchain.txt: one `key value` line each for the Zig version and archive digest (where
+/// there is a Zig), the target games are built for, the commit the player library was built
+/// from and the release.
 fn manifest_text(commit: &str) -> String {
+    let zig = HOST.zig.as_ref().map_or(String::new(), |zig| {
+        format!("zig {ZIG_VERSION}\nzig-sha256 {}\n", zig.sha256)
+    });
     format!(
-        "zig {ZIG_VERSION}\nzig-sha256 {}\ntarget {}\nplayer {commit}\nanygenesis {}\n",
-        HOST.sha256,
-        HOST.zig_target,
+        "{zig}target {}\nplayer {commit}\nanygenesis {}\n",
+        HOST.game_target,
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -479,21 +552,32 @@ mod tests {
     #[test]
     fn test_manifest_text_names_zig_target_and_commit_one_per_line() {
         let text = manifest_text("abc123");
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], format!("zig {ZIG_VERSION}"));
-        assert_eq!(lines[1], format!("zig-sha256 {}", HOST.sha256));
-        assert_eq!(lines[2], format!("target {}", HOST.zig_target));
-        assert_eq!(lines[3], "player abc123");
+        let mut lines = text.lines();
+        if let Some(zig) = &HOST.zig {
+            assert_eq!(lines.next(), Some(format!("zig {ZIG_VERSION}").as_str()));
+            assert_eq!(
+                lines.next(),
+                Some(format!("zig-sha256 {}", zig.sha256).as_str())
+            );
+        }
         assert_eq!(
-            lines[4],
-            format!("anygenesis {}", env!("CARGO_PKG_VERSION"))
+            lines.next(),
+            Some(format!("target {}", HOST.game_target).as_str())
         );
+        assert_eq!(lines.next(), Some("player abc123"));
+        assert_eq!(
+            lines.next(),
+            Some(format!("anygenesis {}", env!("CARGO_PKG_VERSION")).as_str())
+        );
+        assert_eq!(lines.next(), None);
     }
 
     #[test]
     fn test_host_archive_is_the_pinned_version() {
-        assert!(HOST.archive.contains(ZIG_VERSION));
-        assert!(HOST.folder.contains(ZIG_VERSION));
-        assert_eq!(HOST.sha256.len(), 64);
+        if let Some(zig) = &HOST.zig {
+            assert!(zig.archive.contains(ZIG_VERSION));
+            assert!(zig.folder.contains(ZIG_VERSION));
+            assert_eq!(zig.sha256.len(), 64);
+        }
     }
 }

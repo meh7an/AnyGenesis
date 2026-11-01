@@ -80,16 +80,21 @@ pub(crate) fn text(root: &Path, stage: &Path) -> Result<String> {
 
     let zig = stage.join("toolchain").join("zig");
     let assets = root.join("crates").join("gui").join("assets");
-    let components = [
-        ("Zig 0.17.0 (toolchain/zig)", zig.join("LICENSE")),
-        (
-            "LLVM, Clang, LLD, libunwind and compiler-rt, inside Zig (toolchain/zig)",
-            zig.join("lib").join("libunwind").join("LICENSE.TXT"),
-        ),
-        (
-            "The C library sources and headers Zig builds games with (toolchain/zig/lib/libc)",
-            zig.join(HOST.libc_notice),
-        ),
+    let mut components = Vec::new();
+    if let Some(pin) = &HOST.zig {
+        components.extend([
+            ("Zig 0.17.0 (toolchain/zig)", zig.join("LICENSE")),
+            (
+                "LLVM, Clang, LLD, libunwind and compiler-rt, inside Zig (toolchain/zig)",
+                zig.join("lib").join("libunwind").join("LICENSE.TXT"),
+            ),
+            (
+                "The C library sources and headers Zig builds games with (toolchain/zig/lib/libc)",
+                zig.join(pin.libc_notice),
+            ),
+        ]);
+    }
+    components.extend([
         (
             "IBM Plex Sans and IBM Plex Mono fonts, inside anygenesis-gui",
             assets.join("fonts").join("LICENSE.txt"),
@@ -98,7 +103,7 @@ pub(crate) fn text(root: &Path, stage: &Path) -> Result<String> {
             "Phosphor icons, inside anygenesis-gui",
             assets.join("icons").join("LICENSE"),
         ),
-    ];
+    ]);
 
     let mut out = format!(
         "AnyGenesis {} third-party notices\n\n\

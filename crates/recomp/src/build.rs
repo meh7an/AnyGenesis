@@ -453,6 +453,8 @@ mod tests {
 
     const TARGET: &str = if cfg!(windows) {
         "x86_64-pc-windows-msvc"
+    } else if cfg!(target_os = "macos") {
+        "aarch64-apple-darwin"
     } else {
         "x86_64-unknown-linux-gnu"
     };

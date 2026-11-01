@@ -33,6 +33,12 @@ pub(crate) fn run(flag: Option<&str>) -> Result<ExitCode> {
         Some("--dirty") => true,
         Some(other) => bail!("usage: cargo xtask release [--dirty] (not `{other}`)"),
     };
+    if cfg!(target_os = "macos") {
+        bail!(
+            "there is no macOS download yet: its app bundle, signing and notarisation come with \
+             the builder app on macOS"
+        );
+    }
     let root = workspace_root()?;
     let bundle = root.join("target").join("bundle").join(HOST.name);
     check_bundle(&bundle, &player_commit(&root)?, allow_dirty)?;

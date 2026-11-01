@@ -1,9 +1,10 @@
 //! Builds the vendored Musashi core: compiles and runs its `m68kmake` generator, which writes
-//! the opcode handlers (`m68kops.c`, `m68kops.h`) from `m68k_in.c`, then compiles the core,
-//! its disassembler and the Rust bridge with `cc`; then the vendored ymfm with its shim.
+//! the opcode handlers (`m68kops.c`, `m68kops.h`) from `m68k_in.c`, then compiles the core
+//! (from a copy with the BSD address-error trap fixed), its disassembler and the Rust bridge
+//! with `cc`; then the vendored ymfm with its shim.
 
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -29,18 +30,20 @@ fn main() {
     println!("cargo:rerun-if-changed={}", shim.display());
 
     generate_opcode_handlers(&musashi, &out_dir);
+    copy_core_with_bsd_trap_fix(&musashi, &out_dir);
 
     let mut build = cc::Build::new();
     build
         .files([
-            musashi.join("m68kcpu.c"),
+            out_dir.join("m68kcpu.c"),
             musashi.join("m68kdasm.c"),
             musashi.join("softfloat/softfloat.c"),
             out_dir.join("m68kops.c"),
             shim,
         ])
-        .include(&musashi)
+        // OUT_DIR first, so every file takes the fixed m68kcpu.h.
         .include(&out_dir)
+        .include(&musashi)
         .define("M68K_EMULATE_ADDRESS_ERROR", "M68K_OPT_ON")
         // Vendored code stays unmodified, so its warnings are not ours to fix.
         .warnings(false);
@@ -55,6 +58,44 @@ fn main() {
     }
 
     build_ymfm(&manifest_dir);
+}
+
+/// The address-error trap Musashi uses where <setjmp.h> is the BSD one (macOS): after the
+/// exception it lacks the other trap's "no cycles left" return, so a one-cycle step runs a
+/// second instruction, the handler's first.
+const BSD_TRAP: &str = "\t\tif(CPU_STOPPED) \\\n\
+                        \t\t{ \\\n\
+                        \t\t\tif (m68ki_remaining_cycles > 0) \\\n\
+                        \t\t\t\tm68ki_remaining_cycles = 0; \\\n\
+                        \t\t\treturn m68ki_initial_cycles; \\\n\
+                        \t\t} \\\n";
+
+/// The same trap with the check the other one has.
+const BSD_TRAP_FIXED: &str = "\t\tif(CPU_STOPPED) \\\n\
+                              \t\t{ \\\n\
+                              \t\t\tif (m68ki_remaining_cycles > 0) \\\n\
+                              \t\t\t\tm68ki_remaining_cycles = 0; \\\n\
+                              \t\t\treturn m68ki_initial_cycles; \\\n\
+                              \t\t} \\\n\
+                              \t\tif(m68ki_remaining_cycles <= 0) \\\n\
+                              \t\t\treturn m68ki_initial_cycles - m68ki_remaining_cycles; \\\n";
+
+/// Copies m68kcpu.c and m68kcpu.h into `out_dir`, the header with the BSD trap fixed, so the
+/// vendored files stay as upstream has them. The copied m68kcpu.c finds the rest of Musashi
+/// through the include path.
+fn copy_core_with_bsd_trap_fix(musashi: &Path, out_dir: &Path) {
+    let header_path = musashi.join("m68kcpu.h");
+    let header = fs::read_to_string(&header_path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", header_path.display()));
+    assert_eq!(
+        header.matches(BSD_TRAP).count(),
+        1,
+        "{} no longer has the BSD address-error trap this build fixes",
+        header_path.display()
+    );
+    let fixed = header.replacen(BSD_TRAP, BSD_TRAP_FIXED, 1);
+    fs::write(out_dir.join("m68kcpu.h"), fixed).expect("the fixed m68kcpu.h is written");
+    fs::copy(musashi.join("m68kcpu.c"), out_dir.join("m68kcpu.c")).expect("m68kcpu.c is copied");
 }
 
 /// Compiles the vendored ymfm's YM2612 and the C shim as C++14: the OPN translation unit

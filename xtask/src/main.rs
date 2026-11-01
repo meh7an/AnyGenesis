@@ -19,7 +19,8 @@ const USAGE: &str = "usage: cargo xtask <task>\n\ntasks:\n  legal               
                      images and oversized files in the repository\n  fetch-sst [m68000|z80]  \
                      fetch a pinned SingleStepTests suite (default m68000) into testdata/\n  \
                      toolchain <zig archive>  build anygenesis and anygenesis-gui with \
-                     the Zig toolchain and player library into target/bundle/\n  release \
+                     the Zig toolchain (none on macOS) and player library into \
+                     target/bundle/\n  release \
                      [--dirty]       pack that bundle with notices into an installer in \
                      target/dist/\n  patch-index <clone>     write index.toml for the \
                      Marketplace into an AnyGenesis-Patches clone";

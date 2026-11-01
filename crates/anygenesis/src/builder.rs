@@ -102,7 +102,7 @@ pub fn build_program(
     let mut link = toolchain.link(&objects, &exe, &entry.folder.join("link.rsp"), &scratch)?;
     let output = link
         .output()
-        .with_context(|| format!("running {}", toolchain.zig().display()))?;
+        .with_context(|| format!("running {}", toolchain.compiler().display()))?;
     check(&output, "linking the game")?;
     remove_folder(&scratch)?;
     let linked = started.elapsed();
@@ -213,7 +213,7 @@ fn compile_all(toolchain: &Toolchain, jobs: &[Job], scratch: &Path) -> Result<()
                     let result = toolchain
                         .compile(&job.source, &job.object, job.stepped, scratch)
                         .output()
-                        .with_context(|| format!("running {}", toolchain.zig().display()))
+                        .with_context(|| format!("running {}", toolchain.compiler().display()))
                         .and_then(|output| {
                             check(&output, &format!("compiling {}", job.source.display()))
                         });

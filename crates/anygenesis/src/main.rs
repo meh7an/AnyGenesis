@@ -225,11 +225,11 @@ fn cached_program(rom: &Rom, discovery: Discovery, code: &CodePatches) -> Result
         return Ok(program);
     }
     println!(
-        "{} (SHA-1 {}): building in {} with Zig {}",
+        "{} (SHA-1 {}): building in {} with {}",
         rom.title(),
         rom.sha1(),
         entry.folder.display(),
-        toolchain.version()
+        toolchain.compiler_name()
     );
     builder::build_program(rom, &entry, &toolchain, discovery, code)
         .with_context(|| format!("building {} (SHA-1 {})", rom.title(), rom.sha1()))?;
